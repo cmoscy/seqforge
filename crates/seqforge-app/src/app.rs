@@ -67,7 +67,10 @@ impl eframe::App for SeqForgeApp {
                     ui.add_enabled(false, egui::Button::new("Find…"));
                 });
                 ui.menu_button("View", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Reset Layout"));
+                    if ui.button("Reset Layout").clicked() {
+                        self.state.dock_state = AppState::default().dock_state;
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Tools", |ui| {
                     ui.add_enabled(false, egui::Button::new("Restriction Sites…"));
