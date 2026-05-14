@@ -4,8 +4,15 @@ use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
 use seqforge_core::{
-    dispatch, BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse, ViewerState,
+    dispatch, BioOps, CutSite, DispatchError, Document, SearchHit, ViewerRequest, ViewerResponse,
+    ViewerState,
 };
+
+use crate::socket::SocketRequest;
+
+/// Internal pending request: the command plus an optional one-shot channel to
+/// return the dispatch result. `None` for fire-and-forget (menu, terminal).
+type PendingReq = (ViewerRequest, Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>);
 
 use crate::browser::BrowserState;
 use crate::cli_install;
@@ -50,15 +57,15 @@ pub struct AppState {
     #[serde(skip)]
     pub seq_view: SequenceView,
     #[serde(skip)]
-    pub pending_requests: Vec<ViewerRequest>,
+    pub pending_requests: Vec<PendingReq>,
     #[serde(skip)]
     pub open_dialog: Option<FileDialog>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
     #[serde(skip)]
     pub terminal: Option<TerminalPane>,
-    /// Receiver for ViewerRequests arriving via the Unix domain socket.
+    /// Receiver for requests arriving via the Unix domain socket.
     #[serde(skip)]
-    pub socket_rx: Option<mpsc::Receiver<ViewerRequest>>,
+    pub socket_rx: Option<mpsc::Receiver<SocketRequest>>,
     /// Ephemeral status message shown after a CLI install attempt.
     #[serde(skip)]
     pub cli_status: Option<String>,
@@ -132,7 +139,7 @@ impl eframe::App for SeqForgeApp {
             if let Some(picked) = dialog.picked() {
                 self.state
                     .pending_requests
-                    .push(ViewerRequest::Open { path: picked.to_owned() });
+                    .push((ViewerRequest::Open { path: picked.to_owned() }, None));
                 self.state.open_dialog = None;
             } else if matches!(
                 dialog.state(),
@@ -154,7 +161,7 @@ impl eframe::App for SeqForgeApp {
                     }
                     let can_close = self.state.viewer.open_doc.is_some();
                     if ui.add_enabled(can_close, egui::Button::new("Close")).clicked() {
-                        self.state.pending_requests.push(ViewerRequest::Close);
+                        self.state.pending_requests.push((ViewerRequest::Close, None));
                         ui.close_menu();
                     }
                 });
@@ -250,22 +257,28 @@ impl eframe::App for SeqForgeApp {
 
         // ── Drain socket requests ─────────────────────────────────────────────
         if let Some(rx) = &self.state.socket_rx {
-            while let Ok(req) = rx.try_recv() {
-                self.state.pending_requests.push(req);
+            while let Ok((req, resp_tx)) = rx.try_recv() {
+                self.state.pending_requests.push((req, Some(resp_tx)));
             }
         }
 
         // ── Process pending requests ──────────────────────────────────────────
-        let reqs: Vec<ViewerRequest> = self.state.pending_requests.drain(..).collect();
-        for req in reqs {
-            // Reset view state before loading a new document.
+        let reqs: Vec<PendingReq> = self.state.pending_requests.drain(..).collect();
+        for (req, resp_tx) in reqs {
             if matches!(req, ViewerRequest::Open { .. }) {
                 self.state.seq_view.reset();
             }
-            match dispatch(&mut self.state.viewer, &AppBio, req) {
-                Ok(ViewerResponse::Message { text }) => eprintln!("[dispatch] {text}"),
-                Ok(ViewerResponse::Ok) => {}
-                Err(e) => eprintln!("[dispatch error] {e}"),
+            let result = dispatch(&mut self.state.viewer, &AppBio, req);
+            match &resp_tx {
+                Some(_) => {} // result returned to caller via channel below
+                None => {
+                    if let Err(e) = &result {
+                        eprintln!("[dispatch error] {e}");
+                    }
+                }
+            }
+            if let Some(tx) = resp_tx {
+                let _ = tx.send(result);
             }
         }
     }

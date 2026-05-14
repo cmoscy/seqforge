@@ -142,14 +142,19 @@ pub enum ViewerRequest {
     Enzymes { enzymes: Vec<String> },
 }
 
-/// Response returned from `dispatch`.
+/// Response returned from `dispatch`. Each variant carries the data relevant
+/// to that command so callers (CLI, agents) can act on it without parsing text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ViewerResponse {
-    /// Operation succeeded with no notable output.
+    /// Open or Close succeeded.
     Ok,
-    /// Operation succeeded with a human-readable status message.
-    Message { text: String },
+    /// GoTo — 1-based position the viewer navigated to.
+    Navigated { position: usize },
+    /// Find — all matching hits (empty when the pattern was cleared).
+    SearchResults { count: usize, hits: Vec<SearchHit> },
+    /// Enzymes — all cut sites found (empty when the enzyme list was cleared).
+    CutSites { count: usize, sites: Vec<CutSite> },
 }
 
 // ── BioOps trait ─────────────────────────────────────────────────────────────
@@ -169,6 +174,10 @@ pub trait BioOps {
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
+
+fn require_document(state: &ViewerState) -> Result<(), DispatchError> {
+    if state.open_doc.is_none() { Err(DispatchError::NoDocument) } else { Ok(()) }
+}
 
 /// Dispatch a `ViewerRequest` against mutable viewer state, calling into `bio`
 /// for any operation that requires sequence computation.
@@ -191,27 +200,23 @@ pub fn dispatch<B: BioOps>(
             state.open_doc = None;
             state.clear_selection();
             state.scroll_to = None;
-            Ok(ViewerResponse::Message { text: "Document closed.".into() })
+            Ok(ViewerResponse::Ok)
         }
 
         ViewerRequest::GoTo { position } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
+            require_document(state)?;
             let idx = position.saturating_sub(1);
             state.scroll_to = Some(idx);
             state.selection = Some(Selection::cursor(idx));
             state.selected_feature = None;
-            Ok(ViewerResponse::Message { text: format!("Navigated to position {position}.") })
+            Ok(ViewerResponse::Navigated { position })
         }
 
         ViewerRequest::Find { pattern, mismatches } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
+            require_document(state)?;
             if pattern.is_empty() {
                 state.search_hits.clear();
-                return Ok(ViewerResponse::Message { text: "Cleared search results.".into() });
+                return Ok(ViewerResponse::SearchResults { count: 0, hits: vec![] });
             }
             let doc = state.open_doc.as_ref().unwrap();
             let circular = matches!(doc.topology, Topology::Circular);
@@ -220,27 +225,25 @@ pub fn dispatch<B: BioOps>(
             if let Some(first) = hits.first() {
                 state.scroll_to = Some(first.start);
             }
-            state.search_hits = hits;
-            Ok(ViewerResponse::Message { text: format!("Found {count} match(es) for '{pattern}'.") })
+            state.search_hits = hits.clone();
+            Ok(ViewerResponse::SearchResults { count, hits })
         }
 
         ViewerRequest::Enzymes { enzymes } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
+            require_document(state)?;
             if enzymes.is_empty() {
                 state.cut_sites.clear();
                 state.active_enzymes.clear();
-                return Ok(ViewerResponse::Message { text: "Cleared restriction sites.".into() });
+                return Ok(ViewerResponse::CutSites { count: 0, sites: vec![] });
             }
             let doc = state.open_doc.as_ref().unwrap();
             let circular = matches!(doc.topology, Topology::Circular);
             let enzyme_refs: Vec<&str> = enzymes.iter().map(String::as_str).collect();
             let sites = bio.find_cut_sites(&doc.sequence, &enzyme_refs, circular);
             let count = sites.len();
-            state.cut_sites = sites;
+            state.cut_sites = sites.clone();
             state.active_enzymes = enzymes;
-            Ok(ViewerResponse::Message { text: format!("Found {count} restriction site(s).") })
+            Ok(ViewerResponse::CutSites { count, sites })
         }
     }
 }
@@ -404,7 +407,7 @@ mod tests {
         let resp = dispatch(&mut state, &FakeBio::new(), ViewerRequest::Close).unwrap();
         assert!(state.open_doc.is_none());
         assert!(state.selection.is_none());
-        assert!(matches!(resp, ViewerResponse::Message { .. }));
+        assert!(matches!(resp, ViewerResponse::Ok));
     }
 
     #[test]
@@ -414,7 +417,7 @@ mod tests {
             dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 3 }).unwrap();
         assert_eq!(state.scroll_to, Some(2));
         assert!(matches!(state.selection, Some(sel) if sel.anchor == 2 && sel.is_cursor()));
-        assert!(matches!(resp, ViewerResponse::Message { .. }));
+        assert!(matches!(resp, ViewerResponse::Navigated { position: 3 }));
     }
 
     #[test]
@@ -476,7 +479,31 @@ mod tests {
             dispatch(&mut state, &FakeBio::new(), ViewerRequest::Enzymes { enzymes: vec![] })
                 .unwrap();
         assert!(state.cut_sites.is_empty());
-        assert!(matches!(resp, ViewerResponse::Message { .. }));
+        assert!(matches!(resp, ViewerResponse::CutSites { count: 0, .. }));
+    }
+
+    #[test]
+    fn dispatch_find_returns_search_results() {
+        let mut state = fixture_state_with_doc();
+        let bio = FakeBio::new().with_hit(2, 6);
+        let resp =
+            dispatch(&mut state, &bio, ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 0 })
+                .unwrap();
+        assert!(matches!(resp, ViewerResponse::SearchResults { count: 1, .. }));
+        if let ViewerResponse::SearchResults { hits, .. } = resp {
+            assert_eq!(hits[0].start, 2);
+        }
+    }
+
+    #[test]
+    fn dispatch_find_empty_pattern_clears() {
+        let mut state = fixture_state_with_doc();
+        state.search_hits.push(SearchHit { start: 0, end: 4, strand: crate::Strand::Forward });
+        let resp =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::Find { pattern: "".into(), mismatches: 0 })
+                .unwrap();
+        assert!(state.search_hits.is_empty());
+        assert!(matches!(resp, ViewerResponse::SearchResults { count: 0, .. }));
     }
 
     // ── Terminal CLI parsing ──────────────────────────────────────────────────

@@ -2,10 +2,17 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use seqforge_core::ViewerRequest;
+use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
+
+// ── Channel type ──────────────────────────────────────────────────────────────
+
+/// What the socket thread sends to the app's drain loop: the request plus a
+/// one-shot sender the app uses to return the dispatch result.
+pub type SocketRequest = (ViewerRequest, mpsc::SyncSender<Result<ViewerResponse, DispatchError>>);
 
 // ── JSON-RPC 2.0 types ────────────────────────────────────────────────────────
 
@@ -35,13 +42,13 @@ struct JsonRpcError {
     message: String,
 }
 
-// JSON-RPC 2.0 standard error codes + application range
 const ERR_PARSE: i32 = -32700;
 const ERR_INVALID_REQUEST: i32 = -32600;
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
 const ERR_INVALID_PARAMS: i32 = -32602;
-#[allow(dead_code)] // reserved for dispatch errors surfaced in Stage 5+
 const ERR_DISPATCH: i32 = -32000;
+
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn ok_response(id: Value, result: Value) -> JsonRpcResponse {
     JsonRpcResponse { jsonrpc: "2.0", id, result: Some(result), error: None }
@@ -59,18 +66,15 @@ fn err_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResp
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Open a Unix domain socket, spawn a listener thread, and return the socket
-/// path + a receiver for incoming `ViewerRequest` values.
-///
-/// The socket path is `/tmp/seqforge-{pid}.sock`. Any stale file from a prior
-/// crash is removed before binding.
+/// path + a receiver for incoming `SocketRequest` values.
 pub fn start_socket_listener(
     ctx: egui::Context,
-) -> anyhow::Result<(PathBuf, mpsc::Receiver<ViewerRequest>)> {
+) -> anyhow::Result<(PathBuf, mpsc::Receiver<SocketRequest>)> {
     let path = socket_path();
-    let _ = std::fs::remove_file(&path); // remove stale socket from prior crash
+    let _ = std::fs::remove_file(&path);
 
     let listener = UnixListener::bind(&path)?;
-    let (tx, rx) = mpsc::channel::<ViewerRequest>();
+    let (tx, rx) = mpsc::channel::<SocketRequest>();
 
     let path_clone = path.clone();
     std::thread::Builder::new()
@@ -88,7 +92,7 @@ pub fn socket_path() -> PathBuf {
 
 fn accept_loop(
     listener: UnixListener,
-    tx: mpsc::Sender<ViewerRequest>,
+    tx: mpsc::Sender<SocketRequest>,
     ctx: egui::Context,
     path: PathBuf,
 ) {
@@ -106,7 +110,7 @@ fn accept_loop(
 
 fn handle_connection(
     mut stream: std::os::unix::net::UnixStream,
-    tx: mpsc::Sender<ViewerRequest>,
+    tx: mpsc::Sender<SocketRequest>,
     ctx: egui::Context,
 ) {
     let reader = BufReader::new(match stream.try_clone() {
@@ -119,30 +123,26 @@ fn handle_connection(
             Ok(l) => l,
             Err(_) => break,
         };
-
         let resp = handle_rpc_line(&line, &tx, &ctx);
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = stream.write_all(format!("{json}\n").as_bytes());
     }
 }
 
-/// Parse one newline-delimited JSON-RPC request, enqueue it, and return the response envelope.
+/// Parse one newline-delimited JSON-RPC request, enqueue it with a one-shot
+/// response channel, block until the app dispatches it, then return the result.
 fn handle_rpc_line(
     line: &str,
-    tx: &mpsc::Sender<ViewerRequest>,
+    tx: &mpsc::Sender<SocketRequest>,
     ctx: &egui::Context,
 ) -> JsonRpcResponse {
-    // Parse outer JSON-RPC envelope.
     let rpc: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
-        Err(e) => {
-            return err_response(Value::Null, ERR_PARSE, format!("parse error: {e}"));
-        }
+        Err(e) => return err_response(Value::Null, ERR_PARSE, format!("parse error: {e}")),
     };
 
     let id = rpc.id.clone();
 
-    // Merge method + params into a tagged-enum object that ViewerRequest deserialises from.
     let mut obj = match rpc.params {
         Value::Object(m) => m,
         Value::Null => serde_json::Map::new(),
@@ -154,7 +154,6 @@ fn handle_rpc_line(
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
-            // Distinguish "unknown method" from malformed params.
             if msg.contains("unknown variant") {
                 return err_response(id, ERR_METHOD_NOT_FOUND, "method not found");
             }
@@ -162,14 +161,24 @@ fn handle_rpc_line(
         }
     };
 
-    if tx.send(req).is_err() {
+    // Create a one-shot channel for the dispatch result.
+    let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+    if tx.send((req, resp_tx)).is_err() {
         return err_response(id, ERR_INVALID_REQUEST, "viewer no longer running");
     }
     ctx.request_repaint();
 
-    // Acknowledge immediately; the actual dispatch result is async (next frame).
-    // Stage 5+ can introduce a response channel for synchronous results.
-    ok_response(id, serde_json::json!({"kind": "ok"}))
+    // Block until the app's drain loop dispatches the request and sends back.
+    match resp_rx.recv_timeout(DISPATCH_TIMEOUT) {
+        Ok(Ok(resp)) => {
+            match serde_json::to_value(&resp) {
+                Ok(v) => ok_response(id, v),
+                Err(e) => err_response(id, ERR_DISPATCH, format!("serialisation error: {e}")),
+            }
+        }
+        Ok(Err(e)) => err_response(id, ERR_DISPATCH, e.to_string()),
+        Err(_) => err_response(id, ERR_DISPATCH, "viewer did not respond within timeout"),
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -178,16 +187,33 @@ fn handle_rpc_line(
 mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc;
 
-    use seqforge_core::ViewerRequest;
+    use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
 
-    /// JSON-RPC round-trip over a connected UnixStream pair.
+    use super::SocketRequest;
+
+    fn fake_app(rx: mpsc::Receiver<SocketRequest>) {
+        std::thread::spawn(move || {
+            while let Ok((req, resp_tx)) = rx.recv() {
+                let resp: Result<ViewerResponse, DispatchError> = match req {
+                    ViewerRequest::GoTo { position } => {
+                        Ok(ViewerResponse::Navigated { position })
+                    }
+                    ViewerRequest::Close => Ok(ViewerResponse::Ok),
+                    _ => Ok(ViewerResponse::Ok),
+                };
+                let _ = resp_tx.send(resp);
+            }
+        });
+    }
+
     #[test]
     fn jsonrpc_goto_round_trip() {
-        let (tx, rx) = std::sync::mpsc::channel::<ViewerRequest>();
+        let (tx, rx) = mpsc::channel::<SocketRequest>();
+        fake_app(rx);
 
         let (mut client, server) = UnixStream::pair().unwrap();
-
         std::thread::spawn(move || {
             let reader = BufReader::new(server.try_clone().unwrap());
             let mut server = server;
@@ -207,22 +233,20 @@ mod tests {
 
         assert_eq!(resp["jsonrpc"], "2.0");
         assert_eq!(resp["id"], 1);
-        assert_eq!(resp["result"]["kind"], "ok");
-
-        let received = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        assert!(matches!(received, ViewerRequest::GoTo { position: 42 }));
+        assert_eq!(resp["result"]["kind"], "navigated");
+        assert_eq!(resp["result"]["position"], 42);
     }
 
     #[test]
     fn jsonrpc_parse_error_returns_minus_32700() {
-        let (tx, _rx) = std::sync::mpsc::channel::<ViewerRequest>();
+        let (tx, _rx) = mpsc::channel::<SocketRequest>();
         let resp = super::handle_rpc_line("not json", &tx, &egui::Context::default());
         assert_eq!(resp.error.as_ref().unwrap().code, -32700);
     }
 
     #[test]
     fn jsonrpc_unknown_method_returns_minus_32601() {
-        let (tx, _rx) = std::sync::mpsc::channel::<ViewerRequest>();
+        let (tx, _rx) = mpsc::channel::<SocketRequest>();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"unknown","params":{}}"#;
         let resp = super::handle_rpc_line(line, &tx, &egui::Context::default());
         assert_eq!(resp.error.as_ref().unwrap().code, -32601);
@@ -230,10 +254,26 @@ mod tests {
 
     #[test]
     fn jsonrpc_id_preserved_in_response() {
-        let (tx, _rx) = std::sync::mpsc::channel::<ViewerRequest>();
+        let (tx, rx) = mpsc::channel::<SocketRequest>();
+        fake_app(rx);
         let line = r#"{"jsonrpc":"2.0","id":"abc","method":"close","params":{}}"#;
         let resp = super::handle_rpc_line(line, &tx, &egui::Context::default());
         assert_eq!(resp.id, serde_json::json!("abc"));
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn jsonrpc_dispatch_error_returns_minus_32000() {
+        let (tx, rx) = mpsc::channel::<SocketRequest>();
+        // App always returns NoDocument error
+        std::thread::spawn(move || {
+            while let Ok((_, resp_tx)) = rx.recv() {
+                let _ = resp_tx.send(Err(DispatchError::NoDocument));
+            }
+        });
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":1}}"#;
+        let resp = super::handle_rpc_line(line, &tx, &egui::Context::default());
+        assert_eq!(resp.error.as_ref().unwrap().code, -32000);
     }
 
     #[test]

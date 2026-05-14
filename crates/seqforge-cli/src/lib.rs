@@ -10,10 +10,15 @@ use seqforge_core::ViewerRequest;
 pub fn run_info(path: &Path) -> anyhow::Result<()> {
     let doc = seqforge_bio::load(path)
         .with_context(|| format!("Failed to load {}", path.display()))?;
-    println!("Name:     {}", doc.name);
-    println!("Length:   {} bp", doc.len());
-    println!("Topology: {:?}", doc.topology);
-    println!("Features: {}", doc.features.len());
+    let info = serde_json::json!({
+        "kind": "document_info",
+        "name": doc.name,
+        "length": doc.len(),
+        "topology": format!("{:?}", doc.topology).to_lowercase(),
+        "features": doc.features.len(),
+        "path": path,
+    });
+    println!("{}", serde_json::to_string_pretty(&info)?);
     Ok(())
 }
 

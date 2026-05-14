@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
-use seqforge_core::{ViewerRequest, ViewerState};
+use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse, ViewerState};
+use std::sync::mpsc;
 
 use crate::browser::BrowserState;
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+
+type PendingReq = (ViewerRequest, Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
@@ -16,7 +19,7 @@ pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
     pub viewer: &'a mut ViewerState,
     pub seq_view: &'a mut SequenceView,
-    pub pending_requests: &'a mut Vec<ViewerRequest>,
+    pub pending_requests: &'a mut Vec<PendingReq>,
     pub terminal: &'a mut Option<TerminalPane>,
 }
 
@@ -41,7 +44,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         match tab {
             Tab::FileBrowser => {
                 if let Some(path) = self.browser.show(ui) {
-                    self.pending_requests.push(ViewerRequest::Open { path });
+                    self.pending_requests.push((ViewerRequest::Open { path }, None));
                 }
             }
             Tab::Viewer => {
@@ -50,7 +53,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
                     if let Some(req) = term.show(ui) {
-                        self.pending_requests.push(req);
+                        self.pending_requests.push((req, None));
                     }
                 }
                 None => {
