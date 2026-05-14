@@ -1,0 +1,11 @@
+[package]
+name = "seqforge-bio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+seqforge-core = { path = "../seqforge-core" }
+thiserror = { workspace = true }
+gb-io = { workspace = true }
+na_seq = { workspace = true }
+bio = { workspace = true }

@@ -1,0 +1,34 @@
+LOCUS       MULTI_FEAT               300 bp    DNA     linear   SYN 01-JAN-2025
+DEFINITION  Multi-feature linear test sequence.
+ACCESSION   TEST002
+VERSION     TEST002.1
+KEYWORDS    .
+SOURCE      synthetic construct
+  ORGANISM  synthetic construct
+FEATURES             Location/Qualifiers
+     source          1..300
+                     /organism="synthetic construct"
+                     /mol_type="other DNA"
+     promoter        1..30
+                     /label="test_promoter"
+     gene            31..120
+                     /gene="gene_a"
+                     /label="gene_a"
+     CDS             31..120
+                     /label="CDS_a"
+                     /product="Protein A"
+     gene            complement(150..240)
+                     /gene="gene_b"
+                     /label="gene_b"
+     CDS             complement(150..240)
+                     /label="CDS_b"
+                     /product="Protein B"
+     terminator      260..300
+                     /label="test_terminator"
+ORIGIN
+        1 atgctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+       61 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+      121 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+      181 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+      241 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+//

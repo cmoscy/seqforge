@@ -1,0 +1,419 @@
+use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use serde::{Deserialize, Serialize};
+use seqforge_bio::complement;
+use seqforge_core::{Document, Feature, FeatureKind};
+
+const FONT_SIZE: f32 = 13.0;
+const ANNOT_ROW_HEIGHT: f32 = 16.0; // height per stacked annotation row
+const RULER_HEIGHT: f32 = 14.0;
+const STRAND_HEIGHT: f32 = 17.0;
+const BLOCK_GAP: f32 = 14.0;
+const LEFT_MARGIN: f32 = 30.0;
+const RIGHT_MARGIN: f32 = 20.0;
+const SELECTION_COLOR: Color32 = Color32::from_rgb(173, 214, 255);
+
+// ── Stacking ─────────────────────────────────────────────────────────────────
+
+/// Assign features to non-overlapping rows (port of seqviz `stackElements`).
+/// Sorts by start (then end), then greedily packs each feature into the first
+/// row whose last element ends at or before the current feature's start.
+/// Returns `rows[row_idx] = [feat_idx, …]`.
+fn stack_features(features: &[Feature]) -> Vec<Vec<usize>> {
+    if features.is_empty() {
+        return vec![];
+    }
+    let mut order: Vec<usize> = (0..features.len()).collect();
+    order.sort_by(|&a, &b| {
+        features[a]
+            .range
+            .start
+            .cmp(&features[b].range.start)
+            .then(features[a].range.end.cmp(&features[b].range.end))
+    });
+
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut row_ends: Vec<usize> = Vec::new();
+
+    for feat_idx in order {
+        let start = features[feat_idx].range.start;
+        let end = features[feat_idx].range.end;
+        match row_ends.iter().position(|&e| e <= start) {
+            Some(r) => {
+                rows[r].push(feat_idx);
+                row_ends[r] = end;
+            }
+            None => {
+                rows.push(vec![feat_idx]);
+                row_ends.push(end);
+            }
+        }
+    }
+    rows
+}
+
+// ── Colors ────────────────────────────────────────────────────────────────────
+
+fn feature_color(kind: FeatureKind) -> Color32 {
+    match kind {
+        FeatureKind::Gene => Color32::from_rgb(100, 149, 237),
+        FeatureKind::Cds => Color32::from_rgb(72, 201, 176),
+        FeatureKind::Promoter => Color32::from_rgb(241, 196, 15),
+        FeatureKind::Terminator => Color32::from_rgb(231, 76, 60),
+        FeatureKind::Rep => Color32::from_rgb(155, 89, 182),
+        FeatureKind::Source => Color32::from_rgb(149, 165, 166),
+        FeatureKind::Misc | FeatureKind::Other => Color32::from_rgb(189, 195, 199),
+    }
+}
+
+fn base_color(base: u8) -> Color32 {
+    match base.to_ascii_uppercase() {
+        b'A' => Color32::from_rgb(0, 150, 64),
+        b'T' => Color32::from_rgb(200, 30, 60),
+        b'G' => Color32::from_rgb(220, 120, 0),
+        b'C' => Color32::from_rgb(50, 100, 220),
+        _ => Color32::DARK_GRAY,
+    }
+}
+
+// ── Geometry helper ───────────────────────────────────────────────────────────
+
+/// Clip a feature to the visible slice of a block and return its bar rect.
+/// Returns `None` if the feature doesn't overlap this block at all.
+fn annot_bar_rect(
+    feat: &Feature,
+    block_start: usize,
+    block_end: usize,
+    bar_row_y: f32, // top of the feature's stacked row
+    seq_x0: f32,
+    char_width: f32,
+) -> Option<Rect> {
+    if feat.range.end <= block_start || feat.range.start >= block_end {
+        return None;
+    }
+    let col_s = feat.range.start.max(block_start) - block_start;
+    let col_e = feat.range.end.min(block_end) - block_start;
+    Some(Rect::from_min_size(
+        Pos2::new(seq_x0 + col_s as f32 * char_width, bar_row_y + 1.0),
+        Vec2::new(
+            (col_e - col_s) as f32 * char_width,
+            ANNOT_ROW_HEIGHT - 2.0,
+        ),
+    ))
+}
+
+// ── Widget state ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct SequenceView {
+    /// Currently selected sequence range [start, end) in 0-based coordinates.
+    pub selection: Option<(usize, usize)>,
+    /// Index into `doc.features` of the feature that owns the current selection.
+    /// `None` when the selection comes from a manual strand drag.
+    #[serde(skip)]
+    pub selected_feature: Option<usize>,
+    #[serde(skip)]
+    drag_start: Option<usize>,
+}
+
+impl SequenceView {
+    /// Call this when a new document is loaded so stale feature indices are cleared.
+    pub fn reset(&mut self) {
+        self.selection = None;
+        self.selected_feature = None;
+        self.drag_start = None;
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document) {
+        let seq = &doc.sequence;
+        let seq_len = seq.len();
+
+        if seq_len == 0 {
+            ui.centered_and_justified(|ui| {
+                ui.label("Empty sequence.");
+            });
+            return;
+        }
+
+        let comp = complement(seq);
+        let font_id = FontId::monospace(FONT_SIZE);
+        let ruler_font = FontId::proportional(FONT_SIZE - 2.0);
+        let label_font = FontId::proportional(FONT_SIZE - 2.0);
+
+        // Measure char_width from an actual galley so feature bar positions
+        // use the same per-character advance that LayoutJob renders, not the
+        // single-glyph metric which can differ due to subpixel rounding.
+        let (char_width, char_height) = ui.fonts(|f| {
+            let probe = f.layout_no_wrap("A".repeat(64), font_id.clone(), Color32::BLACK);
+            (probe.rect.width() / 64.0, f.row_height(&font_id))
+        });
+
+        // Fit the line width to the available pane width.
+        let avail = (ui.available_width() - LEFT_MARGIN - RIGHT_MARGIN).max(char_width);
+        let line_width = ((avail / char_width) as usize).max(10);
+
+        // Compute stacked annotation rows (greedy interval packing).
+        let stacked_rows = stack_features(&doc.features);
+        let n_annot_rows = stacked_rows.len();
+        let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
+
+        // Reverse map: feat_idx → stacked row index.
+        let mut feat_row = vec![0usize; doc.features.len()];
+        for (row_idx, row) in stacked_rows.iter().enumerate() {
+            for &feat_idx in row {
+                feat_row[feat_idx] = row_idx;
+            }
+        }
+
+        let block_h = annot_section_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + BLOCK_GAP;
+        let n_blocks = seq_len.div_ceil(line_width);
+        let total_height = n_blocks as f32 * block_h;
+        let content_width = LEFT_MARGIN + line_width as f32 * char_width + RIGHT_MARGIN;
+        let alloc_width = content_width.max(ui.available_width());
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let (response, painter) = ui.allocate_painter(
+                    Vec2::new(alloc_width, total_height),
+                    Sense::click_and_drag(),
+                );
+                let rect = response.rect;
+                let clip = painter.clip_rect();
+                let text_color = ui.visuals().text_color();
+                let seq_x0 = rect.min.x + LEFT_MARGIN;
+
+                // ── Pass 1: collect annotation hit-rects for visible blocks ──
+
+                let mut annot_hits: Vec<(Rect, usize)> = Vec::new();
+                for block_idx in 0..n_blocks {
+                    let block_y = rect.min.y + block_idx as f32 * block_h;
+                    if block_y + block_h < clip.min.y {
+                        continue;
+                    }
+                    if block_y > clip.max.y {
+                        break;
+                    }
+                    let block_start = block_idx * line_width;
+                    let block_end = (block_start + line_width).min(seq_len);
+                    let annot_base_y =
+                        block_y + RULER_HEIGHT + STRAND_HEIGHT * 2.0;
+                    for (feat_idx, feat) in doc.features.iter().enumerate() {
+                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
+                        if let Some(r) =
+                            annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
+                        {
+                            annot_hits.push((r, feat_idx));
+                        }
+                    }
+                }
+
+                // ── Interactions ──────────────────────────────────────────────
+
+                let ptr = response.interact_pointer_pos();
+
+                if response.clicked() {
+                    if let Some(pos) = ptr {
+                        if let Some(&(_, feat_idx)) =
+                            annot_hits.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let feat = &doc.features[feat_idx];
+                            self.selection = Some((feat.range.start, feat.range.end));
+                            self.selected_feature = Some(feat_idx);
+                        } else {
+                            self.selection = None;
+                            self.selected_feature = None;
+                        }
+                    }
+                }
+
+                let ptr_seq = ptr.and_then(|p| {
+                    screen_to_seq(p, rect, char_width, line_width, seq_len, block_h)
+                });
+
+                if response.drag_started() {
+                    let on_annot = ptr.is_some_and(|p| annot_hits.iter().any(|(r, _)| r.contains(p)));
+                    if !on_annot {
+                        self.drag_start = ptr_seq;
+                        self.selected_feature = None;
+                        self.selection = None;
+                    }
+                }
+                if response.dragged() {
+                    if let (Some(start), Some(cur)) = (self.drag_start, ptr_seq) {
+                        self.selection = Some((start.min(cur), start.max(cur) + 1));
+                    }
+                }
+                if response.drag_stopped() {
+                    if let (Some(start), Some(cur)) = (self.drag_start, ptr_seq) {
+                        let (s, e) = (start.min(cur), start.max(cur) + 1);
+                        self.selection = if s + 1 >= e { None } else { Some((s, e)) };
+                    }
+                    self.drag_start = None;
+                }
+
+                // ── Pass 2: render all visible blocks ─────────────────────────
+
+                for block_idx in 0..n_blocks {
+                    let block_y = rect.min.y + block_idx as f32 * block_h;
+                    if block_y + block_h < clip.min.y {
+                        continue;
+                    }
+                    if block_y > clip.max.y {
+                        break;
+                    }
+
+                    let block_start = block_idx * line_width;
+                    let block_end = (block_start + line_width).min(seq_len);
+                    let block_len = block_end - block_start;
+
+                    // ── Ruler ─────────────────────────────────────────────────
+                    let ruler_y = block_y;
+                    for col in 0..block_len {
+                        let abs = block_start + col;
+                        if abs == 0 || (abs + 1) % 10 == 0 {
+                            painter.text(
+                                Pos2::new(seq_x0 + col as f32 * char_width, ruler_y),
+                                Align2::LEFT_TOP,
+                                format!("{}", abs + 1),
+                                ruler_font.clone(),
+                                text_color.gamma_multiply(0.55),
+                            );
+                        }
+                    }
+
+                    let top_y = ruler_y + RULER_HEIGHT;
+                    let bot_y = top_y + STRAND_HEIGHT;
+                    let annot_base_y = bot_y + STRAND_HEIGHT;
+
+                    // ── Selection highlight (behind text) ─────────────────────
+                    if let Some((sel_s, sel_e)) = self.selection {
+                        let vis_s = sel_s.max(block_start);
+                        let vis_e = sel_e.min(block_end);
+                        if vis_s < vis_e {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                                0.0,
+                                SELECTION_COLOR,
+                            );
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                                0.0,
+                                SELECTION_COLOR.gamma_multiply(0.7),
+                            );
+                        }
+                    }
+
+                    // ── 5'/3' labels (first block only) ───────────────────────
+                    if block_idx == 0 {
+                        painter.text(
+                            Pos2::new(rect.min.x, top_y),
+                            Align2::LEFT_TOP,
+                            "5'",
+                            font_id.clone(),
+                            text_color.gamma_multiply(0.45),
+                        );
+                        painter.text(
+                            Pos2::new(rect.min.x, bot_y),
+                            Align2::LEFT_TOP,
+                            "3'",
+                            font_id.clone(),
+                            text_color.gamma_multiply(0.45),
+                        );
+                    }
+
+                    // ── Strands ───────────────────────────────────────────────
+                    let top_galley =
+                        build_strand_galley(ui, &seq[block_start..block_end], &font_id, 1.0);
+                    painter.galley(Pos2::new(seq_x0, top_y), top_galley, text_color);
+
+                    let bot_galley =
+                        build_strand_galley(ui, &comp[block_start..block_end], &font_id, 0.65);
+                    painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
+
+                    // ── Annotation bars (below strands) ───────────────────────
+                    for (feat_idx, feat) in doc.features.iter().enumerate() {
+                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
+                        if let Some(bar) =
+                            annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
+                        {
+                            let is_selected = self.selected_feature == Some(feat_idx);
+                            painter.rect_filled(bar, 2.0, feature_color(feat.kind));
+                            if is_selected {
+                                painter.rect_stroke(
+                                    bar,
+                                    2.0,
+                                    Stroke::new(1.5, Color32::WHITE),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            if bar.width() > 24.0 && !feat.label.is_empty() {
+                                painter.text(
+                                    bar.center(),
+                                    Align2::CENTER_CENTER,
+                                    &feat.label,
+                                    label_font.clone(),
+                                    Color32::WHITE,
+                                );
+                            }
+                        }
+                    }
+
+                    // ── Block separator ───────────────────────────────────────
+                    if block_idx + 1 < n_blocks {
+                        painter.hline(
+                            rect.min.x..=rect.min.x + content_width,
+                            block_y + block_h - BLOCK_GAP * 0.5,
+                            Stroke::new(0.5, text_color.gamma_multiply(0.08)),
+                        );
+                    }
+                }
+            });
+    }
+}
+
+// ── Free helpers ──────────────────────────────────────────────────────────────
+
+fn screen_to_seq(
+    pos: Pos2,
+    rect: Rect,
+    char_width: f32,
+    line_width: usize,
+    seq_len: usize,
+    block_h: f32,
+) -> Option<usize> {
+    let rel_x = pos.x - rect.min.x - LEFT_MARGIN;
+    let rel_y = pos.y - rect.min.y;
+    if rel_x < 0.0 || rel_y < 0.0 {
+        return None;
+    }
+    let block_idx = (rel_y / block_h) as usize;
+    let col = (rel_x / char_width) as usize;
+    if col >= line_width {
+        return None;
+    }
+    let p = block_idx * line_width + col;
+    if p >= seq_len { None } else { Some(p) }
+}
+
+fn build_strand_galley(
+    ui: &egui::Ui,
+    bases: &[u8],
+    font_id: &FontId,
+    alpha: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    for &b in bases {
+        job.append(
+            &(b.to_ascii_uppercase() as char).to_string(),
+            0.0,
+            egui::text::TextFormat {
+                font_id: font_id.clone(),
+                color: base_color(b).gamma_multiply(alpha),
+                ..Default::default()
+            },
+        );
+    }
+    ui.fonts(|f| f.layout_job(job))
+}

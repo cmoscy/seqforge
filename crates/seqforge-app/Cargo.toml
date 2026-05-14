@@ -1,0 +1,17 @@
+[package]
+name = "seqforge-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+seqforge-core = { path = "../seqforge-core" }
+seqforge-bio = { path = "../seqforge-bio" }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_dock = { workspace = true }
+egui_extras = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = "2"
+egui-file-dialog = "0.9"

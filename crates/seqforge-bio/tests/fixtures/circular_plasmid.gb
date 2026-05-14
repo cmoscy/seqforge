@@ -1,0 +1,24 @@
+LOCUS       TEST_PLASMID             200 bp    DNA     circular SYN 01-JAN-2025
+DEFINITION  Minimal circular plasmid for testing.
+ACCESSION   TEST001
+VERSION     TEST001.1
+KEYWORDS    .
+SOURCE      synthetic construct
+  ORGANISM  synthetic construct
+FEATURES             Location/Qualifiers
+     source          1..200
+                     /organism="synthetic construct"
+                     /mol_type="other DNA"
+     gene            10..90
+                     /gene="test_gene"
+                     /label="test_gene"
+     CDS             complement(100..180)
+                     /gene="test_cds"
+                     /label="test_cds"
+                     /product="Test protein"
+ORIGIN
+        1 atgctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+       61 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+      121 tagctagcta gctagctagc tagctagcta gctagctagc tagctagcta gctagctagc
+      181 tagctagcta gctagctagc
+//
