@@ -13,24 +13,24 @@ A Rust-based sequence viewer for molecular cloning workflows, with an embedded t
 ```bash
 git clone <repo-url>
 cd seqforge
-```
-
-### GUI app
-
-```bash
 cargo build --release
 ./target/release/seqforge-app
 ```
 
-> **Note:** use `cargo build` (not `cargo build -p seqforge-app`) so the `seqforge` CLI binary is built alongside the app. The embedded terminal automatically adds it to `PATH`.
+> **Note:** use `cargo build` (not `cargo build -p seqforge-app`) so the `seqforge` CLI binary is built alongside the app. The embedded terminal automatically adds it to `PATH` — no install step needed.
 
-### CLI only
+### Making `seqforge` available system-wide (optional)
 
+By default the CLI is scoped to the SeqForge embedded terminal. To use it from any terminal window, install it via the GUI or a single flag:
+
+**From the GUI:** `Tools → Install 'seqforge' CLI to PATH`
+
+**Headless / scripted:**
 ```bash
-cargo install --path crates/seqforge-cli
+./target/release/seqforge-app --install-cli
 ```
 
-This puts `seqforge` in `~/.cargo/bin/`, which is on `PATH` if Rust was installed via rustup.
+Both methods symlink the bundled binary into `/usr/local/bin` (if writable) or `~/.local/bin`. After updating the app, re-run either to refresh the symlink.
 
 ---
 
@@ -77,20 +77,6 @@ seqforge enzymes EcoRI BamHI
 ```
 
 When the GUI is running, it sets `SEQFORGE_SOCKET` in the embedded terminal's environment. Any `seqforge` viewer command executed there — or in any shell that has `SEQFORGE_SOCKET` set — routes to the live viewer. If the variable is absent, viewer commands exit with a clear error.
-
-### Updating the CLI inside the app
-
-If you change CLI code and want the embedded terminal to pick up the new binary without restarting the app:
-
-```bash
-# In a separate terminal (not the embedded one):
-cargo build -p seqforge-cli
-
-# The new binary is now at target/debug/seqforge.
-# Restart the SeqForge app to pick it up (the PATH injection happens at startup).
-```
-
-For a release build: `cargo build --release -p seqforge-cli`, then restart the app pointing at `target/release/`.
 
 ---
 

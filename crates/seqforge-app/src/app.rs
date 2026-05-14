@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use seqforge_core::{dispatch_viewer, SideEffect, ViewerCommand, ViewerState};
 
 use crate::browser::BrowserState;
+use crate::cli_install;
 use crate::socket;
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
@@ -32,6 +33,9 @@ pub struct AppState {
     /// Receiver for ViewerCommands arriving via the Unix domain socket.
     #[serde(skip)]
     pub socket_rx: Option<mpsc::Receiver<ViewerCommand>>,
+    /// Ephemeral status message shown after a CLI install attempt.
+    #[serde(skip)]
+    pub cli_status: Option<String>,
 }
 
 impl Default for AppState {
@@ -51,6 +55,7 @@ impl Default for AppState {
             open_dialog: None,
             terminal: None,
             socket_rx: None,
+            cli_status: None,
         }
     }
 }
@@ -138,6 +143,23 @@ impl eframe::App for SeqForgeApp {
                 });
                 ui.menu_button("Tools", |ui| {
                     ui.add_enabled(false, egui::Button::new("Restriction Sites…"));
+                    ui.separator();
+                    let label = if cli_install::is_installed() {
+                        "Reinstall 'seqforge' CLI to PATH"
+                    } else {
+                        "Install 'seqforge' CLI to PATH"
+                    };
+                    if ui.button(label).clicked() {
+                        self.state.cli_status = Some(match cli_install::install_cli_to_path() {
+                            Ok(r) => format!(
+                                "✓ seqforge installed to {}{}",
+                                r.target.display(),
+                                if r.was_updated { " (updated)" } else { "" }
+                            ),
+                            Err(e) => format!("✗ Install failed: {e}"),
+                        });
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Navigate", |ui| {
                     ui.add_enabled(false, egui::Button::new("Go to Position…"));
@@ -149,6 +171,26 @@ impl eframe::App for SeqForgeApp {
                 });
             });
         });
+
+        // ── CLI install status window ─────────────────────────────────────────
+        if let Some(msg) = &self.state.cli_status.clone() {
+            let mut open = true;
+            egui::Window::new("CLI Install")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(msg);
+                    ui.add_space(4.0);
+                    if ui.button("OK").clicked() {
+                        self.state.cli_status = None;
+                    }
+                });
+            if !open {
+                self.state.cli_status = None;
+            }
+        }
 
         // ── Dock area ─────────────────────────────────────────────────────────
         // Destructure all AppState fields at once to satisfy the borrow checker
