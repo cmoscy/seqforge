@@ -1,7 +1,5 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
-use seqforge_core::Document;
+use seqforge_core::{ViewerCommand, ViewerState};
 
 use crate::browser::BrowserState;
 use crate::viewer::SequenceView;
@@ -15,9 +13,9 @@ pub enum Tab {
 
 pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
-    pub open_doc: Option<&'a Document>,
-    pub viewer: &'a mut SequenceView,
-    pub pending_open: &'a mut Option<PathBuf>,
+    pub viewer: &'a mut ViewerState,
+    pub seq_view: &'a mut SequenceView,
+    pub pending_commands: &'a mut Vec<ViewerCommand>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -27,7 +25,9 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         match tab {
             Tab::FileBrowser => "Files".into(),
             Tab::Viewer => self
+                .viewer
                 .open_doc
+                .as_ref()
                 .map(|d| format!("Viewer — {}", d.name))
                 .unwrap_or_else(|| "Sequence Viewer".to_owned())
                 .into(),
@@ -39,21 +39,12 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         match tab {
             Tab::FileBrowser => {
                 if let Some(path) = self.browser.show(ui) {
-                    *self.pending_open = Some(path);
+                    self.pending_commands.push(ViewerCommand::Open { path });
                 }
             }
-            Tab::Viewer => match self.open_doc {
-                Some(doc) => {
-                    self.viewer.show(ui, doc);
-                }
-                None => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            "No file open.\nDouble-click a .gb or .fasta file in the browser.",
-                        );
-                    });
-                }
-            },
+            Tab::Viewer => {
+                self.seq_view.show(ui, self.viewer);
+            }
             Tab::Terminal => {
                 ui.centered_and_justified(|ui| {
                     ui.label("Terminal — coming in Phase 6");

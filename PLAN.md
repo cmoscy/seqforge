@@ -96,9 +96,30 @@ The socket is a natural containment boundary — all viewer mutations flow throu
 Defer until the basic app is stable and sequence editing works smoothly.
 
 ### State model
-- `AppState { open_docs: Vec<Document>, ui: UiState, terminal: TerminalState, browser: BrowserState }`
+
+**Two-layer split** — keeps GUI types out of `seqforge-core` so dispatch and socket IPC have no egui deps:
+
+```rust
+// seqforge-core — pure data, no GUI types
+struct ViewerState {
+    open_doc: Option<Document>,
+    selection: Option<(usize, usize)>,
+    selected_feature: Option<usize>,
+    // scroll position, search hits, restriction sites (added as features land)
+}
+
+// seqforge-app — GUI shell
+struct AppState {
+    viewer: ViewerState,        // passed to dispatch_viewer
+    dock_state: DockState<Tab>, // egui_dock — GUI only
+    browser: BrowserState,
+    pending_commands: Vec<ViewerCommand>, // consumed each frame
+}
+```
+
 - `Document` is the doc model (sequence, features, computed cut-sites cache) — independent of egui types.
-- Persist `UiState` + recent files via `eframe::App::save`/`load` with serde.
+- Persist `AppState` (minus transient fields) via `eframe::App::save`/`load` with serde.
+- For MVP, `open_doc` is `Option<Document>` (one file at a time). Multi-doc (`Vec<Document>`) deferred to post-MVP.
 - **Reference: Rerun's `re_viewer` crate** for store-vs-UI-state separation in egui.
 
 ---
@@ -177,7 +198,7 @@ Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-ba
 seqforge/
 ├── Cargo.toml             # workspace
 ├── crates/
-│   ├── seqforge-core/     # AppState, Document, FileCommand, ViewerCommand, dispatch — no GUI deps
+│   ├── seqforge-core/     # Document, ViewerState, FileCommand, ViewerCommand, dispatch — no GUI deps
 │   ├── seqforge-bio/      # thin wrappers over na_seq + gb-io + bio; ported workflows
 │   ├── seqforge-cli/      # standalone tool: FileCommand runs locally always; ViewerCommand uses socket when SEQFORGE_SOCKET set
 │   └── seqforge-app/      # eframe binary: egui + egui_dock + egui_term wiring
@@ -309,6 +330,11 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] Clip-rect culling: only visible blocks are processed each frame
 - [x] `SequenceView::reset()` clears selection + selected feature on new doc load
 
+**Implementation notes:**
+- `cached_seq_len` guard: complement + stacking are computed once when `seq.len()` changes, cached in `SequenceView`. Not recomputed per frame.
+- `pending_open: Option<PathBuf>` side-channel in `AppState`: `TabViewer` sets it during `DockArea` rendering; `update()` consumes it afterward. Phase 5 generalizes this to `pending_commands: Vec<ViewerCommand>`.
+- Feature labels: rendered on any segment (including continuations) where `bar.width() >= label.chars().count() * char_width`. Omitted on narrow segments, consistent with SnapGene/Benchling behavior.
+
 **Key files:**
 - `crates/seqforge-app/src/viewer.rs` — `SequenceView`, `stack_features`, `annot_bar_rect`, `build_strand_galley`
 - `crates/seqforge-bio/src/dna.rs` — added `complement()`
@@ -317,23 +343,30 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 ---
 
-### Phase 5 — Command dispatch *(1–2 days)*
+### Phase 5 — Command dispatch ✅ DONE
 
 **Goal:** `FileCommand` and `ViewerCommand` enums with their dispatch functions wired to menu and file browser. The architectural keystone.
 
-- [ ] Define `ViewerCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; variants: `OpenFile`, `CloseDoc`, `GoTo`, `Search`, `FindRestrictionSites`, `Help`
-- [ ] Define `FileCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; stub variants for MVP: `Info` (already in CLI), `Digest`, `Annotate` — full implementations land post-MVP as editing features are added
-- [ ] `dispatch_viewer(state: &mut AppState, cmd: ViewerCommand) -> Result<CommandOutput>`
-- [ ] `dispatch_file(cmd: FileCommand) -> Result<CommandOutput>` — for MVP, `Info` works; others return `Err(unimplemented)`
-- [ ] `CommandOutput { messages: Vec<String>, side_effects: Vec<SideEffect> }` — `SideEffect::OpenTab`, `SideEffect::FocusRange`
-- [ ] Wire `File → Open…`, `File → Close`, `Edit → Find…`, `Navigate → Go to…`, `Tools → Restriction Sites…` menu items to `dispatch_viewer`
-- [ ] File-browser double-click emits `ViewerCommand::OpenFile` through `dispatch_viewer` (currently calls `seqforge_bio::load` directly in `app.rs` — move logic into dispatch)
+**Architecture note:** `dispatch_viewer` takes `&mut ViewerState` (pure data, in `seqforge-core`) not `&mut AppState`. `AppState` in `seqforge-app` holds `ViewerState` and passes a `&mut` reference. This keeps `seqforge-core` free of egui deps and makes Phase 6 socket IPC straightforward (the socket thread only needs `ViewerState`).
 
-**Critical tests:**
-- `seqforge-core::dispatch::tests` — table-driven: each `ViewerCommand` variant against a fixture `AppState`
-- Parse-and-dispatch round-trip: `ViewerCommand::try_parse_from(["find", "ATGC"])` → `dispatch_viewer` → expected output
+- [x] Extract `ViewerState { open_doc, selection, selected_feature }` from current `SequenceView` / `AppState` into `seqforge-core`; add clap dep to seqforge-core
+- [x] Define `ViewerCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; variants: `Open`, `Close`, `GoTo`, `Find`, `Enzymes`
+- [x] Define `FileCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; stub variants: `Info`, `Digest`, `Annotate`
+- [x] `dispatch_viewer(state: &mut ViewerState, cmd: ViewerCommand) -> Result<CommandOutput>` in `seqforge-core`
+- [x] `dispatch_file(cmd: FileCommand) -> Result<CommandOutput>` in `seqforge-core`
+- [x] `CommandOutput { messages: Vec<String>, side_effects: Vec<SideEffect> }` — `SideEffect::LoadDocument`, `FocusRange`, `OpenTab`
+- [x] Update `AppState` in `seqforge-app`: `viewer: ViewerState` + `seq_view: SequenceView` + `pending_commands: Vec<ViewerCommand>`
+- [x] `SequenceView` reads from `&mut ViewerState` rather than holding document data itself
+- [x] Wire `File → Open…` and `File → Close` menu items; `Edit → Find…`, `Navigate → Go to…`, `Tools → Restriction Sites…` stubs
+- [x] File-browser double-click emits `ViewerCommand::Open` through dispatch
+- [x] `Selection` struct added to `seqforge-core`: `{ anchor, focus }` — cursor when equal, range when not; single click on strand places cursor, drag builds range, annotation click sets feature range
 
-**Done when:** opening files works via menu *and* file-browser double-click, both go through `dispatch_viewer`. Both dispatch functions are unit-tested.
+**Notes:**
+- `Selection` replaces raw `Option<(usize, usize)>` — cursor = zero-length selection (seqviz/SnapGene pattern)
+- `SideEffect::LoadDocument` bridges the core/bio crate boundary: dispatch returns it, app layer calls `seqforge_bio::load`
+- `ViewerCli` wrapper struct enables `:goto 100` terminal intercept pattern (Phase 6)
+
+**Done when:** opening files works via menu *and* file-browser double-click, both go through `dispatch_viewer`. Both dispatch functions are unit-tested. ✅
 
 ---
 
@@ -398,6 +431,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [ ] Recent files list persisted in eframe storage; `File → Recent` submenu
 - [ ] Dock layout persistence (already in Phase 2 — verify)
 - [ ] Keyboard shortcuts: `Cmd/Ctrl+O`, `Cmd/Ctrl+F`, `Cmd/Ctrl+G`, `Cmd/Ctrl+W`
+- [ ] Shift+click range selection: check `ui.input(|i| i.modifiers.shift)` in `SequenceView::show`; if set, extend `selection.focus` while holding `selection.anchor` fixed (cursor placed by prior click becomes the anchor)
 - [ ] Status bar at bottom: cursor position, selection length, doc length, topology
 - [ ] Error toasts via `egui-notify` for failed file loads / bad commands
 

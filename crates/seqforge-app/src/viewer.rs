@@ -1,7 +1,6 @@
 use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use serde::{Deserialize, Serialize};
 use seqforge_bio::complement;
-use seqforge_core::{Document, Feature, FeatureKind};
+use seqforge_core::{Feature, FeatureKind, Selection, ViewerState};
 
 const FONT_SIZE: f32 = 13.0;
 const ANNOT_ROW_HEIGHT: f32 = 16.0; // height per stacked annotation row
@@ -11,6 +10,7 @@ const BLOCK_GAP: f32 = 14.0;
 const LEFT_MARGIN: f32 = 30.0;
 const RIGHT_MARGIN: f32 = 20.0;
 const SELECTION_COLOR: Color32 = Color32::from_rgb(173, 214, 255);
+const CURSOR_COLOR: Color32 = Color32::from_rgb(50, 120, 255);
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
 
@@ -103,32 +103,21 @@ fn annot_bar_rect(
 
 // ── Widget state ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// Rendering caches and interaction state for the sequence viewer widget.
+/// Selection and document data live in `ViewerState` (seqforge-core).
+#[derive(Debug, Default)]
 pub struct SequenceView {
-    /// Currently selected sequence range [start, end) in 0-based coordinates.
-    pub selection: Option<(usize, usize)>,
-    /// Index into `doc.features` of the feature that owns the current selection.
-    /// `None` when the selection comes from a manual strand drag.
-    #[serde(skip)]
-    pub selected_feature: Option<usize>,
-    #[serde(skip)]
     drag_start: Option<usize>,
     // Cached per-document values — recomputed only when seq_len changes.
-    #[serde(skip)]
     cached_seq_len: usize,
-    #[serde(skip)]
     cached_complement: Vec<u8>,
-    #[serde(skip)]
     cached_feat_row: Vec<usize>, // feat_idx → stacked row index
-    #[serde(skip)]
     cached_n_annot_rows: usize,
 }
 
 impl SequenceView {
-    /// Call when a new document is loaded so stale indices and caches are cleared.
+    /// Call when a new document is loaded so stale caches are cleared.
     pub fn reset(&mut self) {
-        self.selection = None;
-        self.selected_feature = None;
         self.drag_start = None;
         self.cached_seq_len = 0;
         self.cached_complement.clear();
@@ -136,7 +125,18 @@ impl SequenceView {
         self.cached_n_annot_rows = 0;
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document) {
+    /// Render the sequence viewer. Selection and document data are read/written
+    /// through `vstate` so dispatch_viewer can mutate them independently.
+    pub fn show(&mut self, ui: &mut egui::Ui, vstate: &mut ViewerState) {
+        let doc = match vstate.open_doc.as_ref() {
+            Some(d) => d,
+            None => {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No file open.\nDouble-click a .gb or .fasta file in the browser.");
+                });
+                return;
+            }
+        };
         let seq = &doc.sequence;
         let seq_len = seq.len();
 
@@ -228,45 +228,47 @@ impl SequenceView {
                 // ── Interactions ──────────────────────────────────────────────
 
                 let ptr = response.interact_pointer_pos();
+                let ptr_seq = ptr.and_then(|p| {
+                    screen_to_seq(p, rect, char_width, line_width, seq_len, block_h)
+                });
 
                 if response.clicked() {
                     if let Some(pos) = ptr {
                         if let Some(&(_, feat_idx)) =
                             annot_hits.iter().find(|(r, _)| r.contains(pos))
                         {
+                            // Click on annotation bar → feature range selection.
                             let feat = &doc.features[feat_idx];
-                            self.selection = Some((feat.range.start, feat.range.end));
-                            self.selected_feature = Some(feat_idx);
+                            vstate.selection =
+                                Some(Selection::range(feat.range.start, feat.range.end));
+                            vstate.selected_feature = Some(feat_idx);
+                        } else if let Some(seq_pos) = ptr_seq {
+                            // Click on strand → place cursor.
+                            vstate.selection = Some(Selection::cursor(seq_pos));
+                            vstate.selected_feature = None;
                         } else {
-                            self.selection = None;
-                            self.selected_feature = None;
+                            vstate.selection = None;
+                            vstate.selected_feature = None;
                         }
                     }
                 }
-
-                let ptr_seq = ptr.and_then(|p| {
-                    screen_to_seq(p, rect, char_width, line_width, seq_len, block_h)
-                });
 
                 if response.drag_started() {
                     let on_annot = ptr.is_some_and(|p| annot_hits.iter().any(|(r, _)| r.contains(p)));
                     if !on_annot {
                         self.drag_start = ptr_seq;
-                        self.selected_feature = None;
-                        self.selection = None;
+                        vstate.selected_feature = None;
+                        vstate.selection = ptr_seq.map(Selection::cursor);
                     }
                 }
                 if response.dragged() {
-                    if let (Some(start), Some(cur)) = (self.drag_start, ptr_seq) {
-                        self.selection = Some((start.min(cur), start.max(cur) + 1));
+                    if let (Some(anchor), Some(focus)) = (self.drag_start, ptr_seq) {
+                        vstate.selection = Some(Selection { anchor, focus });
                     }
                 }
                 if response.drag_stopped() {
-                    if let (Some(start), Some(cur)) = (self.drag_start, ptr_seq) {
-                        let (s, e) = (start.min(cur), start.max(cur) + 1);
-                        self.selection = if s + 1 >= e { None } else { Some((s, e)) };
-                    }
                     self.drag_start = None;
+                    // A zero-length drag stays as a cursor; non-zero stays as a range.
                 }
 
                 // ── Pass 2: render all visible blocks ─────────────────────────
@@ -303,23 +305,46 @@ impl SequenceView {
                     let bot_y = top_y + STRAND_HEIGHT;
                     let annot_base_y = bot_y + STRAND_HEIGHT;
 
-                    // ── Selection highlight (behind text) ─────────────────────
-                    if let Some((sel_s, sel_e)) = self.selection {
-                        let vis_s = sel_s.max(block_start);
-                        let vis_e = sel_e.min(block_end);
-                        if vis_s < vis_e {
-                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
-                            let sw = (vis_e - vis_s) as f32 * char_width;
-                            painter.rect_filled(
-                                Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
-                                0.0,
-                                SELECTION_COLOR,
-                            );
-                            painter.rect_filled(
-                                Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
-                                0.0,
-                                SELECTION_COLOR.gamma_multiply(0.7),
-                            );
+                    // ── Selection highlight / cursor (behind text) ────────────
+                    if let Some(sel) = vstate.selection {
+                        if sel.is_cursor() {
+                            // Thin vertical line between bases spanning both strands.
+                            let pos = sel.anchor;
+                            if pos >= block_start && pos <= block_end {
+                                let cx = seq_x0 + (pos - block_start) as f32 * char_width;
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(cx - 0.75, top_y),
+                                        Vec2::new(1.5, STRAND_HEIGHT * 2.0),
+                                    ),
+                                    0.0,
+                                    CURSOR_COLOR,
+                                );
+                            }
+                        } else {
+                            let (sel_s, sel_e) = sel.ordered();
+                            let vis_s = sel_s.max(block_start);
+                            let vis_e = sel_e.min(block_end);
+                            if vis_s < vis_e {
+                                let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                                let sw = (vis_e - vis_s) as f32 * char_width;
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(sx, top_y),
+                                        Vec2::new(sw, char_height),
+                                    ),
+                                    0.0,
+                                    SELECTION_COLOR,
+                                );
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        Pos2::new(sx, bot_y),
+                                        Vec2::new(sw, char_height),
+                                    ),
+                                    0.0,
+                                    SELECTION_COLOR.gamma_multiply(0.7),
+                                );
+                            }
                         }
                     }
 
@@ -356,7 +381,7 @@ impl SequenceView {
                         if let Some(bar) =
                             annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
                         {
-                            let is_selected = self.selected_feature == Some(feat_idx);
+                            let is_selected = vstate.selected_feature == Some(feat_idx);
                             painter.rect_filled(bar, 2.0, feature_color(feat.kind));
                             if is_selected {
                                 painter.rect_stroke(

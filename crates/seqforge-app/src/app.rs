@@ -1,8 +1,7 @@
-use std::path::PathBuf;
-
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
+use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
-use seqforge_core::Document;
+use seqforge_core::{dispatch_viewer, SideEffect, ViewerCommand, ViewerState};
 
 use crate::browser::BrowserState;
 use crate::tabs::{Tab, TabViewer};
@@ -12,11 +11,15 @@ use crate::viewer::SequenceView;
 pub struct AppState {
     pub dock_state: DockState<Tab>,
     pub browser: BrowserState,
-    pub open_doc: Option<Document>,
-    pub viewer: SequenceView,
-    // Transient: not persisted; set by TabViewer, consumed in update()
+    /// Document + selection state — no GUI deps.
+    pub viewer: ViewerState,
+    // Transient: not persisted.
     #[serde(skip)]
-    pub pending_open: Option<PathBuf>,
+    pub seq_view: SequenceView,
+    #[serde(skip)]
+    pub pending_commands: Vec<ViewerCommand>,
+    #[serde(skip)]
+    open_dialog: Option<FileDialog>,
 }
 
 impl Default for AppState {
@@ -30,9 +33,10 @@ impl Default for AppState {
         Self {
             dock_state,
             browser: BrowserState::default(),
-            open_doc: None,
-            viewer: SequenceView::default(),
-            pending_open: None,
+            viewer: ViewerState::default(),
+            seq_view: SequenceView::default(),
+            pending_commands: Vec::new(),
+            open_dialog: None,
         }
     }
 }
@@ -57,11 +61,37 @@ impl eframe::App for SeqForgeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── File-open dialog (menu-triggered) ────────────────────────────────
+        if let Some(dialog) = &mut self.state.open_dialog {
+            dialog.update(ctx);
+            if let Some(picked) = dialog.picked() {
+                self.state
+                    .pending_commands
+                    .push(ViewerCommand::Open { path: picked.to_owned() });
+                self.state.open_dialog = None;
+            } else if matches!(
+                dialog.state(),
+                egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
+            ) {
+                self.state.open_dialog = None;
+            }
+        }
+
+        // ── Menu bar ─────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Open…"));
-                    ui.add_enabled(false, egui::Button::new("Close"));
+                    if ui.button("Open…").clicked() {
+                        let mut dialog = FileDialog::new();
+                        dialog.pick_file();
+                        self.state.open_dialog = Some(dialog);
+                        ui.close_menu();
+                    }
+                    let can_close = self.state.viewer.open_doc.is_some();
+                    if ui.add_enabled(can_close, egui::Button::new("Close")).clicked() {
+                        self.state.pending_commands.push(ViewerCommand::Close);
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
                     ui.add_enabled(false, egui::Button::new("Find…"));
@@ -86,13 +116,14 @@ impl eframe::App for SeqForgeApp {
             });
         });
 
-        // Destructure to allow separate mutable borrows alongside dock_state
+        // ── Dock area ─────────────────────────────────────────────────────────
         let AppState {
             dock_state,
             browser,
-            open_doc,
             viewer,
-            pending_open,
+            seq_view,
+            pending_commands,
+            ..
         } = &mut self.state;
 
         egui::CentralPanel::default()
@@ -104,21 +135,41 @@ impl eframe::App for SeqForgeApp {
                         ui,
                         &mut TabViewer {
                             browser,
-                            open_doc: open_doc.as_ref(),
                             viewer,
-                            pending_open,
+                            seq_view,
+                            pending_commands,
                         },
                     );
             });
 
-        // Handle any file-open requests emitted by the browser tab
-        if let Some(path) = self.state.pending_open.take() {
-            match seqforge_bio::load(&path) {
-                Ok(doc) => {
-                    self.state.viewer.reset();
-                    self.state.open_doc = Some(doc);
+        // ── Process pending commands ──────────────────────────────────────────
+        let cmds: Vec<ViewerCommand> = self.state.pending_commands.drain(..).collect();
+        for cmd in cmds {
+            match dispatch_viewer(&mut self.state.viewer, cmd) {
+                Ok(out) => {
+                    for effect in out.side_effects {
+                        match effect {
+                            SideEffect::LoadDocument(path) => {
+                                match seqforge_bio::load(&path) {
+                                    Ok(doc) => {
+                                        self.state.seq_view.reset();
+                                        self.state.viewer.clear_selection();
+                                        self.state.viewer.scroll_to = None;
+                                        self.state.viewer.open_doc = Some(doc);
+                                    }
+                                    Err(e) => eprintln!("Failed to load {}: {e}", path.display()),
+                                }
+                            }
+                            SideEffect::FocusRange(_, _) | SideEffect::OpenTab(_) => {
+                                // handled in later phases
+                            }
+                        }
+                    }
+                    for msg in out.messages {
+                        eprintln!("[dispatch] {msg}");
+                    }
                 }
-                Err(e) => eprintln!("Failed to load {}: {e}", path.display()),
+                Err(e) => eprintln!("[dispatch error] {e}"),
             }
         }
     }
