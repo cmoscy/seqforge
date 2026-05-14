@@ -1,9 +1,10 @@
 use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use seqforge_bio::complement;
-use seqforge_core::{Feature, FeatureKind, Selection, ViewerState};
+use seqforge_core::{Feature, FeatureKind, Selection, Strand, ViewerState};
 
 const FONT_SIZE: f32 = 13.0;
-const ANNOT_ROW_HEIGHT: f32 = 16.0; // height per stacked annotation row
+const ANNOT_ROW_HEIGHT: f32 = 16.0;
+const CUT_SITE_ROW_HEIGHT: f32 = 22.0;
 const RULER_HEIGHT: f32 = 14.0;
 const STRAND_HEIGHT: f32 = 17.0;
 const BLOCK_GAP: f32 = 14.0;
@@ -11,6 +12,7 @@ const LEFT_MARGIN: f32 = 30.0;
 const RIGHT_MARGIN: f32 = 20.0;
 const SELECTION_COLOR: Color32 = Color32::from_rgb(173, 214, 255);
 const CURSOR_COLOR: Color32 = Color32::from_rgb(50, 120, 255);
+const CUT_SITE_COLOR: Color32 = Color32::from_rgb(220, 80, 200);
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
 
@@ -181,8 +183,11 @@ impl SequenceView {
         let line_width = ((avail / char_width) as usize).max(10);
 
         let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
+        let cut_site_section_h =
+            if vstate.cut_sites.is_empty() { 0.0 } else { CUT_SITE_ROW_HEIGHT };
 
-        let block_h = annot_section_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + BLOCK_GAP;
+        let block_h =
+            RULER_HEIGHT + STRAND_HEIGHT * 2.0 + annot_section_h + cut_site_section_h + BLOCK_GAP;
         let n_blocks = seq_len.div_ceil(line_width);
         let total_height = n_blocks as f32 * block_h;
         let content_width = LEFT_MARGIN + line_width as f32 * char_width + RIGHT_MARGIN;
@@ -304,6 +309,28 @@ impl SequenceView {
                     let top_y = ruler_y + RULER_HEIGHT;
                     let bot_y = top_y + STRAND_HEIGHT;
                     let annot_base_y = bot_y + STRAND_HEIGHT;
+                    let cut_site_y = annot_base_y + annot_section_h;
+
+                    // ── Search hit highlights (behind selection and text) ──────
+                    for hit in &vstate.search_hits {
+                        let vis_s = hit.start.max(block_start).min(block_end);
+                        let vis_e = hit.end.min(block_end); // clamp wrap-arounds
+                        if vis_s < vis_e && vis_e > block_start {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            let color = search_hit_color(hit.strand);
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                                2.0,
+                                color,
+                            );
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                                2.0,
+                                color,
+                            );
+                        }
+                    }
 
                     // ── Selection highlight / cursor (behind text) ────────────
                     if let Some(sel) = vstate.selection {
@@ -404,6 +431,36 @@ impl SequenceView {
                         }
                     }
 
+                    // ── Cut site ticks (below annotation bars) ────────────────
+                    if !vstate.cut_sites.is_empty() {
+                        // Thin baseline
+                        painter.hline(
+                            seq_x0..=seq_x0 + block_len as f32 * char_width,
+                            cut_site_y + 8.0,
+                            Stroke::new(0.5, CUT_SITE_COLOR.gamma_multiply(0.4)),
+                        );
+                        for site in &vstate.cut_sites {
+                            let cut = site.cut_pos;
+                            if cut < block_start || cut > block_end {
+                                continue;
+                            }
+                            let cx = seq_x0 + (cut - block_start) as f32 * char_width;
+                            // Tick mark
+                            painter.line_segment(
+                                [Pos2::new(cx, cut_site_y), Pos2::new(cx, cut_site_y + 8.0)],
+                                Stroke::new(1.5, CUT_SITE_COLOR),
+                            );
+                            // Enzyme label above the tick
+                            painter.text(
+                                Pos2::new(cx, cut_site_y + 9.0),
+                                Align2::CENTER_TOP,
+                                &site.enzyme,
+                                FontId::proportional(FONT_SIZE - 3.0),
+                                CUT_SITE_COLOR,
+                            );
+                        }
+                    }
+
                     // ── Block separator ───────────────────────────────────────
                     if block_idx + 1 < n_blocks {
                         painter.hline(
@@ -439,6 +496,15 @@ fn screen_to_seq(
     }
     let p = block_idx * line_width + col;
     if p >= seq_len { None } else { Some(p) }
+}
+
+fn search_hit_color(strand: Strand) -> Color32 {
+    match strand {
+        // amber for forward, cyan for reverse — semi-transparent via gamma
+        Strand::Forward => Color32::from_rgba_unmultiplied(255, 190, 0, 110),
+        Strand::Reverse => Color32::from_rgba_unmultiplied(0, 190, 255, 110),
+        _ => Color32::from_rgba_unmultiplied(200, 200, 200, 90),
+    }
 }
 
 fn build_strand_galley(

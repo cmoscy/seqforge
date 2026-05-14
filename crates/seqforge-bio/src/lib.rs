@@ -3,8 +3,10 @@
 mod dna;
 mod fasta;
 mod genbank;
+mod search;
 
 pub use dna::{complement, reverse_complement};
+pub use search::{find_cut_sites, find_iupac_matches};
 
 use seqforge_core::Document;
 use std::path::Path;

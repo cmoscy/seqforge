@@ -241,12 +241,44 @@ impl eframe::App for SeqForgeApp {
                                     Ok(doc) => {
                                         self.state.seq_view.reset();
                                         self.state.viewer.clear_selection();
+                                        self.state.viewer.clear_results();
                                         self.state.viewer.scroll_to = None;
                                         self.state.viewer.open_doc = Some(doc);
                                     }
                                     Err(e) => {
                                         eprintln!("Failed to load {}: {e}", path.display());
                                     }
+                                }
+                            }
+                            SideEffect::SearchPattern { pattern, mismatches } => {
+                                if let Some(doc) = &self.state.viewer.open_doc {
+                                    let circular = matches!(doc.topology, seqforge_core::Topology::Circular);
+                                    let hits = seqforge_bio::find_iupac_matches(
+                                        &doc.sequence,
+                                        pattern.as_bytes(),
+                                        mismatches,
+                                        circular,
+                                    );
+                                    if let Some(first) = hits.first() {
+                                        self.state.viewer.scroll_to = Some(first.start);
+                                    }
+                                    eprintln!("[search] '{}' → {} hit(s)", pattern, hits.len());
+                                    self.state.viewer.search_hits = hits;
+                                }
+                            }
+                            SideEffect::ShowEnzymes(enzymes) => {
+                                if let Some(doc) = &self.state.viewer.open_doc {
+                                    let circular = matches!(doc.topology, seqforge_core::Topology::Circular);
+                                    let enzyme_refs: Vec<&str> =
+                                        enzymes.iter().map(String::as_str).collect();
+                                    let sites = seqforge_bio::find_cut_sites(
+                                        &doc.sequence,
+                                        &enzyme_refs,
+                                        circular,
+                                    );
+                                    eprintln!("[enzymes] {:?} → {} site(s)", enzymes, sites.len());
+                                    self.state.viewer.cut_sites = sites;
+                                    self.state.viewer.active_enzymes = enzymes;
                                 }
                             }
                             SideEffect::FocusRange(_, _) | SideEffect::OpenTab(_) => {

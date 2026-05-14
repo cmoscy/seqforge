@@ -395,6 +395,14 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - `TerminalView::new(ui, ...)` assigned to a local before `ui.add(...)` to satisfy borrow checker (both borrow `ui`)
 - `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024 edition; wrapped with safety comments
 
+**CLI PATH scoping (added post-Phase 6):**
+- `seqforge` CLI is embedded-terminal-only by default (VS Code "Install command in PATH" pattern)
+- `sibling_seqforge_dir()` in `terminal.rs` finds the `seqforge` binary next to the running app binary and prepends it to the PTY's PATH — `cargo build` (not `cargo install`) is sufficient for embedded terminal use
+- `cli_install.rs` in `seqforge-app`: `install_cli_to_path()` symlinks the bundled CLI to `/usr/local/bin/seqforge` or `~/.local/bin/seqforge`; `is_installed()` checks for an existing symlink
+- `Tools → Install 'seqforge' CLI to PATH` menu item (or `Reinstall…` if already linked); result shown in a centered modal window via `cli_status: Option<String>` in `AppState`
+- `seqforge-app --install-cli` flag for headless/scripted installs (prints result and exits)
+- `README.md` written with install instructions, `:command` syntax, CLI usage, opt-in PATH install, supported formats, and dev workflow
+
 **Tests (24 total across workspace):**
 - `terminal::tests` — 5 parse round-trips for `parse_colon_command`
 - `socket::tests` — JSON command round-trip via `UnixStream::pair()`; `FileCommand` serialization check
@@ -404,27 +412,32 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 ---
 
-### Phase 7 — Restriction sites + search *(1–2 days)*
+### Phase 7 — Restriction sites + search ✅ DONE
 
 **Goal:** The two real sequence operations for MVP.
 
-- [ ] Use `na_seq`'s restriction enzyme module to find sites; fall back to `bio::pattern_matching::shift_and` for IUPAC patterns if needed
-- [ ] Cache cut-sites on `Document`; invalidate only on enzyme-set change
-- [ ] Render sites as ticks below the annotation rows with enzyme name labels
-- [ ] `Search { pattern, mismatches }` uses `bio::pattern_matching::bndm` or `shift_and` with Hamming-distance variant
-- [ ] Both forward + reverse-complement search; highlight matches in viewer
+- [x] Use `na_seq`'s restriction enzyme module (`re_lib::load_re_library` + `find_re_matches`) to find cut sites
+- [x] `find_iupac_matches` — own O(n·m) IUPAC scanner with Hamming-distance mismatch allowance; circular extension handled by appending first `pat_len-1` bases before scanning
+- [x] Both forward + reverse-complement search; palindromic patterns deduplicated
+- [x] `SearchHit { start, end, strand }` and `CutSite { enzyme, recognition_start, recognition_end, cut_pos }` types in `seqforge-core`
+- [x] `ViewerState` gains `search_hits`, `cut_sites`, `active_enzymes` (all `#[serde(skip)]`, cleared on new doc load)
+- [x] `SideEffect::SearchPattern` and `SideEffect::ShowEnzymes` bridge core/bio boundary; `app.rs` calls bio and populates state
+- [x] Render search hits as amber (forward) / cyan (reverse) semi-transparent highlights behind strand text
+- [x] Render cut sites as magenta tick marks below annotation rows with enzyme name labels; `block_h` grows by `CUT_SITE_ROW_HEIGHT` (22 px) when sites are present
+- [x] Empty `:find` clears hits; empty `:enzymes` clears cut sites; both require an open document
 
-**Patterns to crib:**
-- `examples/seqviz/src/digest.ts` (~110 LOC) — site dedup + circular wrap-around handling
-- `examples/seqviz/src/search.ts` (~120 LOC) — IUPAC regex expansion + mismatch handling
-- `examples/tg-oss/packages/sequence-utils/src/cutSequenceByRestrictionEnzyme.js` — alternate reference
+**Implementation notes:**
+- `na_seq::restriction_enzyme::find_re_matches` only searches forward — correct for palindromic enzymes (all entries in na_seq's library); circular handled by extending input sequence
+- na_seq's `find_re_matches` skips the last `re_seq_len + 1` positions (off-by-one in upstream code); circular extension compensates
+- `SideEffect::SearchPattern / ShowEnzymes` follow the same core/bio bridge pattern as `SideEffect::LoadDocument`
+- `find_iupac_matches` and `find_cut_sites` live in `seqforge-bio/src/search.rs`
 
-**Critical tests:**
-- `find_cut_sites` against known plasmid (pBR322 cut with EcoRI, HindIII, BamHI — published positions)
-- `search` with `N` wildcards and 0/1/2 mismatches against synthetic sequences with planted matches
-- Circular wrap-around: site spanning the origin is found exactly once
+**Tests (14 in `seqforge-bio::search`, 4 new in `seqforge-core::commands`):**
+- `exact_forward_hit`, `palindrome_not_double_counted`, `reverse_complement_hit`, `iupac_n_wildcard`, `mismatch_allowance`, `circular_wrap_around`
+- `find_ecori_cut_sites`, `unknown_enzyme_returns_empty`, `enzyme_name_case_insensitive`, `multiple_enzymes`
+- `find_returns_search_side_effect`, `enzymes_returns_show_enzymes_side_effect`, `find_without_doc_returns_error`, `enzymes_empty_clears_cut_sites`
 
-**Done when:** opening pBR322, running `:enzymes EcoRI BamHI`, sites appear at known positions. `:find ATGCNNNNGCAT` finds expected hits.
+**Done when:** `:enzymes EcoRI BamHI` shows ticks at known positions; `:find ATGCNNNNGCAT` highlights IUPAC matches. ✅
 
 ---
 
@@ -447,7 +460,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 - [ ] Walk the MVP verification checklist on macOS
 - [ ] CI runs Linux + Windows builds (manual smoke deferred)
-- [ ] `README.md` with screenshots, install via `cargo install --git ...`, and a 5-command terminal demo
+- [ ] `README.md` screenshots (README prose written in Phase 6; add screenshots here)
 - [ ] Tag `v0.1.0`
 
 ---

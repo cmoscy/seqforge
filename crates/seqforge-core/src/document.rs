@@ -3,6 +3,28 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
+// ── Result types (computed from a Document) ───────────────────────────────────
+
+/// A pattern match hit — 0-based half-open range, indicates which strand was matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub start: usize,
+    pub end: usize,
+    pub strand: Strand,
+}
+
+/// A restriction enzyme recognition site found in the sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CutSite {
+    pub enzyme: String,
+    /// 0-based start of the recognition sequence.
+    pub recognition_start: usize,
+    /// 0-based exclusive end of the recognition sequence.
+    pub recognition_end: usize,
+    /// Inter-base position of the top-strand cut (between bases `cut_pos-1` and `cut_pos`).
+    pub cut_pos: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Topology {
     Linear,

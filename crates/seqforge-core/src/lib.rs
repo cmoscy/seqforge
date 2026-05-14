@@ -7,4 +7,4 @@ pub use commands::{
     dispatch_file, dispatch_viewer, CommandOutput, DispatchError, FileCommand, Selection,
     SideEffect, ViewerCli, ViewerCommand, ViewerState,
 };
-pub use document::{Document, Feature, FeatureKind, Strand, Topology};
+pub use document::{CutSite, Document, Feature, FeatureKind, SearchHit, Strand, Topology};

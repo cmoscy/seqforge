@@ -4,7 +4,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::Document;
+use crate::{CutSite, Document, SearchHit};
 
 // ── Selection model ───────────────────────────────────────────────────────────
 
@@ -54,15 +54,29 @@ pub struct ViewerState {
     /// Index into `open_doc.features` for the feature-bar selection.
     pub selected_feature: Option<usize>,
     /// If set, the viewer should scroll to bring this position into view.
-    /// Consumed (set to None) by the viewer widget each frame.
     #[serde(skip)]
     pub scroll_to: Option<usize>,
+    /// Active sequence search results. Cleared on new doc load.
+    #[serde(skip)]
+    pub search_hits: Vec<SearchHit>,
+    /// Active restriction site results. Cleared on new doc load.
+    #[serde(skip)]
+    pub cut_sites: Vec<CutSite>,
+    /// Which enzymes are currently shown (mirrors the last `Enzymes` command).
+    #[serde(skip)]
+    pub active_enzymes: Vec<String>,
 }
 
 impl ViewerState {
     pub fn clear_selection(&mut self) {
         self.selection = None;
         self.selected_feature = None;
+    }
+
+    pub fn clear_results(&mut self) {
+        self.search_hits.clear();
+        self.cut_sites.clear();
+        self.active_enzymes.clear();
     }
 }
 
@@ -134,11 +148,16 @@ impl CommandOutput {
     }
 }
 
-/// Side effects that the app layer must handle (seqforge-core cannot perform them directly).
+/// Side effects that the app layer must handle (seqforge-core cannot perform them directly,
+/// because seqforge-core must not depend on seqforge-bio).
 #[derive(Debug)]
 pub enum SideEffect {
     /// App should load this file and set `ViewerState.open_doc`.
     LoadDocument(PathBuf),
+    /// App should run an IUPAC pattern search and populate `ViewerState.search_hits`.
+    SearchPattern { pattern: String, mismatches: u8 },
+    /// App should find restriction sites and populate `ViewerState.cut_sites`.
+    ShowEnzymes(Vec<String>),
     /// Viewer should scroll to and highlight this range.
     FocusRange(usize, usize),
     /// A result panel should be opened with this title.
@@ -188,8 +207,28 @@ pub fn dispatch_viewer(
             Ok(CommandOutput::message(format!("Navigated to position {position}.")))
         }
 
-        ViewerCommand::Find { .. } => Err(DispatchError::Unimplemented("find")),
-        ViewerCommand::Enzymes { .. } => Err(DispatchError::Unimplemented("enzymes")),
+        ViewerCommand::Find { pattern, mismatches } => {
+            if state.open_doc.is_none() {
+                return Err(DispatchError::NoDocument);
+            }
+            if pattern.is_empty() {
+                state.search_hits.clear();
+                return Ok(CommandOutput::message("Cleared search results."));
+            }
+            Ok(CommandOutput::effect(SideEffect::SearchPattern { pattern, mismatches }))
+        }
+
+        ViewerCommand::Enzymes { enzymes } => {
+            if state.open_doc.is_none() {
+                return Err(DispatchError::NoDocument);
+            }
+            if enzymes.is_empty() {
+                state.cut_sites.clear();
+                state.active_enzymes.clear();
+                return Ok(CommandOutput::message("Cleared restriction sites."));
+            }
+            Ok(CommandOutput::effect(SideEffect::ShowEnzymes(enzymes)))
+        }
     }
 }
 
@@ -293,5 +332,57 @@ mod tests {
         assert!(
             matches!(cli.command, ViewerCommand::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
         );
+    }
+
+    #[test]
+    fn find_returns_search_side_effect() {
+        let mut state = fixture_state_with_doc();
+        let out =
+            dispatch_viewer(&mut state, ViewerCommand::Find { pattern: "ATGC".into(), mismatches: 0 })
+                .unwrap();
+        assert!(matches!(
+            out.side_effects.first(),
+            Some(SideEffect::SearchPattern { pattern, mismatches: 0 }) if pattern == "ATGC"
+        ));
+    }
+
+    #[test]
+    fn enzymes_returns_show_enzymes_side_effect() {
+        let mut state = fixture_state_with_doc();
+        let out = dispatch_viewer(
+            &mut state,
+            ViewerCommand::Enzymes { enzymes: vec!["EcoRI".into()] },
+        )
+        .unwrap();
+        assert!(matches!(
+            out.side_effects.first(),
+            Some(SideEffect::ShowEnzymes(e)) if e == &["EcoRI"]
+        ));
+    }
+
+    #[test]
+    fn find_without_doc_returns_error() {
+        let mut state = ViewerState::default();
+        let err = dispatch_viewer(
+            &mut state,
+            ViewerCommand::Find { pattern: "ATGC".into(), mismatches: 0 },
+        )
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::NoDocument));
+    }
+
+    #[test]
+    fn enzymes_empty_clears_cut_sites() {
+        let mut state = fixture_state_with_doc();
+        state.cut_sites.push(crate::CutSite {
+            enzyme: "EcoRI".into(),
+            recognition_start: 0,
+            recognition_end: 6,
+            cut_pos: 1,
+        });
+        let out =
+            dispatch_viewer(&mut state, ViewerCommand::Enzymes { enzymes: vec![] }).unwrap();
+        assert!(state.cut_sites.is_empty());
+        assert!(!out.messages.is_empty());
     }
 }
