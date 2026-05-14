@@ -366,7 +366,8 @@ impl SequenceView {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            if bar.width() > 24.0 && !feat.label.is_empty() {
+                            let label_min_width = feat.label.chars().count() as f32 * char_width;
+                            if bar.width() >= label_min_width && !feat.label.is_empty() {
                                 painter.text(
                                     bar.center(),
                                     Align2::CENTER_CENTER,
