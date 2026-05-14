@@ -4,6 +4,21 @@ use clap::Parser;
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 use seqforge_core::{ViewerCli, ViewerCommand};
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns the directory containing a `seqforge` binary that is a sibling of
+/// the running app binary, or `None` if no such binary exists.
+///
+/// When both crates are built via `cargo build`, they land in the same
+/// `target/{profile}/` directory, so the embedded terminal can find the CLI
+/// without a separate `cargo install`.
+fn sibling_seqforge_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join("seqforge");
+    candidate.exists().then(|| dir.to_owned())
+}
+
 // ── TerminalPane ──────────────────────────────────────────────────────────────
 
 pub struct TerminalPane {
@@ -16,10 +31,21 @@ pub struct TerminalPane {
 
 impl TerminalPane {
     pub fn new(ctx: egui::Context, socket_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
-        // Expose the session socket to subprocesses before the PTY inherits our env.
         // Safety: called from the main thread at app startup; no concurrent env reads.
-        if let Some(path) = socket_path {
-            unsafe { std::env::set_var("SEQFORGE_SOCKET", path) };
+        unsafe {
+            // Expose the session socket so subprocesses can dispatch viewer commands.
+            if let Some(path) = socket_path {
+                std::env::set_var("SEQFORGE_SOCKET", path);
+            }
+
+            // If a `seqforge` binary lives next to the running app binary, prepend its
+            // directory to PATH so the embedded terminal can use it without a separate
+            // `cargo install` step. Mirrors how VS Code exposes its `code` CLI.
+            if let Some(bin_dir) = sibling_seqforge_dir() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let new_path = format!("{}:{}", bin_dir.display(), current_path);
+                std::env::set_var("PATH", new_path);
+            }
         }
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
