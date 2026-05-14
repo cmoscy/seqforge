@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use clap::Parser;
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
-use seqforge_core::{ViewerCli, ViewerCommand};
+use seqforge_core::{ViewerCli, ViewerRequest};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,8 +66,8 @@ impl TerminalPane {
         })
     }
 
-    /// Render the terminal pane. Returns a `ViewerCommand` if the user submitted a `:` line.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ViewerCommand> {
+    /// Render the terminal pane. Returns a `ViewerRequest` if the user submitted a `:` line.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ViewerRequest> {
         let available = ui.available_size();
 
         // ── : command intercept ───────────────────────────────────────────────
@@ -113,7 +113,7 @@ impl TerminalPane {
             // Return non-text events (mouse, scroll) so the terminal can still use them.
             ui.ctx().input_mut(|i| {
                 let mut combined = passthrough;
-                combined.extend(i.events.drain(..));
+                combined.append(&mut i.events);
                 i.events = combined;
             });
 
@@ -171,9 +171,9 @@ impl TerminalPane {
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
-/// Parse a colon command line (without the leading `:`) into a `ViewerCommand`.
+/// Parse a colon command line (without the leading `:`) into a `ViewerRequest`.
 /// Returns `None` for empty input or unrecognised commands.
-pub fn parse_colon_command(args: &str) -> Option<ViewerCommand> {
+pub fn parse_colon_command(args: &str) -> Option<ViewerRequest> {
     if args.is_empty() {
         return None;
     }
@@ -191,21 +191,21 @@ mod tests {
 
     #[test]
     fn colon_goto_parses() {
-        let cmd = parse_colon_command("goto 100").unwrap();
-        assert!(matches!(cmd, ViewerCommand::GoTo { position: 100 }));
+        let req = parse_colon_command("goto 100").unwrap();
+        assert!(matches!(req, ViewerRequest::GoTo { position: 100 }));
     }
 
     #[test]
     fn colon_find_parses() {
-        let cmd = parse_colon_command("find ATGC").unwrap();
-        assert!(matches!(cmd, ViewerCommand::Find { ref pattern, mismatches: 0 } if pattern == "ATGC"));
+        let req = parse_colon_command("find ATGC").unwrap();
+        assert!(matches!(req, ViewerRequest::Find { ref pattern, mismatches: 0 } if pattern == "ATGC"));
     }
 
     #[test]
     fn colon_enzymes_parses() {
-        let cmd = parse_colon_command("enzymes EcoRI BamHI").unwrap();
+        let req = parse_colon_command("enzymes EcoRI BamHI").unwrap();
         assert!(
-            matches!(cmd, ViewerCommand::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
+            matches!(req, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
         );
     }
 

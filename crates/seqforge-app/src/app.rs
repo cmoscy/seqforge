@@ -3,7 +3,9 @@ use std::sync::mpsc;
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
-use seqforge_core::{dispatch_viewer, SideEffect, ViewerCommand, ViewerState};
+use seqforge_core::{
+    dispatch, BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse, ViewerState,
+};
 
 use crate::browser::BrowserState;
 use crate::cli_install;
@@ -11,6 +13,30 @@ use crate::socket;
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+
+// ── AppBio ────────────────────────────────────────────────────────────────────
+
+struct AppBio;
+
+impl BioOps for AppBio {
+    fn load(&self, path: &std::path::Path) -> Result<Document, String> {
+        seqforge_bio::load(path).map_err(|e| e.to_string())
+    }
+
+    fn find_matches(
+        &self,
+        seq: &[u8],
+        pattern: &[u8],
+        mismatches: u8,
+        circular: bool,
+    ) -> Vec<SearchHit> {
+        seqforge_bio::find_iupac_matches(seq, pattern, mismatches, circular)
+    }
+
+    fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite> {
+        seqforge_bio::find_cut_sites(seq, enzymes, circular)
+    }
+}
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -24,15 +50,15 @@ pub struct AppState {
     #[serde(skip)]
     pub seq_view: SequenceView,
     #[serde(skip)]
-    pub pending_commands: Vec<ViewerCommand>,
+    pub pending_requests: Vec<ViewerRequest>,
     #[serde(skip)]
     pub open_dialog: Option<FileDialog>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
     #[serde(skip)]
     pub terminal: Option<TerminalPane>,
-    /// Receiver for ViewerCommands arriving via the Unix domain socket.
+    /// Receiver for ViewerRequests arriving via the Unix domain socket.
     #[serde(skip)]
-    pub socket_rx: Option<mpsc::Receiver<ViewerCommand>>,
+    pub socket_rx: Option<mpsc::Receiver<ViewerRequest>>,
     /// Ephemeral status message shown after a CLI install attempt.
     #[serde(skip)]
     pub cli_status: Option<String>,
@@ -51,7 +77,7 @@ impl Default for AppState {
             browser: BrowserState::default(),
             viewer: ViewerState::default(),
             seq_view: SequenceView::default(),
-            pending_commands: Vec::new(),
+            pending_requests: Vec::new(),
             open_dialog: None,
             terminal: None,
             socket_rx: None,
@@ -105,8 +131,8 @@ impl eframe::App for SeqForgeApp {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
                 self.state
-                    .pending_commands
-                    .push(ViewerCommand::Open { path: picked.to_owned() });
+                    .pending_requests
+                    .push(ViewerRequest::Open { path: picked.to_owned() });
                 self.state.open_dialog = None;
             } else if matches!(
                 dialog.state(),
@@ -128,7 +154,7 @@ impl eframe::App for SeqForgeApp {
                     }
                     let can_close = self.state.viewer.open_doc.is_some();
                     if ui.add_enabled(can_close, egui::Button::new("Close")).clicked() {
-                        self.state.pending_commands.push(ViewerCommand::Close);
+                        self.state.pending_requests.push(ViewerRequest::Close);
                         ui.close_menu();
                     }
                 });
@@ -200,7 +226,7 @@ impl eframe::App for SeqForgeApp {
             browser,
             viewer,
             seq_view,
-            pending_commands,
+            pending_requests,
             terminal,
             ..
         } = &mut self.state;
@@ -216,80 +242,29 @@ impl eframe::App for SeqForgeApp {
                             browser,
                             viewer,
                             seq_view,
-                            pending_commands,
+                            pending_requests,
                             terminal,
                         },
                     );
             });
 
-        // ── Drain socket commands ─────────────────────────────────────────────
+        // ── Drain socket requests ─────────────────────────────────────────────
         if let Some(rx) = &self.state.socket_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                self.state.pending_commands.push(cmd);
+            while let Ok(req) = rx.try_recv() {
+                self.state.pending_requests.push(req);
             }
         }
 
-        // ── Process pending commands ──────────────────────────────────────────
-        let cmds: Vec<ViewerCommand> = self.state.pending_commands.drain(..).collect();
-        for cmd in cmds {
-            match dispatch_viewer(&mut self.state.viewer, cmd) {
-                Ok(out) => {
-                    for effect in out.side_effects {
-                        match effect {
-                            SideEffect::LoadDocument(path) => {
-                                match seqforge_bio::load(&path) {
-                                    Ok(doc) => {
-                                        self.state.seq_view.reset();
-                                        self.state.viewer.clear_selection();
-                                        self.state.viewer.clear_results();
-                                        self.state.viewer.scroll_to = None;
-                                        self.state.viewer.open_doc = Some(doc);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Failed to load {}: {e}", path.display());
-                                    }
-                                }
-                            }
-                            SideEffect::SearchPattern { pattern, mismatches } => {
-                                if let Some(doc) = &self.state.viewer.open_doc {
-                                    let circular = matches!(doc.topology, seqforge_core::Topology::Circular);
-                                    let hits = seqforge_bio::find_iupac_matches(
-                                        &doc.sequence,
-                                        pattern.as_bytes(),
-                                        mismatches,
-                                        circular,
-                                    );
-                                    if let Some(first) = hits.first() {
-                                        self.state.viewer.scroll_to = Some(first.start);
-                                    }
-                                    eprintln!("[search] '{}' → {} hit(s)", pattern, hits.len());
-                                    self.state.viewer.search_hits = hits;
-                                }
-                            }
-                            SideEffect::ShowEnzymes(enzymes) => {
-                                if let Some(doc) = &self.state.viewer.open_doc {
-                                    let circular = matches!(doc.topology, seqforge_core::Topology::Circular);
-                                    let enzyme_refs: Vec<&str> =
-                                        enzymes.iter().map(String::as_str).collect();
-                                    let sites = seqforge_bio::find_cut_sites(
-                                        &doc.sequence,
-                                        &enzyme_refs,
-                                        circular,
-                                    );
-                                    eprintln!("[enzymes] {:?} → {} site(s)", enzymes, sites.len());
-                                    self.state.viewer.cut_sites = sites;
-                                    self.state.viewer.active_enzymes = enzymes;
-                                }
-                            }
-                            SideEffect::FocusRange(_, _) | SideEffect::OpenTab(_) => {
-                                // handled in later phases
-                            }
-                        }
-                    }
-                    for msg in out.messages {
-                        eprintln!("[dispatch] {msg}");
-                    }
-                }
+        // ── Process pending requests ──────────────────────────────────────────
+        let reqs: Vec<ViewerRequest> = self.state.pending_requests.drain(..).collect();
+        for req in reqs {
+            // Reset view state before loading a new document.
+            if matches!(req, ViewerRequest::Open { .. }) {
+                self.state.seq_view.reset();
+            }
+            match dispatch(&mut self.state.viewer, &AppBio, req) {
+                Ok(ViewerResponse::Message { text }) => eprintln!("[dispatch] {text}"),
+                Ok(ViewerResponse::Ok) => {}
                 Err(e) => eprintln!("[dispatch error] {e}"),
             }
         }

@@ -80,27 +80,7 @@ impl ViewerState {
     }
 }
 
-// ── Command enums ─────────────────────────────────────────────────────────────
-
-/// Commands that mutate the state of a running GUI instance.
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum ViewerCommand {
-    /// Open a sequence file in the viewer
-    Open { path: PathBuf },
-    /// Close the current document
-    Close,
-    /// Navigate to a sequence position (1-based)
-    #[command(name = "goto")]
-    GoTo { position: usize },
-    /// Search for a sequence pattern (IUPAC; forward + reverse complement)
-    Find {
-        pattern: String,
-        #[arg(short, long, default_value = "0")]
-        mismatches: u8,
-    },
-    /// Show restriction cut sites for given enzymes
-    Enzymes { enzymes: Vec<String> },
-}
+// ── File commands ─────────────────────────────────────────────────────────────
 
 /// Commands that operate on sequence files on disk. No running GUI required.
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -123,47 +103,6 @@ pub enum FileCommand {
     },
 }
 
-// ── Command output ────────────────────────────────────────────────────────────
-
-/// Output produced by a dispatch call.
-#[derive(Debug, Default)]
-pub struct CommandOutput {
-    pub messages: Vec<String>,
-    pub side_effects: Vec<SideEffect>,
-}
-
-impl CommandOutput {
-    pub fn message(msg: impl Into<String>) -> Self {
-        Self {
-            messages: vec![msg.into()],
-            side_effects: vec![],
-        }
-    }
-
-    pub fn effect(effect: SideEffect) -> Self {
-        Self {
-            messages: vec![],
-            side_effects: vec![effect],
-        }
-    }
-}
-
-/// Side effects that the app layer must handle (seqforge-core cannot perform them directly,
-/// because seqforge-core must not depend on seqforge-bio).
-#[derive(Debug)]
-pub enum SideEffect {
-    /// App should load this file and set `ViewerState.open_doc`.
-    LoadDocument(PathBuf),
-    /// App should run an IUPAC pattern search and populate `ViewerState.search_hits`.
-    SearchPattern { pattern: String, mismatches: u8 },
-    /// App should find restriction sites and populate `ViewerState.cut_sites`.
-    ShowEnzymes(Vec<String>),
-    /// Viewer should scroll to and highlight this range.
-    FocusRange(usize, usize),
-    /// A result panel should be opened with this title.
-    OpenTab(String),
-}
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -176,90 +115,12 @@ pub enum DispatchError {
     BioError(String),
 }
 
-// ── Dispatch ──────────────────────────────────────────────────────────────────
-
-/// Dispatch a viewer command against mutable viewer state.
-///
-/// `SideEffect::LoadDocument` must be handled by the caller (seqforge-app),
-/// since seqforge-core cannot call seqforge-bio (that would be circular).
-pub fn dispatch_viewer(
-    state: &mut ViewerState,
-    cmd: ViewerCommand,
-) -> Result<CommandOutput, DispatchError> {
-    match cmd {
-        ViewerCommand::Open { path } => {
-            Ok(CommandOutput::effect(SideEffect::LoadDocument(path)))
-        }
-
-        ViewerCommand::Close => {
-            state.open_doc = None;
-            state.clear_selection();
-            state.scroll_to = None;
-            Ok(CommandOutput::message("Document closed."))
-        }
-
-        ViewerCommand::GoTo { position } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
-            let idx = position.saturating_sub(1); // 1-based → 0-based
-            state.scroll_to = Some(idx);
-            state.selection = Some(Selection::cursor(idx));
-            state.selected_feature = None;
-            Ok(CommandOutput::message(format!("Navigated to position {position}.")))
-        }
-
-        ViewerCommand::Find { pattern, mismatches } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
-            if pattern.is_empty() {
-                state.search_hits.clear();
-                return Ok(CommandOutput::message("Cleared search results."));
-            }
-            Ok(CommandOutput::effect(SideEffect::SearchPattern { pattern, mismatches }))
-        }
-
-        ViewerCommand::Enzymes { enzymes } => {
-            if state.open_doc.is_none() {
-                return Err(DispatchError::NoDocument);
-            }
-            if enzymes.is_empty() {
-                state.cut_sites.clear();
-                state.active_enzymes.clear();
-                return Ok(CommandOutput::message("Cleared restriction sites."));
-            }
-            Ok(CommandOutput::effect(SideEffect::ShowEnzymes(enzymes)))
-        }
-    }
-}
-
-/// Dispatch a file command. Runs entirely in the calling process; no GUI needed.
-pub fn dispatch_file(cmd: FileCommand) -> Result<CommandOutput, DispatchError> {
-    match cmd {
-        // Info is handled directly by seqforge-cli; routing here is a no-op.
-        FileCommand::Info { .. } => Ok(CommandOutput::default()),
-        FileCommand::Digest { .. } => Err(DispatchError::Unimplemented("digest")),
-        FileCommand::Annotate { .. } => Err(DispatchError::Unimplemented("annotate")),
-    }
-}
-
-// ── CLI wrapper for terminal intercept ───────────────────────────────────────
-
-/// Parser wrapper so `:goto 100` in the terminal can be parsed as a subcommand.
-#[derive(Debug, clap::Parser)]
-#[command(name = "seqforge")]
-pub struct ViewerCli {
-    #[command(subcommand)]
-    pub command: ViewerCommand,
-}
-
-// ── New typed schema ──────────────────────────────────────────────────────────
+// ── Typed request/response schema ─────────────────────────────────────────────
 
 /// Typed request variants. Serde tag = `"method"` so the JSON wire shape is
-/// `{"method":"goto","position":100}` — directly usable as a JSON-RPC `method`
-/// + `params` in Stage 4.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `{"method":"goto","position":100}` — compatible with JSON-RPC 2.0 framing
+/// where method + params are merged into this envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum ViewerRequest {
     /// Open a sequence file in the viewer.
@@ -268,10 +129,12 @@ pub enum ViewerRequest {
     Close,
     /// Navigate to a sequence position (1-based).
     #[serde(rename = "goto")]
+    #[command(name = "goto")]
     GoTo { position: usize },
-    /// Search for an IUPAC pattern (forward + reverse complement).
+    /// Search for a sequence pattern (IUPAC; forward + reverse complement).
     Find {
         pattern: String,
+        #[arg(short, long, default_value = "0")]
         #[serde(default)]
         mismatches: u8,
     },
@@ -279,7 +142,7 @@ pub enum ViewerRequest {
     Enzymes { enzymes: Vec<String> },
 }
 
-/// Response returned from the new `dispatch`.
+/// Response returned from `dispatch`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ViewerResponse {
@@ -288,6 +151,8 @@ pub enum ViewerResponse {
     /// Operation succeeded with a human-readable status message.
     Message { text: String },
 }
+
+// ── BioOps trait ─────────────────────────────────────────────────────────────
 
 /// Abstraction over biological operations so `seqforge-core` can call them
 /// without depending on `seqforge-bio`.
@@ -302,6 +167,8 @@ pub trait BioOps {
     ) -> Vec<SearchHit>;
     fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite>;
 }
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
 
 /// Dispatch a `ViewerRequest` against mutable viewer state, calling into `bio`
 /// for any operation that requires sequence computation.
@@ -378,6 +245,25 @@ pub fn dispatch<B: BioOps>(
     }
 }
 
+/// Dispatch a file command. Runs entirely in the calling process; no GUI needed.
+pub fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError> {
+    match cmd {
+        FileCommand::Info { .. } => Ok(()), // handled directly by seqforge-cli
+        FileCommand::Digest { .. } => Err(DispatchError::Unimplemented("digest")),
+        FileCommand::Annotate { .. } => Err(DispatchError::Unimplemented("annotate")),
+    }
+}
+
+// ── CLI wrapper for terminal intercept ───────────────────────────────────────
+
+/// Parser wrapper so `:goto 100` in the terminal can be parsed as a subcommand.
+#[derive(Debug, clap::Parser)]
+#[command(name = "seqforge")]
+pub struct ViewerCli {
+    #[command(subcommand)]
+    pub command: ViewerRequest,
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -398,138 +284,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn close_clears_state() {
-        let mut state = fixture_state_with_doc();
-        state.selection = Some(Selection::range(0, 4));
-        let out = dispatch_viewer(&mut state, ViewerCommand::Close).unwrap();
-        assert!(state.open_doc.is_none());
-        assert!(state.selection.is_none());
-        assert!(!out.messages.is_empty());
-    }
-
-    #[test]
-    fn open_returns_load_side_effect() {
-        let mut state = ViewerState::default();
-        let path = PathBuf::from("plasmid.gb");
-        let out = dispatch_viewer(&mut state, ViewerCommand::Open { path: path.clone() }).unwrap();
-        assert!(matches!(
-            out.side_effects.first(),
-            Some(SideEffect::LoadDocument(p)) if p == &path
-        ));
-    }
-
-    #[test]
-    fn goto_sets_scroll_and_cursor() {
-        let mut state = fixture_state_with_doc();
-        dispatch_viewer(&mut state, ViewerCommand::GoTo { position: 3 }).unwrap();
-        assert_eq!(state.scroll_to, Some(2)); // 0-based
-        let sel = state.selection.unwrap();
-        assert!(sel.is_cursor());
-        assert_eq!(sel.anchor, 2);
-    }
-
-    #[test]
-    fn goto_fails_without_open_doc() {
-        let mut state = ViewerState::default();
-        let err = dispatch_viewer(&mut state, ViewerCommand::GoTo { position: 1 }).unwrap_err();
-        assert!(matches!(err, DispatchError::NoDocument));
-    }
-
-    #[test]
-    fn parse_goto_from_terminal_args() {
-        let cli = ViewerCli::try_parse_from(["seqforge", "goto", "100"]).unwrap();
-        assert!(matches!(cli.command, ViewerCommand::GoTo { position: 100 }));
-    }
-
-    #[test]
-    fn parse_find_from_terminal_args() {
-        let cli = ViewerCli::try_parse_from(["seqforge", "find", "ATGC"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            ViewerCommand::Find { pattern, mismatches: 0 } if pattern == "ATGC"
-        ));
-    }
-
-    #[test]
-    fn parse_enzymes_from_terminal_args() {
-        let cli =
-            ViewerCli::try_parse_from(["seqforge", "enzymes", "EcoRI", "BamHI"]).unwrap();
-        assert!(
-            matches!(cli.command, ViewerCommand::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
-        );
-    }
-
-    #[test]
-    fn find_returns_search_side_effect() {
-        let mut state = fixture_state_with_doc();
-        let out =
-            dispatch_viewer(&mut state, ViewerCommand::Find { pattern: "ATGC".into(), mismatches: 0 })
-                .unwrap();
-        assert!(matches!(
-            out.side_effects.first(),
-            Some(SideEffect::SearchPattern { pattern, mismatches: 0 }) if pattern == "ATGC"
-        ));
-    }
-
-    #[test]
-    fn enzymes_returns_show_enzymes_side_effect() {
-        let mut state = fixture_state_with_doc();
-        let out = dispatch_viewer(
-            &mut state,
-            ViewerCommand::Enzymes { enzymes: vec!["EcoRI".into()] },
-        )
-        .unwrap();
-        assert!(matches!(
-            out.side_effects.first(),
-            Some(SideEffect::ShowEnzymes(e)) if e == &["EcoRI"]
-        ));
-    }
-
-    #[test]
-    fn find_without_doc_returns_error() {
-        let mut state = ViewerState::default();
-        let err = dispatch_viewer(
-            &mut state,
-            ViewerCommand::Find { pattern: "ATGC".into(), mismatches: 0 },
-        )
-        .unwrap_err();
-        assert!(matches!(err, DispatchError::NoDocument));
-    }
-
-    #[test]
-    fn enzymes_empty_clears_cut_sites() {
-        let mut state = fixture_state_with_doc();
-        state.cut_sites.push(crate::CutSite {
-            enzyme: "EcoRI".into(),
-            recognition_start: 0,
-            recognition_end: 6,
-            cut_pos: 1,
-        });
-        let out =
-            dispatch_viewer(&mut state, ViewerCommand::Enzymes { enzymes: vec![] }).unwrap();
-        assert!(state.cut_sites.is_empty());
-        assert!(!out.messages.is_empty());
-    }
-
-    // ── Stage 1: new typed schema tests ──────────────────────────────────────
+    // ── FakeBio ───────────────────────────────────────────────────────────────
 
     struct FakeBio {
-        /// Sequence hits to return from find_matches (in call order).
         hits: Vec<SearchHit>,
-        /// Cut sites to return from find_cut_sites.
         sites: Vec<CutSite>,
-        /// Records calls to find_matches: (pattern_bytes, mismatches).
         find_calls: std::cell::RefCell<Vec<(Vec<u8>, u8)>>,
     }
 
     impl FakeBio {
         fn new() -> Self {
-            Self {
-                hits: vec![],
-                sites: vec![],
-                find_calls: std::cell::RefCell::new(vec![]),
-            }
+            Self { hits: vec![], sites: vec![], find_calls: std::cell::RefCell::new(vec![]) }
         }
         fn with_hit(mut self, start: usize, end: usize) -> Self {
             self.hits.push(SearchHit { start, end, strand: crate::Strand::Forward });
@@ -557,10 +322,17 @@ mod tests {
             self.find_calls.borrow_mut().push((pattern.to_vec(), mismatches));
             self.hits.clone()
         }
-        fn find_cut_sites(&self, _seq: &[u8], _enzymes: &[&str], _circular: bool) -> Vec<CutSite> {
+        fn find_cut_sites(
+            &self,
+            _seq: &[u8],
+            _enzymes: &[&str],
+            _circular: bool,
+        ) -> Vec<CutSite> {
             self.sites.clone()
         }
     }
+
+    // ── ViewerRequest serde round-trips ───────────────────────────────────────
 
     #[test]
     fn viewer_request_serde_round_trip_goto() {
@@ -580,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn viewer_request_serde_round_trip_find_default_mismatches() {
+    fn viewer_request_serde_default_mismatches() {
         let json = r#"{"method":"find","pattern":"ATGC"}"#;
         let req: ViewerRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req, ViewerRequest::Find { mismatches: 0, .. }));
@@ -608,27 +380,53 @@ mod tests {
         let req = ViewerRequest::Enzymes { enzymes: vec!["EcoRI".into(), "BamHI".into()] };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"]));
+        assert!(
+            matches!(back, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
+        );
+    }
+
+    // ── dispatch correctness ──────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_open_loads_doc() {
+        let mut state = ViewerState::default();
+        let resp =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::Open { path: PathBuf::from("fake.gb") })
+                .unwrap();
+        assert!(state.open_doc.is_some());
+        assert!(matches!(resp, ViewerResponse::Ok));
     }
 
     #[test]
-    fn new_dispatch_goto_mutates_state() {
+    fn dispatch_close_clears_doc() {
         let mut state = fixture_state_with_doc();
-        let resp = dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 3 }).unwrap();
+        state.selection = Some(Selection::range(0, 4));
+        let resp = dispatch(&mut state, &FakeBio::new(), ViewerRequest::Close).unwrap();
+        assert!(state.open_doc.is_none());
+        assert!(state.selection.is_none());
+        assert!(matches!(resp, ViewerResponse::Message { .. }));
+    }
+
+    #[test]
+    fn dispatch_goto_mutates_state() {
+        let mut state = fixture_state_with_doc();
+        let resp =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 3 }).unwrap();
         assert_eq!(state.scroll_to, Some(2));
         assert!(matches!(state.selection, Some(sel) if sel.anchor == 2 && sel.is_cursor()));
         assert!(matches!(resp, ViewerResponse::Message { .. }));
     }
 
     #[test]
-    fn new_dispatch_goto_no_doc_returns_error() {
+    fn dispatch_goto_no_doc_returns_error() {
         let mut state = ViewerState::default();
-        let err = dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 1 }).unwrap_err();
+        let err =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 1 }).unwrap_err();
         assert!(matches!(err, DispatchError::NoDocument));
     }
 
     #[test]
-    fn new_dispatch_find_no_doc_returns_error() {
+    fn dispatch_find_no_doc_returns_error() {
         let mut state = ViewerState::default();
         let err = dispatch(
             &mut state,
@@ -640,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn new_dispatch_enzymes_no_doc_returns_error() {
+    fn dispatch_enzymes_no_doc_returns_error() {
         let mut state = ViewerState::default();
         let err = dispatch(
             &mut state,
@@ -652,44 +450,58 @@ mod tests {
     }
 
     #[test]
-    fn new_dispatch_find_records_call_args() {
+    fn dispatch_find_records_call_args() {
         let mut state = fixture_state_with_doc();
         let bio = FakeBio::new().with_hit(2, 6);
-        dispatch(
-            &mut state,
-            &bio,
-            ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 1 },
-        )
-        .unwrap();
+        dispatch(&mut state, &bio, ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 1 })
+            .unwrap();
         let calls = bio.find_calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, b"ATGC");
         assert_eq!(calls[0].1, 1);
-        // scroll_to set to first hit start
         assert_eq!(state.scroll_to, Some(2));
         assert_eq!(state.search_hits.len(), 1);
     }
 
     #[test]
-    fn new_dispatch_open_loads_doc() {
-        let mut state = ViewerState::default();
-        let resp = dispatch(
-            &mut state,
-            &FakeBio::new(),
-            ViewerRequest::Open { path: PathBuf::from("fake.gb") },
-        )
-        .unwrap();
-        assert!(state.open_doc.is_some());
-        assert!(matches!(resp, ViewerResponse::Ok));
+    fn dispatch_enzymes_empty_clears_cut_sites() {
+        let mut state = fixture_state_with_doc();
+        state.cut_sites.push(crate::CutSite {
+            enzyme: "EcoRI".into(),
+            recognition_start: 0,
+            recognition_end: 6,
+            cut_pos: 1,
+        });
+        let resp =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::Enzymes { enzymes: vec![] })
+                .unwrap();
+        assert!(state.cut_sites.is_empty());
+        assert!(matches!(resp, ViewerResponse::Message { .. }));
+    }
+
+    // ── Terminal CLI parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_goto_from_terminal_args() {
+        let cli = ViewerCli::try_parse_from(["seqforge", "goto", "100"]).unwrap();
+        assert!(matches!(cli.command, ViewerRequest::GoTo { position: 100 }));
     }
 
     #[test]
-    fn new_dispatch_close_clears_doc() {
-        let mut state = fixture_state_with_doc();
-        state.selection = Some(Selection::range(0, 4));
-        let resp = dispatch(&mut state, &FakeBio::new(), ViewerRequest::Close).unwrap();
-        assert!(state.open_doc.is_none());
-        assert!(state.selection.is_none());
-        assert!(matches!(resp, ViewerResponse::Message { .. }));
+    fn parse_find_from_terminal_args() {
+        let cli = ViewerCli::try_parse_from(["seqforge", "find", "ATGC"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            ViewerRequest::Find { ref pattern, mismatches: 0 } if pattern == "ATGC"
+        ));
+    }
+
+    #[test]
+    fn parse_enzymes_from_terminal_args() {
+        let cli =
+            ViewerCli::try_parse_from(["seqforge", "enzymes", "EcoRI", "BamHI"]).unwrap();
+        assert!(
+            matches!(cli.command, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
+        );
     }
 }

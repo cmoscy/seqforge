@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use seqforge_core::{ViewerCommand, ViewerState};
+use seqforge_core::{ViewerRequest, ViewerState};
 
 use crate::browser::BrowserState;
 use crate::terminal::TerminalPane;
@@ -16,7 +16,7 @@ pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
     pub viewer: &'a mut ViewerState,
     pub seq_view: &'a mut SequenceView,
-    pub pending_commands: &'a mut Vec<ViewerCommand>,
+    pub pending_requests: &'a mut Vec<ViewerRequest>,
     pub terminal: &'a mut Option<TerminalPane>,
 }
 
@@ -41,7 +41,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         match tab {
             Tab::FileBrowser => {
                 if let Some(path) = self.browser.show(ui) {
-                    self.pending_commands.push(ViewerCommand::Open { path });
+                    self.pending_requests.push(ViewerRequest::Open { path });
                 }
             }
             Tab::Viewer => {
@@ -49,8 +49,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
-                    if let Some(cmd) = term.show(ui) {
-                        self.pending_commands.push(cmd);
+                    if let Some(req) = term.show(ui) {
+                        self.pending_requests.push(req);
                     }
                 }
                 None => {

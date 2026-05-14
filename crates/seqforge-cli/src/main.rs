@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use seqforge_core::ViewerCommand;
+use seqforge_core::ViewerRequest;
 
 #[derive(Parser)]
 #[command(name = "seqforge", about = "SeqForge sequence tool")]
@@ -37,7 +37,7 @@ enum Cmd {
         output: PathBuf,
     },
 
-    // ── Viewer commands ───────────────────────────────────────────────────────
+    // ── Viewer commands (forwarded as JSON-RPC to the running GUI) ────────────
     /// Open a sequence file in the viewer
     Open { path: PathBuf },
     /// Close the current document
@@ -64,17 +64,17 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("not yet implemented (post-MVP)")
         }
 
-        // ── Viewer commands (via socket) ──────────────────────────────────────
-        Cmd::Open { path } => seqforge_cli::dispatch_viewer_cmd(ViewerCommand::Open { path }),
-        Cmd::Close => seqforge_cli::dispatch_viewer_cmd(ViewerCommand::Close),
+        // ── Viewer commands (via JSON-RPC socket) ─────────────────────────────
+        Cmd::Open { path } => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Open { path }),
+        Cmd::Close => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Close),
         Cmd::GoTo { position } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerCommand::GoTo { position })
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::GoTo { position })
         }
         Cmd::Find { pattern, mismatches } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerCommand::Find { pattern, mismatches })
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Find { pattern, mismatches })
         }
         Cmd::Enzymes { enzymes } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerCommand::Enzymes { enzymes })
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { enzymes })
         }
     }
 }

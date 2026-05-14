@@ -61,7 +61,7 @@ pub fn find_iupac_matches(
 
     let rc_pat = crate::reverse_complement(pattern);
     // Palindromic patterns have the same RC — search them only once.
-    let search_rc = rc_pat.to_ascii_uppercase() != pattern.to_ascii_uppercase();
+    let search_rc = !rc_pat.eq_ignore_ascii_case(pattern);
 
     // For circular sequences, append the first `pat_len - 1` bases so sites
     // spanning the origin are found in one pass.
