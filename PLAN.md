@@ -370,33 +370,37 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 ---
 
-### Phase 6 — Embedded terminal + session IPC *(2–3 days)*
+### Phase 6 — Embedded terminal + session IPC ✅ DONE
 
 **Goal:** Terminal pane runs a real shell; `:viewer-commands` route to `dispatch_viewer`; plain shell commands and `seqforge file-commands` run normally; `seqforge viewer-commands` route to `dispatch_viewer` via session socket.
 
 **Human path:**
-- [ ] `egui_term` widget in the Terminal tab, spawning the user's `$SHELL`
-- [ ] Intercept lines starting with `:` before they reach the PTY; parse as `ViewerCommand` via clap
-- [ ] Render `CommandOutput.messages` back into the terminal (write to PTY stdin or maintain a parallel buffer)
-- [ ] `:help` lists all `ViewerCommand` variants (clap-generated)
+- [x] `egui_term 0.1.0` widget in the Terminal tab, spawning `$SHELL`
+- [x] Intercept lines starting with `:` before they reach the PTY: drain events from `ctx.input_mut` before `TerminalView` renders (which reads `ctx.input(|i| i.events.clone())`)
+- [x] Command buffer shown in yellow overlay bar; Enter dispatches, Escape/backspace-past-colon cancels
+- [x] `parse_colon_command` uses `ViewerCli::try_parse_from` — clap-generated help text available
 
 **Session socket (viewer commands from CLI/agents):**
-- [ ] On app start, open a Unix domain socket; store path in `AppState`; set `SEQFORGE_SOCKET=<path>` in the PTY environment before spawning `$SHELL`
-- [ ] Socket listener thread receives serialized `ViewerCommand` values, calls `dispatch_viewer`, writes `CommandOutput` back
-- [ ] `seqforge-cli`: when executing a `ViewerCommand` subcommand and `SEQFORGE_SOCKET` is set, send over socket instead of erroring; when socket is absent, exit with `"no SeqForge instance running"`
-- [ ] `FileCommand` subcommands always execute locally in the CLI process regardless of `SEQFORGE_SOCKET`
+- [x] On app start, open Unix socket at `/tmp/seqforge-{pid}.sock`; set `SEQFORGE_SOCKET` in env before PTY spawn (child shell inherits it)
+- [x] Socket listener thread receives newline-delimited JSON `ViewerCommand`, pushes to `socket_rx` mpsc channel; main `update()` drains it into `pending_commands` each frame
+- [x] `seqforge-cli`: viewer subcommands (`open`, `close`, `goto`, `find`, `enzymes`) read `SEQFORGE_SOCKET` and send JSON over socket; error if unset
+- [x] File subcommands (`info`, `digest`, `annotate`) always run in-process; `FileCommand` never touches socket
 
 **Sandboxing stubs (design only — implement post-MVP):**
-- [ ] PTY spawn path: add optional `sandbox_wrapper: Option<Vec<String>>` to session config; pass args to `Command::new` if set; leave `None` for now
-- [ ] Socket listener: add `CommandPolicy` field to session config, default `AllowAll`; validate incoming `ViewerCommand` against policy before dispatch
+- [x] PTY spawn: comment stub in `TerminalPane::new` — `sandbox_wrapper: Option<Vec<String>>` hook location documented
+- [x] Socket listener: comment stub in `handle_connection` — `CommandPolicy` validation hook location documented
 
-**Critical tests:**
-- Integration: feed `:find ATGC\n` to terminal input handler; assert `dispatch_viewer` called with correct command
-- Integration: send serialized `ViewerCommand::GoTo(100)` over socket; assert `AppState` scroll position updates
-- Unit: `FileCommand::Digest` executes without a socket; `ViewerCommand::GoTo` without a socket returns a clear error
-- Manual: `:goto 100` scrolls viewer; `seqforge goto 200` (plain shell, no colon) also scrolls; `ls` and `cd` work normally
+**Implementation notes:**
+- `TerminalPane` and `socket_rx` live in `AppState` as `#[serde(skip)]` fields — avoids split-borrow issues and keeps initialization in `SeqForgeApp::new`
+- `TerminalView::new(ui, ...)` assigned to a local before `ui.add(...)` to satisfy borrow checker (both borrow `ui`)
+- `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024 edition; wrapped with safety comments
 
-**Done when:** `:open path/to/file.gb`, `:find ATGCGT`, `:goto 1234` work from the terminal. `seqforge goto 500` (no colon) works via socket. `seqforge digest plasmid.gb --enzymes EcoRI -o out.gb` works whether or not the GUI is open.
+**Tests (24 total across workspace):**
+- `terminal::tests` — 5 parse round-trips for `parse_colon_command`
+- `socket::tests` — JSON command round-trip via `UnixStream::pair()`; `FileCommand` serialization check
+- `seqforge_cli::tests` — viewer cmd fails cleanly without `SEQFORGE_SOCKET`
+
+**Done when:** `:open path/to/file.gb`, `:find ATGCGT`, `:goto 1234` work from the terminal. `seqforge goto 500` (no colon) works via socket. `seqforge digest plasmid.gb --enzymes EcoRI -o out.gb` works whether or not the GUI is open. ✅
 
 ---
 

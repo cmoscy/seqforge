@@ -1,6 +1,8 @@
 mod app;
 mod browser;
+mod socket;
 mod tabs;
+mod terminal;
 mod viewer;
 
 fn main() -> eframe::Result {

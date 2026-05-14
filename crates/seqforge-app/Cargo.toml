@@ -15,3 +15,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = "2"
 egui-file-dialog = "0.9"
+egui_term = "0.1.0"
+clap.workspace = true

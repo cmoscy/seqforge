@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use seqforge_core::{ViewerCommand, ViewerState};
 
 use crate::browser::BrowserState;
+use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -16,6 +17,7 @@ pub struct TabViewer<'a> {
     pub viewer: &'a mut ViewerState,
     pub seq_view: &'a mut SequenceView,
     pub pending_commands: &'a mut Vec<ViewerCommand>,
+    pub terminal: &'a mut Option<TerminalPane>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -45,11 +47,18 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::Viewer => {
                 self.seq_view.show(ui, self.viewer);
             }
-            Tab::Terminal => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Terminal — coming in Phase 6");
-                });
-            }
+            Tab::Terminal => match self.terminal.as_mut() {
+                Some(term) => {
+                    if let Some(cmd) = term.show(ui) {
+                        self.pending_commands.push(cmd);
+                    }
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Terminal failed to initialise.\nCheck stderr for details.");
+                    });
+                }
+            },
         }
     }
 }

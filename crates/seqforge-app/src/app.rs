@@ -1,25 +1,37 @@
+use std::sync::mpsc;
+
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
 use seqforge_core::{dispatch_viewer, SideEffect, ViewerCommand, ViewerState};
 
 use crate::browser::BrowserState;
+use crate::socket;
 use crate::tabs::{Tab, TabViewer};
+use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+
+// ── AppState ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 pub struct AppState {
     pub dock_state: DockState<Tab>,
     pub browser: BrowserState,
-    /// Document + selection state — no GUI deps.
+    /// Document + selection state — no GUI deps; persisted across restarts.
     pub viewer: ViewerState,
-    // Transient: not persisted.
+    // ── Transient: not persisted ──────────────────────────────────────────
     #[serde(skip)]
     pub seq_view: SequenceView,
     #[serde(skip)]
     pub pending_commands: Vec<ViewerCommand>,
     #[serde(skip)]
-    open_dialog: Option<FileDialog>,
+    pub open_dialog: Option<FileDialog>,
+    /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
+    #[serde(skip)]
+    pub terminal: Option<TerminalPane>,
+    /// Receiver for ViewerCommands arriving via the Unix domain socket.
+    #[serde(skip)]
+    pub socket_rx: Option<mpsc::Receiver<ViewerCommand>>,
 }
 
 impl Default for AppState {
@@ -37,9 +49,13 @@ impl Default for AppState {
             seq_view: SequenceView::default(),
             pending_commands: Vec::new(),
             open_dialog: None,
+            terminal: None,
+            socket_rx: None,
         }
     }
 }
+
+// ── SeqForgeApp ───────────────────────────────────────────────────────────────
 
 pub struct SeqForgeApp {
     state: AppState,
@@ -47,10 +63,28 @@ pub struct SeqForgeApp {
 
 impl SeqForgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let state = cc
+        let mut state: AppState = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+
+        // Start the Unix domain socket listener and wire up the terminal.
+        let socket_path = match socket::start_socket_listener(cc.egui_ctx.clone()) {
+            Ok((path, rx)) => {
+                state.socket_rx = Some(rx);
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("[seqforge] socket init failed: {e}");
+                None
+            }
+        };
+
+        state.terminal =
+            TerminalPane::new(cc.egui_ctx.clone(), socket_path.as_deref())
+                .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
+                .ok();
+
         Self { state }
     }
 }
@@ -61,7 +95,7 @@ impl eframe::App for SeqForgeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── File-open dialog (menu-triggered) ────────────────────────────────
+        // ── File-open dialog (menu-triggered) ─────────────────────────────────
         if let Some(dialog) = &mut self.state.open_dialog {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
@@ -117,12 +151,15 @@ impl eframe::App for SeqForgeApp {
         });
 
         // ── Dock area ─────────────────────────────────────────────────────────
+        // Destructure all AppState fields at once to satisfy the borrow checker
+        // when passing split mutable refs into TabViewer.
         let AppState {
             dock_state,
             browser,
             viewer,
             seq_view,
             pending_commands,
+            terminal,
             ..
         } = &mut self.state;
 
@@ -138,9 +175,17 @@ impl eframe::App for SeqForgeApp {
                             viewer,
                             seq_view,
                             pending_commands,
+                            terminal,
                         },
                     );
             });
+
+        // ── Drain socket commands ─────────────────────────────────────────────
+        if let Some(rx) = &self.state.socket_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                self.state.pending_commands.push(cmd);
+            }
+        }
 
         // ── Process pending commands ──────────────────────────────────────────
         let cmds: Vec<ViewerCommand> = self.state.pending_commands.drain(..).collect();
@@ -157,7 +202,9 @@ impl eframe::App for SeqForgeApp {
                                         self.state.viewer.scroll_to = None;
                                         self.state.viewer.open_doc = Some(doc);
                                     }
-                                    Err(e) => eprintln!("Failed to load {}: {e}", path.display()),
+                                    Err(e) => {
+                                        eprintln!("Failed to load {}: {e}", path.display());
+                                    }
                                 }
                             }
                             SideEffect::FocusRange(_, _) | SideEffect::OpenTab(_) => {

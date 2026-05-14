@@ -12,3 +12,4 @@ seqforge-core = { path = "../seqforge-core" }
 seqforge-bio = { path = "../seqforge-bio" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
