@@ -113,14 +113,27 @@ pub struct SequenceView {
     pub selected_feature: Option<usize>,
     #[serde(skip)]
     drag_start: Option<usize>,
+    // Cached per-document values — recomputed only when seq_len changes.
+    #[serde(skip)]
+    cached_seq_len: usize,
+    #[serde(skip)]
+    cached_complement: Vec<u8>,
+    #[serde(skip)]
+    cached_feat_row: Vec<usize>, // feat_idx → stacked row index
+    #[serde(skip)]
+    cached_n_annot_rows: usize,
 }
 
 impl SequenceView {
-    /// Call this when a new document is loaded so stale feature indices are cleared.
+    /// Call when a new document is loaded so stale indices and caches are cleared.
     pub fn reset(&mut self) {
         self.selection = None;
         self.selected_feature = None;
         self.drag_start = None;
+        self.cached_seq_len = 0;
+        self.cached_complement.clear();
+        self.cached_feat_row.clear();
+        self.cached_n_annot_rows = 0;
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document) {
@@ -134,10 +147,26 @@ impl SequenceView {
             return;
         }
 
-        let comp = complement(seq);
+        // Recompute doc-derived values only when the document changes.
+        if self.cached_seq_len != seq_len {
+            self.cached_complement = complement(seq);
+            let stacked_rows = stack_features(&doc.features);
+            self.cached_n_annot_rows = stacked_rows.len();
+            self.cached_feat_row = vec![0usize; doc.features.len()];
+            for (row_idx, row) in stacked_rows.iter().enumerate() {
+                for &feat_idx in row {
+                    self.cached_feat_row[feat_idx] = row_idx;
+                }
+            }
+            self.cached_seq_len = seq_len;
+        }
+
+        let comp = &self.cached_complement;
+        let feat_row = &self.cached_feat_row;
+        let n_annot_rows = self.cached_n_annot_rows;
+
         let font_id = FontId::monospace(FONT_SIZE);
-        let ruler_font = FontId::proportional(FONT_SIZE - 2.0);
-        let label_font = FontId::proportional(FONT_SIZE - 2.0);
+        let small_font = FontId::proportional(FONT_SIZE - 2.0);
 
         // Measure char_width from an actual galley so feature bar positions
         // use the same per-character advance that LayoutJob renders, not the
@@ -151,18 +180,7 @@ impl SequenceView {
         let avail = (ui.available_width() - LEFT_MARGIN - RIGHT_MARGIN).max(char_width);
         let line_width = ((avail / char_width) as usize).max(10);
 
-        // Compute stacked annotation rows (greedy interval packing).
-        let stacked_rows = stack_features(&doc.features);
-        let n_annot_rows = stacked_rows.len();
         let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
-
-        // Reverse map: feat_idx → stacked row index.
-        let mut feat_row = vec![0usize; doc.features.len()];
-        for (row_idx, row) in stacked_rows.iter().enumerate() {
-            for &feat_idx in row {
-                feat_row[feat_idx] = row_idx;
-            }
-        }
 
         let block_h = annot_section_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + BLOCK_GAP;
         let n_blocks = seq_len.div_ceil(line_width);
@@ -275,7 +293,7 @@ impl SequenceView {
                                 Pos2::new(seq_x0 + col as f32 * char_width, ruler_y),
                                 Align2::LEFT_TOP,
                                 format!("{}", abs + 1),
-                                ruler_font.clone(),
+                                small_font.clone(),
                                 text_color.gamma_multiply(0.55),
                             );
                         }
@@ -353,7 +371,7 @@ impl SequenceView {
                                     bar.center(),
                                     Align2::CENTER_CENTER,
                                     &feat.label,
-                                    label_font.clone(),
+                                    small_font.clone(),
                                     Color32::WHITE,
                                 );
                             }
