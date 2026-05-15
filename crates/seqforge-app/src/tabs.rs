@@ -1,14 +1,12 @@
 use serde::{Deserialize, Serialize};
-use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse, ViewerState};
-use std::sync::mpsc;
+use seqforge_core::ViewerState;
 
 use crate::bar::{show_bar, ActiveBar};
 use crate::browser::BrowserState;
+use crate::command::{AppCommand, PendingCommand};
 use crate::focus::{FocusScope, FocusState};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
-
-type PendingReq = (ViewerRequest, Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
@@ -21,7 +19,7 @@ pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
     pub viewer: &'a mut ViewerState,
     pub seq_view: &'a mut SequenceView,
-    pub pending_requests: &'a mut Vec<PendingReq>,
+    pub pending_commands: &'a mut Vec<PendingCommand>,
     pub terminal: &'a mut Option<TerminalPane>,
     pub active_bar: &'a mut Option<ActiveBar>,
     pub focus: &'a mut FocusState,
@@ -57,13 +55,13 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         match tab {
             Tab::FileBrowser => {
                 if let Some(path) = self.browser.show(ui) {
-                    self.pending_requests.push((ViewerRequest::Open { path }, None));
+                    self.pending_commands.push((AppCommand::OpenFile(path), None));
                 }
             }
             Tab::Viewer => {
                 // Inline Find / GoTo bar at the top of the viewer pane.
-                if let Some(req) = show_bar(self.active_bar, ui) {
-                    self.pending_requests.push((req, None));
+                if let Some(cmd) = show_bar(self.active_bar, ui) {
+                    self.pending_commands.push((cmd, None));
                 }
                 self.seq_view.show(ui, self.viewer);
             }
@@ -82,11 +80,14 @@ impl egui_dock::TabViewer for TabViewer<'_> {
 
         // Pane click → FocusScope. Geometry-only check; does not consume the
         // click, so the actual clicked widget (button, text field, terminal
-        // grid) still handles it normally.
+        // grid) still handles it normally. Routed through AppCommand so the
+        // focus mutation goes through the same single applier as everything
+        // else (Stage 2 of the focus refactor).
         if ui.rect_contains_pointer(pane_rect)
             && ui.ctx().input(|i| i.pointer.any_pressed())
+            && self.focus.scope != pane_scope
         {
-            self.focus.set_scope(pane_scope);
+            self.pending_commands.push((AppCommand::FocusPane(pane_scope), None));
         }
     }
 }

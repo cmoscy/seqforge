@@ -4,27 +4,19 @@ use std::sync::mpsc;
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
-use seqforge_core::{
-    dispatch, BioOps, CutSite, DispatchError, Document, SearchHit, ViewerRequest, ViewerResponse,
-    ViewerState,
-};
-
-use crate::socket::SocketRequest;
-
-/// Internal pending request: the command plus an optional one-shot channel to
-/// return the dispatch result. `None` for fire-and-forget (menu, terminal).
-type PendingReq = (ViewerRequest, Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>);
+use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse, ViewerState};
 
 use crate::bar::ActiveBar;
 use crate::browser::BrowserState;
-use crate::cli_install;
+use crate::command::{self, AppCommand, PendingCommand};
+use crate::event::EventSink;
 use crate::focus::FocusState;
-use crate::socket;
+use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
 
-const MAX_RECENT: usize = 10;
+pub(crate) const MAX_RECENT: usize = 10;
 
 // ── AppBio ────────────────────────────────────────────────────────────────────
 
@@ -63,8 +55,12 @@ pub struct AppState {
     // ── Transient: not persisted ──────────────────────────────────────────
     #[serde(skip)]
     pub seq_view: SequenceView,
+    /// Queue of commands waiting to be applied this frame. Every menu,
+    /// hotkey, bar, socket, and pane-click handler pushes into this and
+    /// `update()` drains it through `command::apply` exactly once per
+    /// frame. See `docs/focus-refactor.md` §2 for the lifecycle.
     #[serde(skip)]
-    pub pending_requests: Vec<PendingReq>,
+    pub pending_commands: Vec<PendingCommand>,
     #[serde(skip)]
     pub open_dialog: Option<FileDialog>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
@@ -77,7 +73,7 @@ pub struct AppState {
     #[serde(skip)]
     pub cli_status: Option<String>,
     #[serde(skip)]
-    toasts: egui_notify::Toasts,
+    pub(crate) toasts: egui_notify::Toasts,
     /// Inline Find / GoTo bar shown at the top of the Viewer tab.
     #[serde(skip)]
     pub active_bar: Option<ActiveBar>,
@@ -86,6 +82,11 @@ pub struct AppState {
     /// begins on `FocusScope::Terminal`.
     #[serde(skip)]
     pub focus: FocusState,
+    /// Internal event bus. Stage 2: defined but inert. Stage 3 wires
+    /// real subscribers; until then `emit` is a no-op.
+    #[serde(skip)]
+    #[allow(dead_code)] // Stage 3 reads this when wiring subscribers.
+    pub events: EventSink,
 }
 
 impl Default for AppState {
@@ -102,7 +103,7 @@ impl Default for AppState {
             viewer: ViewerState::default(),
             recent_files: Vec::new(),
             seq_view: SequenceView::default(),
-            pending_requests: Vec::new(),
+            pending_commands: Vec::new(),
             open_dialog: None,
             terminal: None,
             socket_rx: None,
@@ -110,6 +111,7 @@ impl Default for AppState {
             toasts: egui_notify::Toasts::default(),
             active_bar: None,
             focus: FocusState::new(),
+            events: EventSink::new(),
         }
     }
 }
@@ -146,15 +148,11 @@ impl SeqForgeApp {
 
         Self { state }
     }
+}
 
-    fn push_open(&mut self, path: PathBuf) {
-        self.state.seq_view.reset();
-        self.state.pending_requests.push((ViewerRequest::Open { path: path.clone() }, None));
-        // Prepend to recent list, dedup, cap at MAX_RECENT.
-        self.state.recent_files.retain(|p| p != &path);
-        self.state.recent_files.insert(0, path);
-        self.state.recent_files.truncate(MAX_RECENT);
-    }
+/// Convenience: push a command with no response channel.
+fn enqueue(state: &mut AppState, cmd: AppCommand) {
+    state.pending_commands.push((cmd, None));
 }
 
 impl eframe::App for SeqForgeApp {
@@ -164,31 +162,45 @@ impl eframe::App for SeqForgeApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Keyboard shortcuts ────────────────────────────────────────────────
-        let cmd = egui::Modifiers::COMMAND;
+        // Stage 2: hotkeys still consumed inline here, but each one enqueues
+        // an `AppCommand` instead of mutating state directly. Stage 4 will
+        // replace this block with `keymap::dispatch(...)` driven by a
+        // declarative KEYMAP table.
+        let cmd_mod = egui::Modifiers::COMMAND;
+        let mut hotkey_cmds: Vec<AppCommand> = Vec::new();
         ctx.input_mut(|i| {
-            if i.consume_key(cmd, egui::Key::O) {
-                let mut dialog = FileDialog::new();
-                dialog.pick_file();
-                self.state.open_dialog = Some(dialog);
+            if i.consume_key(cmd_mod, egui::Key::O) {
+                hotkey_cmds.push(AppCommand::PromptOpenFile);
             }
-            if i.consume_key(cmd, egui::Key::W) && self.state.viewer.open_doc.is_some() {
-                self.state.pending_requests.push((ViewerRequest::Close, None));
+            if i.consume_key(cmd_mod, egui::Key::W)
+                && command::is_enabled(&AppCommand::CloseDoc, &self.state)
+            {
+                hotkey_cmds.push(AppCommand::CloseDoc);
             }
-            if i.consume_key(cmd, egui::Key::F) && self.state.viewer.open_doc.is_some() {
-                self.state.active_bar.get_or_insert_with(|| ActiveBar::Find(Default::default()));
+            if i.consume_key(cmd_mod, egui::Key::F)
+                && command::is_enabled(&AppCommand::OpenFind, &self.state)
+            {
+                hotkey_cmds.push(AppCommand::OpenFind);
             }
-            if i.consume_key(cmd, egui::Key::G) && self.state.viewer.open_doc.is_some() {
-                self.state.active_bar.get_or_insert_with(|| ActiveBar::GoTo(Default::default()));
+            if i.consume_key(cmd_mod, egui::Key::G)
+                && command::is_enabled(&AppCommand::OpenGoTo, &self.state)
+            {
+                hotkey_cmds.push(AppCommand::OpenGoTo);
             }
         });
+        for c in hotkey_cmds {
+            enqueue(&mut self.state, c);
+        }
 
         // ── File-open dialog (menu-triggered) ─────────────────────────────────
+        // Dialog lifecycle stays direct: it's egui widget state, not a user
+        // command. Completion enqueues AppCommand::OpenFile.
         if let Some(dialog) = &mut self.state.open_dialog {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
                 let path = picked.to_owned();
                 self.state.open_dialog = None;
-                self.push_open(path);
+                self.state.pending_commands.push((AppCommand::OpenFile(path), None));
             } else if matches!(
                 dialog.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
@@ -198,81 +210,74 @@ impl eframe::App for SeqForgeApp {
         }
 
         // ── Menu bar ─────────────────────────────────────────────────────────
+        // Each menu item enqueues an AppCommand; `is_enabled` gates the
+        // greyed state so every UI surface uses the same predicate as the
+        // keymap (Stage 4) and the future agent reject path.
+        let mut menu_cmds: Vec<AppCommand> = Vec::new();
+        let recent_snapshot = self.state.recent_files.clone();
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open…  ⌘O").clicked() {
-                        let mut dialog = FileDialog::new();
-                        dialog.pick_file();
-                        self.state.open_dialog = Some(dialog);
+                        menu_cmds.push(AppCommand::PromptOpenFile);
                         ui.close_menu();
                     }
-                    let can_close = self.state.viewer.open_doc.is_some();
+                    let can_close = command::is_enabled(&AppCommand::CloseDoc, &self.state);
                     if ui.add_enabled(can_close, egui::Button::new("Close  ⌘W")).clicked() {
-                        self.state.pending_requests.push((ViewerRequest::Close, None));
+                        menu_cmds.push(AppCommand::CloseDoc);
                         ui.close_menu();
                     }
-                    if !self.state.recent_files.is_empty() {
+                    if !recent_snapshot.is_empty() {
                         ui.separator();
                         ui.menu_button("Recent Files", |ui| {
-                            let recent = self.state.recent_files.clone();
-                            for path in &recent {
+                            for path in &recent_snapshot {
                                 let label = path
                                     .file_name()
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("(unknown)");
                                 if ui.button(label).clicked() {
-                                    self.push_open(path.clone());
+                                    menu_cmds.push(AppCommand::OpenFile(path.clone()));
                                     ui.close_menu();
                                 }
                             }
                             ui.separator();
                             if ui.button("Clear Recent").clicked() {
-                                self.state.recent_files.clear();
+                                menu_cmds.push(AppCommand::ClearRecent);
                                 ui.close_menu();
                             }
                         });
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    let can_find = self.state.viewer.open_doc.is_some();
+                    let can_find = command::is_enabled(&AppCommand::OpenFind, &self.state);
                     if ui.add_enabled(can_find, egui::Button::new("Find…  ⌘F")).clicked() {
-                        self.state.active_bar =
-                            Some(ActiveBar::Find(Default::default()));
+                        menu_cmds.push(AppCommand::OpenFind);
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("View", |ui| {
                     if ui.button("Reset Layout").clicked() {
-                        self.state.dock_state = AppState::default().dock_state;
+                        menu_cmds.push(AppCommand::ResetLayout);
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Tools", |ui| {
                     ui.add_enabled(false, egui::Button::new("Restriction Sites…"));
                     ui.separator();
-                    let label = if cli_install::is_installed() {
+                    let label = if crate::cli_install::is_installed() {
                         "Reinstall 'seqforge' CLI to PATH"
                     } else {
                         "Install 'seqforge' CLI to PATH"
                     };
                     if ui.button(label).clicked() {
-                        self.state.cli_status = Some(match cli_install::install_cli_to_path() {
-                            Ok(r) => format!(
-                                "✓ seqforge installed to {}{}",
-                                r.target.display(),
-                                if r.was_updated { " (updated)" } else { "" }
-                            ),
-                            Err(e) => format!("✗ Install failed: {e}"),
-                        });
+                        menu_cmds.push(AppCommand::InstallCli);
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Navigate", |ui| {
-                    let can_nav = self.state.viewer.open_doc.is_some();
+                    let can_nav = command::is_enabled(&AppCommand::OpenGoTo, &self.state);
                     if ui.add_enabled(can_nav, egui::Button::new("Go to Position…  ⌘G")).clicked() {
-                        self.state.active_bar =
-                            Some(ActiveBar::GoTo(Default::default()));
+                        menu_cmds.push(AppCommand::OpenGoTo);
                         ui.close_menu();
                     }
                 });
@@ -283,6 +288,9 @@ impl eframe::App for SeqForgeApp {
                 });
             });
         });
+        for c in menu_cmds {
+            enqueue(&mut self.state, c);
+        }
 
         // ── Status bar ────────────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -312,34 +320,33 @@ impl eframe::App for SeqForgeApp {
         });
 
         // ── CLI install status window ─────────────────────────────────────────
-        if let Some(msg) = &self.state.cli_status.clone() {
+        if let Some(msg) = self.state.cli_status.clone() {
             let mut open = true;
+            let mut dismiss = false;
             egui::Window::new("CLI Install")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.label(msg);
+                    ui.label(&msg);
                     ui.add_space(4.0);
                     if ui.button("OK").clicked() {
-                        self.state.cli_status = None;
+                        dismiss = true;
                     }
                 });
-            if !open {
-                self.state.cli_status = None;
+            if !open || dismiss {
+                enqueue(&mut self.state, AppCommand::DismissCliStatus);
             }
         }
 
         // ── Dock area ─────────────────────────────────────────────────────────
-        // Destructure all AppState fields at once to satisfy the borrow checker
-        // when passing split mutable refs into TabViewer.
         let AppState {
             dock_state,
             browser,
             viewer,
             seq_view,
-            pending_requests,
+            pending_commands,
             terminal,
             active_bar,
             focus,
@@ -357,7 +364,7 @@ impl eframe::App for SeqForgeApp {
                             browser,
                             viewer,
                             seq_view,
-                            pending_requests,
+                            pending_commands,
                             terminal,
                             active_bar,
                             focus,
@@ -366,30 +373,37 @@ impl eframe::App for SeqForgeApp {
             });
 
         // ── Drain socket requests ─────────────────────────────────────────────
+        // Socket-originated `Open` is converted to `AppCommand::OpenFile` so
+        // recents and `seq_view` stay in sync — `Viewer(req)` is the
+        // generic pass-through for everything else.
         if let Some(rx) = &self.state.socket_rx {
             while let Ok((req, resp_tx)) = rx.try_recv() {
-                self.state.pending_requests.push((req, Some(resp_tx)));
+                let cmd = match req {
+                    ViewerRequest::Open { path } => AppCommand::OpenFile(path),
+                    other => AppCommand::Viewer(other),
+                };
+                self.state.pending_commands.push((cmd, Some(resp_tx)));
             }
         }
 
-        // ── Process pending requests ──────────────────────────────────────────
-        let reqs: Vec<PendingReq> = self.state.pending_requests.drain(..).collect();
-        for (req, resp_tx) in reqs {
-            if let ViewerRequest::Open { ref path } = req {
-                // Track opens that come from socket/terminal (not already tracked via push_open).
-                let path = path.clone();
-                self.state.recent_files.retain(|p| p != &path);
-                self.state.recent_files.insert(0, path);
-                self.state.recent_files.truncate(MAX_RECENT);
-                self.state.seq_view.reset();
-            }
-            let result = dispatch(&mut self.state.viewer, &AppBio, req);
+        // ── Apply commands ────────────────────────────────────────────────────
+        // The single mutation site. Drains the queue exactly once per frame;
+        // any commands enqueued *during* application (e.g. one variant
+        // chaining into another) wait for the next frame, which keeps the
+        // lifecycle ordering predictable.
+        let cmds: Vec<PendingCommand> = self.state.pending_commands.drain(..).collect();
+        for (cmd, resp_tx) in cmds {
+            let result = command::apply(cmd, &mut self.state, &AppBio);
             if let Err(e) = &result {
-                eprintln!("[dispatch error] {e}");
+                eprintln!("[apply error] {e}");
                 self.state.toasts.error(e.to_string());
             }
             if let Some(tx) = resp_tx {
-                let _ = tx.send(result);
+                // Socket-facing oneshot expects a concrete ViewerResponse.
+                // GUI-only commands return Ok(None); map that to Ok so the
+                // CLI client sees a successful no-op rather than an error.
+                let wire = result.map(|opt| opt.unwrap_or(ViewerResponse::Ok));
+                let _ = tx.send(wire);
             }
         }
 

@@ -1,5 +1,6 @@
 use egui::{Key, Modifiers};
-use seqforge_core::ViewerRequest;
+
+use crate::command::AppCommand;
 
 fn find_input_id() -> egui::Id { egui::Id::new("seqforge_find_input") }
 fn goto_input_id() -> egui::Id { egui::Id::new("seqforge_goto_input") }
@@ -51,13 +52,15 @@ pub enum ActiveBar {
 
 /// Render the active inline bar at the top of the viewer pane.
 ///
-/// Returns a `ViewerRequest` when the user submits (Enter or button click),
-/// and sets `*bar` to `None` when the bar should close (Escape, ✕, or submit).
-pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<ViewerRequest> {
+/// Returns an [`AppCommand`] when the user submits (Enter or button
+/// click) or dismisses (Escape, ✕): one of `SubmitFind`, `SubmitGoTo`,
+/// or `DismissOverlay`. The bar does not mutate `*bar` itself any more —
+/// `apply()` closes it in response to the returned command (Stage 2 of
+/// the focus refactor — see `docs/focus-refactor.md`).
+pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<AppCommand> {
     let Some(active) = bar else { return None };
 
-    let mut request: Option<ViewerRequest> = None;
-    let mut close = false;
+    let mut command: Option<AppCommand> = None;
 
     let frame = egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
@@ -89,18 +92,16 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
                     any_focused = text_resp.has_focus() || mismatch_resp.has_focus();
 
                     if ui.button("Find").clicked() {
-                        request = Some(ViewerRequest::Find {
+                        command = Some(AppCommand::SubmitFind {
                             pattern: b.pattern.clone(),
                             mismatches: b.mismatches,
                         });
-                        close = true;
                     }
                     if ui.button("Clear").clicked() {
-                        request = Some(ViewerRequest::Find {
+                        command = Some(AppCommand::SubmitFind {
                             pattern: String::new(),
                             mismatches: 0,
                         });
-                        close = true;
                     }
 
                     // Enter submits from any focused bar widget; consumed so it
@@ -108,11 +109,10 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
                     if any_focused
                         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
                     {
-                        request = Some(ViewerRequest::Find {
+                        command = Some(AppCommand::SubmitFind {
                             pattern: b.pattern.clone(),
                             mismatches: b.mismatches,
                         });
-                        close = true;
                     }
                 }
 
@@ -133,8 +133,7 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
 
                     if ui.button("Go").clicked() {
                         if let Ok(pos) = b.input.trim().parse::<usize>() {
-                            request = Some(ViewerRequest::GoTo { position: pos });
-                            close = true;
+                            command = Some(AppCommand::SubmitGoTo { position: pos });
                         }
                     }
 
@@ -142,8 +141,7 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
                         && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
                     {
                         if let Ok(pos) = b.input.trim().parse::<usize>() {
-                            request = Some(ViewerRequest::GoTo { position: pos });
-                            close = true;
+                            command = Some(AppCommand::SubmitGoTo { position: pos });
                         }
                     }
                 }
@@ -151,12 +149,12 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
 
             // Escape closes from any focused bar widget; consumed to prevent fallthrough.
             if any_focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-                close = true;
+                command = Some(AppCommand::DismissOverlay);
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("✕").clicked() {
-                    close = true;
+                    command = Some(AppCommand::DismissOverlay);
                 }
             });
         });
@@ -164,9 +162,5 @@ pub fn show_bar(bar: &mut Option<ActiveBar>, ui: &mut egui::Ui) -> Option<Viewer
 
     ui.separator();
 
-    if close {
-        *bar = None;
-    }
-
-    request
+    command
 }
