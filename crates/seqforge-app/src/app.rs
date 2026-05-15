@@ -9,7 +9,7 @@ use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerR
 use crate::bar::ActiveBar;
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
-use crate::event::EventSink;
+use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
@@ -82,11 +82,17 @@ pub struct AppState {
     /// begins on `FocusScope::Terminal`.
     #[serde(skip)]
     pub focus: FocusState,
-    /// Internal event bus. Stage 2: defined but inert. Stage 3 wires
-    /// real subscribers; until then `emit` is a no-op.
+    /// Producer side of the event bus. `apply()` emits through here.
     #[serde(skip)]
-    #[allow(dead_code)] // Stage 3 reads this when wiring subscribers.
     pub events: EventSink,
+    /// Consumer side of the event bus. Drained into [`event_log`]
+    /// once per frame.
+    #[serde(skip)]
+    pub event_rx: Option<mpsc::Receiver<AppEvent>>,
+    /// Bounded ring of recent events. Read by the status bar today;
+    /// future panels/plugins will subscribe via their own receivers.
+    #[serde(skip)]
+    pub event_log: EventLog,
 }
 
 impl Default for AppState {
@@ -97,6 +103,7 @@ impl Default for AppState {
         let [_viewer, _terminal] =
             surface.split_below(NodeIndex::root(), 0.70, vec![Tab::Terminal]);
 
+        let (events, event_rx) = EventSink::channel();
         Self {
             dock_state,
             browser: BrowserState::default(),
@@ -111,7 +118,9 @@ impl Default for AppState {
             toasts: egui_notify::Toasts::default(),
             active_bar: None,
             focus: FocusState::new(),
-            events: EventSink::new(),
+            events,
+            event_rx: Some(event_rx),
+            event_log: EventLog::default(),
         }
     }
 }
@@ -128,6 +137,13 @@ impl SeqForgeApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+
+        // Event bus: if state came from storage, the `#[serde(skip)]`
+        // defaults gave us a sink with a dropped receiver. Always
+        // install a fresh channel so emits have somewhere to land.
+        let (events, event_rx) = EventSink::channel();
+        state.events = events;
+        state.event_rx = Some(event_rx);
 
         // Start the Unix domain socket listener and wire up the terminal.
         let socket_path = match socket::start_socket_listener(cc.egui_ctx.clone()) {
@@ -161,6 +177,13 @@ impl eframe::App for SeqForgeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Drain events ──────────────────────────────────────────────────────
+        // Pull anything emitted by the *previous* frame's `apply()` into the
+        // event log so this frame's status bar / panels see fresh data.
+        if let Some(rx) = &self.state.event_rx {
+            self.state.event_log.drain_from(rx);
+        }
+
         // ── Keyboard shortcuts ────────────────────────────────────────────────
         // Stage 2: hotkeys still consumed inline here, but each one enqueues
         // an `AppCommand` instead of mutating state directly. Stage 4 will
@@ -313,8 +336,15 @@ impl eframe::App for SeqForgeApp {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Stage 1 debug indicator: confirms pane-click → FocusScope wiring.
-                    // Remove once the keymap dispatcher (Stage 4) is the visible proof.
                     ui.label(format!("focus: {:?}", self.state.focus.scope));
+                    // Stage 3 debug indicator: shows the most recent AppEvent.
+                    // Confirms the event bus is actually firing. Both labels are
+                    // diagnostic — replace with proper status surfaces once the
+                    // refactor lands.
+                    if let Some(ev) = self.state.event_log.latest() {
+                        ui.separator();
+                        ui.label(ev.short_label());
+                    }
                 });
             });
         });

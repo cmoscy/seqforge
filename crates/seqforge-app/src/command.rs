@@ -24,7 +24,15 @@ use seqforge_core::{
 use crate::app::AppState;
 use crate::bar::ActiveBar;
 use crate::cli_install;
+use crate::event::AppEvent;
 use crate::focus::FocusScope;
+
+// Overlay tag constants used by `AppEvent::Overlay{Pushed,Popped}`.
+// Stage 5 formalises these as `OverlayStack` named identifiers; for
+// now they live alongside the variants that emit them.
+const TAG_FIND_BAR: &str = "FindBar";
+const TAG_GOTO_BAR: &str = "GoToBar";
+const TAG_CLI_STATUS: &str = "CliStatus";
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
@@ -131,8 +139,15 @@ pub fn apply<B: BioOps>(
             state.recent_files.retain(|p| p != &path);
             state.recent_files.insert(0, path.clone());
             state.recent_files.truncate(crate::app::MAX_RECENT);
+            let sel_before = state.viewer.selection;
             let resp = dispatch(&mut state.viewer, bio, ViewerRequest::Open { path })?;
-            // Stage 3 will emit AppEvent::DocOpened here.
+            if let Some(doc) = &state.viewer.open_doc {
+                state.events.emit(AppEvent::DocOpened {
+                    name: doc.name.clone(),
+                    len: doc.sequence.len(),
+                });
+            }
+            emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
 
@@ -142,59 +157,85 @@ pub fn apply<B: BioOps>(
         }
 
         CloseDoc => {
+            let sel_before = state.viewer.selection;
             let resp = dispatch(&mut state.viewer, bio, ViewerRequest::Close)?;
-            // Stage 3 will emit AppEvent::DocClosed here.
+            state.events.emit(AppEvent::DocClosed);
+            emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
 
         OpenFind => {
-            state
-                .active_bar
-                .get_or_insert_with(|| ActiveBar::Find(Default::default()));
+            if state.active_bar.is_none() {
+                state.active_bar = Some(ActiveBar::Find(Default::default()));
+                state.events.emit(AppEvent::OverlayPushed(TAG_FIND_BAR));
+            }
             Ok(None)
         }
 
         OpenGoTo => {
-            state
-                .active_bar
-                .get_or_insert_with(|| ActiveBar::GoTo(Default::default()));
+            if state.active_bar.is_none() {
+                state.active_bar = Some(ActiveBar::GoTo(Default::default()));
+                state.events.emit(AppEvent::OverlayPushed(TAG_GOTO_BAR));
+            }
             Ok(None)
         }
 
         DismissOverlay => {
             // Stage 5 will pop a real OverlayStack; for now the only
             // bar-type overlay is `active_bar`.
-            state.active_bar = None;
+            if let Some(tag) = active_bar_tag(&state.active_bar) {
+                state.active_bar = None;
+                state.events.emit(AppEvent::OverlayPopped(tag));
+            }
             Ok(None)
         }
 
         SubmitFind { pattern, mismatches } => {
-            state.active_bar = None;
+            if let Some(tag) = active_bar_tag(&state.active_bar) {
+                state.active_bar = None;
+                state.events.emit(AppEvent::OverlayPopped(tag));
+            }
+            let sel_before = state.viewer.selection;
             let resp = dispatch(
                 &mut state.viewer,
                 bio,
                 ViewerRequest::Find { pattern, mismatches },
             )?;
+            if let ViewerResponse::SearchResults { count, .. } = &resp {
+                state.events.emit(AppEvent::SearchCompleted { hits: *count });
+            }
+            emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
 
         SubmitGoTo { position } => {
-            state.active_bar = None;
+            if let Some(tag) = active_bar_tag(&state.active_bar) {
+                state.active_bar = None;
+                state.events.emit(AppEvent::OverlayPopped(tag));
+            }
+            let sel_before = state.viewer.selection;
             let resp = dispatch(
                 &mut state.viewer,
                 bio,
                 ViewerRequest::GoTo { position },
             )?;
+            emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
 
         DismissCliStatus => {
-            state.cli_status = None;
+            if state.cli_status.is_some() {
+                state.cli_status = None;
+                state.events.emit(AppEvent::OverlayPopped(TAG_CLI_STATUS));
+            }
             Ok(None)
         }
 
         FocusPane(scope) => {
-            state.focus.set_scope(scope);
+            if state.focus.scope != scope {
+                state.focus.set_scope(scope);
+                state.events.emit(AppEvent::FocusChanged(scope));
+            }
             Ok(None)
         }
 
@@ -212,12 +253,53 @@ pub fn apply<B: BioOps>(
                 ),
                 Err(e) => format!("✗ Install failed: {e}"),
             });
+            state.events.emit(AppEvent::OverlayPushed(TAG_CLI_STATUS));
             Ok(None)
         }
 
         Viewer(req) => {
+            // Pass-through path: classify response shape into the right
+            // events so socket-originated commands generate the same
+            // signals as their GUI-originated equivalents.
+            let was_open = state.viewer.open_doc.is_some();
+            let sel_before = state.viewer.selection;
             let resp = dispatch(&mut state.viewer, bio, req)?;
+            match &resp {
+                ViewerResponse::SearchResults { count, .. } => {
+                    state.events.emit(AppEvent::SearchCompleted { hits: *count });
+                }
+                ViewerResponse::Ok => {
+                    // Close manifests as Ok with the doc cleared.
+                    if was_open && state.viewer.open_doc.is_none() {
+                        state.events.emit(AppEvent::DocClosed);
+                    }
+                }
+                _ => {}
+            }
+            emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
+    }
+}
+
+/// Snapshot helper: emits `SelectionChanged` iff `state.viewer.selection`
+/// differs from `before`. Pulled out so every viewer-dispatching variant
+/// has the same diffing contract.
+fn emit_selection_diff(state: &AppState, before: Option<seqforge_core::Selection>) {
+    if state.viewer.selection != before {
+        state.events.emit(AppEvent::SelectionChanged {
+            selection: state.viewer.selection,
+        });
+    }
+}
+
+/// Returns the overlay tag for whichever bar is currently active, or
+/// `None` if no bar is open. Stage 5 replaces this with a real
+/// `OverlayStack::top_tag()`.
+fn active_bar_tag(bar: &Option<ActiveBar>) -> Option<&'static str> {
+    match bar {
+        Some(ActiveBar::Find(_)) => Some(TAG_FIND_BAR),
+        Some(ActiveBar::GoTo(_)) => Some(TAG_GOTO_BAR),
+        None => None,
     }
 }
