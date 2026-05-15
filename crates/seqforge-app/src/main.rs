@@ -1,6 +1,8 @@
 mod app;
+mod bar;
 mod browser;
 mod cli_install;
+mod focus;
 mod socket;
 mod tabs;
 mod terminal;

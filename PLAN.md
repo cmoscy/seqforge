@@ -134,6 +134,19 @@ struct AppState {
 - For MVP, `open_doc` is `Option<Document>` (one file at a time). Multi-doc (`Vec<Document>`) deferred to post-MVP.
 - **Reference: Rerun's `re_viewer` crate** for store-vs-UI-state separation in egui.
 
+**Keyboard focus, command dispatch, and event model:** see [`docs/focus-refactor.md`](docs/focus-refactor.md) — the binding architecture reference.
+
+Short summary (full detail in the linked doc):
+
+- `FocusScope { Viewer, Terminal, Browser }` — sticky, click-driven, in `AppState`.
+- `KeyContext` — stack of `&'static str` tags (`"Pane:Viewer"`, `"Overlay:FindBar"`, `"TextInput"`, …). Keymap `Binding`s match against it via `when_context` predicates.
+- `OverlayStack` — single stack for Find bar, GoTo bar, file dialogs, future modals. Top of stack owns input.
+- `AppCommand` — closed enum; every user-, menu-, hotkey-, agent-, and socket-initiated action becomes one. `apply()` is the single mutation site.
+- `AppEvent` — broadcast after `apply()`; consumed by status bar today, by panels/plugins later.
+- Frame lifecycle: drain socket → dispatch keymap → render → apply commands. No `consume_key` outside `keymap::dispatch`.
+
+The previous two-layer sketch (`FocusOwner` + `bar_field_has_focus`) is superseded; `bar_field_has_focus` is removed in Stage 5 of the refactor.
+
 ---
 
 ## Bio core (dependencies)
@@ -490,18 +503,39 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 ---
 
-### Phase 8 — Persistence + polish *(1 day)*
+### Phase 8 — Persistence + polish ✅ DONE
 
 **Goal:** App feels finished for MVP scope.
 
-- [ ] Recent files list persisted in eframe storage; `File → Recent` submenu
-- [ ] Dock layout persistence (already in Phase 2 — verify)
-- [ ] Keyboard shortcuts: `Cmd/Ctrl+O`, `Cmd/Ctrl+F`, `Cmd/Ctrl+G`, `Cmd/Ctrl+W`
-- [ ] Shift+click range selection: check `ui.input(|i| i.modifiers.shift)` in `SequenceView::show`; if set, extend `selection.focus` while holding `selection.anchor` fixed (cursor placed by prior click becomes the anchor)
-- [ ] Status bar at bottom: cursor position, selection length, doc length, topology
-- [ ] Error toasts via `egui-notify` for failed file loads / bad commands
+- [x] Recent files list persisted in eframe storage; `File → Recent` submenu (max 10, deduped)
+- [x] Dock layout persistence (already in Phase 2 — verified)
+- [x] Keyboard shortcuts: `Cmd/Ctrl+O`, `Cmd/Ctrl+F`, `Cmd/Ctrl+G`, `Cmd/Ctrl+W`
+- [x] Shift+click range selection: extends `selection.focus` while holding `selection.anchor` fixed
+- [x] Status bar at bottom: cursor position, selection length, doc length, topology
+- [x] Error toasts via `egui-notify` for failed file loads / bad commands
+- [x] `Edit → Find…` and `Navigate → Go to Position…` wired to inline viewer bar
 
-**Done when:** the MVP verification checklist (top of this plan) all passes.
+**Find / GoTo UX — inline bar (not floating dialogs):**
+
+Both Find and GoTo use an inline bar rendered at the top of the Viewer tab pane, not floating `Window` dialogs. This follows the VSCode / SnapGene convention: the document stays live and interactive while search or navigation is active.
+
+```
+┌─────────────────────────────────────────────────┐
+│ Find: [ATGCNNNN______] Mismatches: [0] [Find] [Clear] [✕] │  ← inline bar
+├─────────────────────────────────────────────────┤
+│  sequence viewer content …                      │
+└─────────────────────────────────────────────────┘
+```
+
+Find / GoTo bars are `Overlay::FindBar` / `Overlay::GoToBar` variants on the shared `OverlayStack`; submission produces an `AppCommand::SubmitFind` / `AppCommand::SubmitGoTo` that `apply()` translates into a `ViewerRequest`. Escape pops the overlay; clicking the bar's text field is the only way it captures input. See [`docs/focus-refactor.md`](docs/focus-refactor.md) for the overlay model and §5 "How to add X" for adding a new overlay.
+
+**Key files (post-refactor):**
+
+- `crates/seqforge-app/src/overlay.rs` — `Overlay`, `OverlayStack`, `FindBar`, `GoToBar` (absorbs the old `bar.rs`)
+- `crates/seqforge-app/src/keymap.rs` — `⌘F` / `⌘G` bindings with `when_context = ["Pane:Viewer"]`
+- `crates/seqforge-app/src/command.rs` — `AppCommand::{OpenFind, OpenGoTo, SubmitFind, SubmitGoTo, DismissOverlay}` and `apply()`
+
+**Done when:** the MVP verification checklist (top of this plan) all passes. ✅
 
 ---
 

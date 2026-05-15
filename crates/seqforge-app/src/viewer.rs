@@ -318,9 +318,21 @@ impl SequenceView {
                     screen_to_seq(p, rect, char_width, line_width, seq_len, block_h)
                 });
 
+                let shift_held = ui.input(|i| i.modifiers.shift);
+
                 if response.clicked() {
                     if let Some(pos) = ptr {
-                        if let Some(&(_, feat_idx)) =
+                        if shift_held {
+                            // Shift+click: extend focus while keeping existing anchor.
+                            if let Some(seq_pos) = ptr_seq {
+                                if let Some(sel) = vstate.selection {
+                                    vstate.selection =
+                                        Some(Selection { anchor: sel.anchor, focus: seq_pos });
+                                } else {
+                                    vstate.selection = Some(Selection::cursor(seq_pos));
+                                }
+                            }
+                        } else if let Some(&(_, feat_idx)) =
                             annot_hits.iter().find(|(r, _)| r.contains(pos))
                         {
                             let feat = &doc.features[feat_idx];

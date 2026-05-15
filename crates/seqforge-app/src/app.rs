@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
@@ -14,12 +15,16 @@ use crate::socket::SocketRequest;
 /// return the dispatch result. `None` for fire-and-forget (menu, terminal).
 type PendingReq = (ViewerRequest, Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>);
 
+use crate::bar::ActiveBar;
 use crate::browser::BrowserState;
 use crate::cli_install;
+use crate::focus::FocusState;
 use crate::socket;
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+
+const MAX_RECENT: usize = 10;
 
 // ── AppBio ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +58,8 @@ pub struct AppState {
     pub browser: BrowserState,
     /// Document + selection state — no GUI deps; persisted across restarts.
     pub viewer: ViewerState,
+    /// Recently opened files (most-recent first, max 10).
+    pub recent_files: Vec<PathBuf>,
     // ── Transient: not persisted ──────────────────────────────────────────
     #[serde(skip)]
     pub seq_view: SequenceView,
@@ -69,6 +76,16 @@ pub struct AppState {
     /// Ephemeral status message shown after a CLI install attempt.
     #[serde(skip)]
     pub cli_status: Option<String>,
+    #[serde(skip)]
+    toasts: egui_notify::Toasts,
+    /// Inline Find / GoTo bar shown at the top of the Viewer tab.
+    #[serde(skip)]
+    pub active_bar: Option<ActiveBar>,
+    /// Active pane + key-context stack. Stage 1 of the focus refactor;
+    /// see `docs/focus-refactor.md`. Not persisted — startup always
+    /// begins on `FocusScope::Terminal`.
+    #[serde(skip)]
+    pub focus: FocusState,
 }
 
 impl Default for AppState {
@@ -83,12 +100,16 @@ impl Default for AppState {
             dock_state,
             browser: BrowserState::default(),
             viewer: ViewerState::default(),
+            recent_files: Vec::new(),
             seq_view: SequenceView::default(),
             pending_requests: Vec::new(),
             open_dialog: None,
             terminal: None,
             socket_rx: None,
             cli_status: None,
+            toasts: egui_notify::Toasts::default(),
+            active_bar: None,
+            focus: FocusState::new(),
         }
     }
 }
@@ -125,6 +146,15 @@ impl SeqForgeApp {
 
         Self { state }
     }
+
+    fn push_open(&mut self, path: PathBuf) {
+        self.state.seq_view.reset();
+        self.state.pending_requests.push((ViewerRequest::Open { path: path.clone() }, None));
+        // Prepend to recent list, dedup, cap at MAX_RECENT.
+        self.state.recent_files.retain(|p| p != &path);
+        self.state.recent_files.insert(0, path);
+        self.state.recent_files.truncate(MAX_RECENT);
+    }
 }
 
 impl eframe::App for SeqForgeApp {
@@ -133,14 +163,32 @@ impl eframe::App for SeqForgeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Keyboard shortcuts ────────────────────────────────────────────────
+        let cmd = egui::Modifiers::COMMAND;
+        ctx.input_mut(|i| {
+            if i.consume_key(cmd, egui::Key::O) {
+                let mut dialog = FileDialog::new();
+                dialog.pick_file();
+                self.state.open_dialog = Some(dialog);
+            }
+            if i.consume_key(cmd, egui::Key::W) && self.state.viewer.open_doc.is_some() {
+                self.state.pending_requests.push((ViewerRequest::Close, None));
+            }
+            if i.consume_key(cmd, egui::Key::F) && self.state.viewer.open_doc.is_some() {
+                self.state.active_bar.get_or_insert_with(|| ActiveBar::Find(Default::default()));
+            }
+            if i.consume_key(cmd, egui::Key::G) && self.state.viewer.open_doc.is_some() {
+                self.state.active_bar.get_or_insert_with(|| ActiveBar::GoTo(Default::default()));
+            }
+        });
+
         // ── File-open dialog (menu-triggered) ─────────────────────────────────
         if let Some(dialog) = &mut self.state.open_dialog {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
-                self.state
-                    .pending_requests
-                    .push((ViewerRequest::Open { path: picked.to_owned() }, None));
+                let path = picked.to_owned();
                 self.state.open_dialog = None;
+                self.push_open(path);
             } else if matches!(
                 dialog.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
@@ -153,20 +201,46 @@ impl eframe::App for SeqForgeApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open…").clicked() {
+                    if ui.button("Open…  ⌘O").clicked() {
                         let mut dialog = FileDialog::new();
                         dialog.pick_file();
                         self.state.open_dialog = Some(dialog);
                         ui.close_menu();
                     }
                     let can_close = self.state.viewer.open_doc.is_some();
-                    if ui.add_enabled(can_close, egui::Button::new("Close")).clicked() {
+                    if ui.add_enabled(can_close, egui::Button::new("Close  ⌘W")).clicked() {
                         self.state.pending_requests.push((ViewerRequest::Close, None));
                         ui.close_menu();
                     }
+                    if !self.state.recent_files.is_empty() {
+                        ui.separator();
+                        ui.menu_button("Recent Files", |ui| {
+                            let recent = self.state.recent_files.clone();
+                            for path in &recent {
+                                let label = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("(unknown)");
+                                if ui.button(label).clicked() {
+                                    self.push_open(path.clone());
+                                    ui.close_menu();
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("Clear Recent").clicked() {
+                                self.state.recent_files.clear();
+                                ui.close_menu();
+                            }
+                        });
+                    }
                 });
                 ui.menu_button("Edit", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Find…"));
+                    let can_find = self.state.viewer.open_doc.is_some();
+                    if ui.add_enabled(can_find, egui::Button::new("Find…  ⌘F")).clicked() {
+                        self.state.active_bar =
+                            Some(ActiveBar::Find(Default::default()));
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     if ui.button("Reset Layout").clicked() {
@@ -195,12 +269,44 @@ impl eframe::App for SeqForgeApp {
                     }
                 });
                 ui.menu_button("Navigate", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Go to Position…"));
+                    let can_nav = self.state.viewer.open_doc.is_some();
+                    if ui.add_enabled(can_nav, egui::Button::new("Go to Position…  ⌘G")).clicked() {
+                        self.state.active_bar =
+                            Some(ActiveBar::GoTo(Default::default()));
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
                         ui.close_menu();
                     }
+                });
+            });
+        });
+
+        // ── Status bar ────────────────────────────────────────────────────────
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                if let Some(doc) = &self.state.viewer.open_doc {
+                    let seq_len = doc.sequence.len();
+                    let topology = format!("{:?}", doc.topology);
+                    ui.label(format!("{seq_len} bp  ·  {topology}"));
+                    if let Some(sel) = self.state.viewer.selection {
+                        if sel.is_cursor() {
+                            ui.label(format!("pos {}", sel.anchor + 1));
+                        } else {
+                            let (s, e) = sel.ordered();
+                            ui.label(format!("sel {s}–{e}  ({} bp)", e - s));
+                        }
+                    }
+                } else {
+                    ui.label("No file open");
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Stage 1 debug indicator: confirms pane-click → FocusScope wiring.
+                    // Remove once the keymap dispatcher (Stage 4) is the visible proof.
+                    ui.label(format!("focus: {:?}", self.state.focus.scope));
                 });
             });
         });
@@ -235,6 +341,8 @@ impl eframe::App for SeqForgeApp {
             seq_view,
             pending_requests,
             terminal,
+            active_bar,
+            focus,
             ..
         } = &mut self.state;
 
@@ -251,6 +359,8 @@ impl eframe::App for SeqForgeApp {
                             seq_view,
                             pending_requests,
                             terminal,
+                            active_bar,
+                            focus,
                         },
                     );
             });
@@ -265,21 +375,25 @@ impl eframe::App for SeqForgeApp {
         // ── Process pending requests ──────────────────────────────────────────
         let reqs: Vec<PendingReq> = self.state.pending_requests.drain(..).collect();
         for (req, resp_tx) in reqs {
-            if matches!(req, ViewerRequest::Open { .. }) {
+            if let ViewerRequest::Open { ref path } = req {
+                // Track opens that come from socket/terminal (not already tracked via push_open).
+                let path = path.clone();
+                self.state.recent_files.retain(|p| p != &path);
+                self.state.recent_files.insert(0, path);
+                self.state.recent_files.truncate(MAX_RECENT);
                 self.state.seq_view.reset();
             }
             let result = dispatch(&mut self.state.viewer, &AppBio, req);
-            match &resp_tx {
-                Some(_) => {} // result returned to caller via channel below
-                None => {
-                    if let Err(e) = &result {
-                        eprintln!("[dispatch error] {e}");
-                    }
-                }
+            if let Err(e) = &result {
+                eprintln!("[dispatch error] {e}");
+                self.state.toasts.error(e.to_string());
             }
             if let Some(tx) = resp_tx {
                 let _ = tx.send(result);
             }
         }
+
+        // ── Toast notifications ───────────────────────────────────────────────
+        self.state.toasts.show(ctx);
     }
 }
