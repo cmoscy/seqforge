@@ -4,7 +4,7 @@ use seqforge_core::{Feature, FeatureKind, Selection, Strand, ViewerState};
 
 const FONT_SIZE: f32 = 13.0;
 const ANNOT_ROW_HEIGHT: f32 = 16.0;
-const CUT_SITE_ROW_HEIGHT: f32 = 22.0;
+const CUT_LABEL_ROW_H: f32 = 14.0;
 const RULER_HEIGHT: f32 = 14.0;
 const STRAND_HEIGHT: f32 = 17.0;
 const BLOCK_GAP: f32 = 14.0;
@@ -13,44 +13,56 @@ const RIGHT_MARGIN: f32 = 20.0;
 const SELECTION_COLOR: Color32 = Color32::from_rgb(173, 214, 255);
 const CURSOR_COLOR: Color32 = Color32::from_rgb(50, 120, 255);
 const CUT_SITE_COLOR: Color32 = Color32::from_rgb(220, 80, 200);
+const LABEL_CHAR_W: f32 = (FONT_SIZE - 3.0) * 0.55;
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
 
-/// Assign features to non-overlapping rows (port of seqviz `stackElements`).
-/// Sorts by start (then end), then greedily packs each feature into the first
-/// row whose last element ends at or before the current feature's start.
-/// Returns `rows[row_idx] = [feat_idx, …]`.
-fn stack_features(features: &[Feature]) -> Vec<Vec<usize>> {
-    if features.is_empty() {
-        return vec![];
+/// Core greedy interval stacking (port of seqviz `stackElements`).
+/// Sorts ranges by start, then packs each into the first row whose last
+/// element ends at or before the current range's start.
+/// Returns `(item_idx → row, n_rows)`.
+fn greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize) {
+    if ranges.is_empty() {
+        return (vec![], 0);
     }
-    let mut order: Vec<usize> = (0..features.len()).collect();
-    order.sort_by(|&a, &b| {
-        features[a]
-            .range
-            .start
-            .cmp(&features[b].range.start)
-            .then(features[a].range.end.cmp(&features[b].range.end))
-    });
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by_key(|&i| ranges[i].0);
 
-    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut result = vec![0usize; ranges.len()];
     let mut row_ends: Vec<usize> = Vec::new();
 
-    for feat_idx in order {
-        let start = features[feat_idx].range.start;
-        let end = features[feat_idx].range.end;
+    for idx in order {
+        let (start, end) = ranges[idx];
         match row_ends.iter().position(|&e| e <= start) {
             Some(r) => {
-                rows[r].push(feat_idx);
                 row_ends[r] = end;
+                result[idx] = r;
             }
             None => {
-                rows.push(vec![feat_idx]);
                 row_ends.push(end);
+                result[idx] = row_ends.len() - 1;
             }
         }
     }
-    rows
+    (result, row_ends.len())
+}
+
+fn stack_features(features: &[Feature]) -> (Vec<usize>, usize) {
+    let ranges: Vec<(usize, usize)> =
+        features.iter().map(|f| (f.range.start, f.range.end)).collect();
+    greedy_stack(&ranges)
+}
+
+fn stack_cut_labels(sites: &[seqforge_core::CutSite], char_width: f32) -> (Vec<usize>, usize) {
+    let ranges: Vec<(usize, usize)> = sites
+        .iter()
+        .map(|s| {
+            let half_px = s.enzyme.len() as f32 * LABEL_CHAR_W * 0.5 + 4.0;
+            let half_bases = (half_px / char_width).ceil() as usize + 1;
+            (s.cut_pos.saturating_sub(half_bases), s.cut_pos + half_bases)
+        })
+        .collect();
+    greedy_stack(&ranges)
 }
 
 // ── Colors ────────────────────────────────────────────────────────────────────
@@ -115,6 +127,11 @@ pub struct SequenceView {
     cached_complement: Vec<u8>,
     cached_feat_row: Vec<usize>, // feat_idx → stacked row index
     cached_n_annot_rows: usize,
+    // Cached per-enzyme-result values — recomputed when cut site positions or char_width changes.
+    cached_cut_site_key: Vec<usize>, // sorted cut positions — invalidation key
+    cached_char_width: f32,
+    cached_cut_label_row: Vec<usize>, // site_idx → stacked row index
+    cached_n_cut_label_rows: usize,
 }
 
 impl SequenceView {
@@ -125,6 +142,10 @@ impl SequenceView {
         self.cached_complement.clear();
         self.cached_feat_row.clear();
         self.cached_n_annot_rows = 0;
+        self.cached_cut_site_key = Vec::new();
+        self.cached_char_width = 0.0;
+        self.cached_cut_label_row.clear();
+        self.cached_n_cut_label_rows = 0;
     }
 
     /// Render the sequence viewer. Selection and document data are read/written
@@ -152,14 +173,9 @@ impl SequenceView {
         // Recompute doc-derived values only when the document changes.
         if self.cached_seq_len != seq_len {
             self.cached_complement = complement(seq);
-            let stacked_rows = stack_features(&doc.features);
-            self.cached_n_annot_rows = stacked_rows.len();
-            self.cached_feat_row = vec![0usize; doc.features.len()];
-            for (row_idx, row) in stacked_rows.iter().enumerate() {
-                for &feat_idx in row {
-                    self.cached_feat_row[feat_idx] = row_idx;
-                }
-            }
+            let (feat_rows, n_rows) = stack_features(&doc.features);
+            self.cached_feat_row = feat_rows;
+            self.cached_n_annot_rows = n_rows;
             self.cached_seq_len = seq_len;
         }
 
@@ -183,19 +199,48 @@ impl SequenceView {
         let line_width = ((avail / char_width) as usize).max(10);
 
         let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
-        let cut_site_section_h =
-            if vstate.cut_sites.is_empty() { 0.0 } else { CUT_SITE_ROW_HEIGHT };
 
-        let block_h =
-            RULER_HEIGHT + STRAND_HEIGHT * 2.0 + annot_section_h + cut_site_section_h + BLOCK_GAP;
+        // Recompute cut-label stacking when the set of cut positions or char_width changes.
+        // Using sorted positions as the key catches same-count enzyme swaps (e.g. EcoRI→BamHI).
+        // char_width is pane-width-dependent, so a resize also invalidates the cache.
+        let cut_site_key: Vec<usize> = {
+            let mut positions: Vec<usize> =
+                vstate.cut_sites.iter().map(|s| s.cut_pos).collect();
+            positions.sort_unstable();
+            positions
+        };
+        if cut_site_key != self.cached_cut_site_key
+            || (char_width - self.cached_char_width).abs() > 0.5
+        {
+            let (rows, n_rows) = stack_cut_labels(&vstate.cut_sites, char_width);
+            self.cached_cut_label_row = rows;
+            self.cached_n_cut_label_rows = n_rows;
+            self.cached_cut_site_key = cut_site_key;
+            self.cached_char_width = char_width;
+        }
+        let cut_label_row = &self.cached_cut_label_row;
+        let n_cut_label_rows = self.cached_n_cut_label_rows;
+        let cut_label_h = n_cut_label_rows as f32 * CUT_LABEL_ROW_H;
+
+        let block_h = cut_label_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + annot_section_h + BLOCK_GAP;
         let n_blocks = seq_len.div_ceil(line_width);
         let total_height = n_blocks as f32 * block_h;
         let content_width = LEFT_MARGIN + line_width as f32 * char_width + RIGHT_MARGIN;
         let alloc_width = content_width.max(ui.available_width());
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        // Consume the one-shot scroll request: center the target block in the
+        // viewport this frame, then clear so the user can scroll freely.
+        let scroll_offset = vstate.scroll_to.take().map(|pos| {
+            let block_top = (pos / line_width) as f32 * block_h;
+            let viewport_h = ui.available_height();
+            (block_top - viewport_h / 2.0 + block_h / 2.0).max(0.0)
+        });
+
+        let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(offset) = scroll_offset {
+            scroll_area = scroll_area.vertical_scroll_offset(offset);
+        }
+        scroll_area.show(ui, |ui| {
                 let (response, painter) = ui.allocate_painter(
                     Vec2::new(alloc_width, total_height),
                     Sense::click_and_drag(),
@@ -205,9 +250,11 @@ impl SequenceView {
                 let text_color = ui.visuals().text_color();
                 let seq_x0 = rect.min.x + LEFT_MARGIN;
 
-                // ── Pass 1: collect annotation hit-rects for visible blocks ──
+                // ── Pass 1: collect click-rects for all interactive elements ──
 
                 let mut annot_hits: Vec<(Rect, usize)> = Vec::new();
+                let mut search_hit_rects: Vec<(Rect, usize)> = Vec::new();
+                let mut cut_site_rects: Vec<(Rect, usize)> = Vec::new();
                 for block_idx in 0..n_blocks {
                     let block_y = rect.min.y + block_idx as f32 * block_h;
                     if block_y + block_h < clip.min.y {
@@ -218,14 +265,48 @@ impl SequenceView {
                     }
                     let block_start = block_idx * line_width;
                     let block_end = (block_start + line_width).min(seq_len);
-                    let annot_base_y =
-                        block_y + RULER_HEIGHT + STRAND_HEIGHT * 2.0;
+                    let top_y = block_y + cut_label_h + RULER_HEIGHT;
+                    let bot_y = top_y + STRAND_HEIGHT;
+                    let annot_base_y = bot_y + STRAND_HEIGHT;
+
                     for (feat_idx, feat) in doc.features.iter().enumerate() {
                         let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
                         if let Some(r) =
                             annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
                         {
                             annot_hits.push((r, feat_idx));
+                        }
+                    }
+                    for (hit_idx, hit) in vstate.search_hits.iter().enumerate() {
+                        let vis_s = hit.start.max(block_start).min(block_end);
+                        let vis_e = hit.end.min(block_end);
+                        if vis_s < vis_e && vis_e > block_start {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            search_hit_rects.push((
+                                Rect::from_min_size(
+                                    Pos2::new(sx, top_y),
+                                    Vec2::new(sw, STRAND_HEIGHT * 2.0),
+                                ),
+                                hit_idx,
+                            ));
+                        }
+                    }
+                    // Click target is the label only — not the staple line through the
+                    // strands. Clicking the strand near a cut site places a cursor as
+                    // expected; only the label is the intentional selection handle.
+                    for (site_idx, site) in vstate.cut_sites.iter().enumerate() {
+                        if site.cut_pos >= block_start && site.cut_pos <= block_end {
+                            let cx = seq_x0 + (site.cut_pos - block_start) as f32 * char_width;
+                            let label_w = site.enzyme.len() as f32 * LABEL_CHAR_W + 8.0;
+                            let row = cut_label_row[site_idx];
+                            cut_site_rects.push((
+                                Rect::from_center_size(
+                                    Pos2::new(cx, block_y + (row as f32 + 0.5) * CUT_LABEL_ROW_H),
+                                    Vec2::new(label_w, CUT_LABEL_ROW_H),
+                                ),
+                                site_idx,
+                            ));
                         }
                     }
                 }
@@ -242,13 +323,26 @@ impl SequenceView {
                         if let Some(&(_, feat_idx)) =
                             annot_hits.iter().find(|(r, _)| r.contains(pos))
                         {
-                            // Click on annotation bar → feature range selection.
                             let feat = &doc.features[feat_idx];
                             vstate.selection =
                                 Some(Selection::range(feat.range.start, feat.range.end));
                             vstate.selected_feature = Some(feat_idx);
+                        } else if let Some(&(_, hit_idx)) =
+                            search_hit_rects.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let hit = &vstate.search_hits[hit_idx];
+                            vstate.selection = Some(Selection::range(hit.start, hit.end));
+                            vstate.selected_feature = None;
+                        } else if let Some(&(_, site_idx)) =
+                            cut_site_rects.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let site = &vstate.cut_sites[site_idx];
+                            vstate.selection = Some(Selection::range(
+                                site.recognition_start,
+                                site.recognition_end,
+                            ));
+                            vstate.selected_feature = None;
                         } else if let Some(seq_pos) = ptr_seq {
-                            // Click on strand → place cursor.
                             vstate.selection = Some(Selection::cursor(seq_pos));
                             vstate.selected_feature = None;
                         } else {
@@ -260,7 +354,9 @@ impl SequenceView {
 
                 if response.drag_started() {
                     let on_annot = ptr.is_some_and(|p| annot_hits.iter().any(|(r, _)| r.contains(p)));
-                    if !on_annot {
+                    let on_hit = ptr.is_some_and(|p| search_hit_rects.iter().any(|(r, _)| r.contains(p)));
+                    let on_site = ptr.is_some_and(|p| cut_site_rects.iter().any(|(r, _)| r.contains(p)));
+                    if !on_annot && !on_hit && !on_site {
                         self.drag_start = ptr_seq;
                         vstate.selected_feature = None;
                         vstate.selection = ptr_seq.map(Selection::cursor);
@@ -292,7 +388,7 @@ impl SequenceView {
                     let block_len = block_end - block_start;
 
                     // ── Ruler ─────────────────────────────────────────────────
-                    let ruler_y = block_y;
+                    let ruler_y = block_y + cut_label_h;
                     for col in 0..block_len {
                         let abs = block_start + col;
                         if abs == 0 || (abs + 1) % 10 == 0 {
@@ -309,7 +405,6 @@ impl SequenceView {
                     let top_y = ruler_y + RULER_HEIGHT;
                     let bot_y = top_y + STRAND_HEIGHT;
                     let annot_base_y = bot_y + STRAND_HEIGHT;
-                    let cut_site_y = annot_base_y + annot_section_h;
 
                     // ── Search hit highlights (behind selection and text) ──────
                     for hit in &vstate.search_hits {
@@ -431,32 +526,61 @@ impl SequenceView {
                         }
                     }
 
-                    // ── Cut site ticks (below annotation bars) ────────────────
-                    if !vstate.cut_sites.is_empty() {
-                        // Thin baseline
-                        painter.hline(
-                            seq_x0..=seq_x0 + block_len as f32 * char_width,
-                            cut_site_y + 8.0,
-                            Stroke::new(0.5, CUT_SITE_COLOR.gamma_multiply(0.4)),
+                    // ── Cut site staples ──────────────────────────────────────
+                    // Label sits in its stacked row above the ruler. The vertical
+                    // line descends from the label through both strands at inter-base
+                    // x positions (same coordinate system as the cursor). The horizontal
+                    // connector at bot_y encodes the overhang; blunt = straight line.
+                    for (site_idx, site) in vstate.cut_sites.iter().enumerate() {
+                        let top_cut = site.cut_pos;
+                        let bot_cut = site.bottom_cut_pos;
+                        if top_cut < block_start || top_cut > block_end {
+                            continue;
+                        }
+                        let tcx = seq_x0 + (top_cut - block_start) as f32 * char_width;
+                        let stroke = Stroke::new(1.5, CUT_SITE_COLOR);
+
+                        // Label in its assigned stacking row.
+                        let row = cut_label_row[site_idx];
+                        let label_y = block_y + row as f32 * CUT_LABEL_ROW_H;
+                        painter.text(
+                            Pos2::new(tcx, label_y),
+                            Align2::CENTER_TOP,
+                            &site.enzyme,
+                            FontId::proportional(FONT_SIZE - 3.0),
+                            CUT_SITE_COLOR,
                         );
-                        for site in &vstate.cut_sites {
-                            let cut = site.cut_pos;
-                            if cut < block_start || cut > block_end {
-                                continue;
-                            }
-                            let cx = seq_x0 + (cut - block_start) as f32 * char_width;
-                            // Tick mark
+
+                        // Vertical from bottom of label row down through the top strand.
+                        let line_top = block_y + (row + 1) as f32 * CUT_LABEL_ROW_H;
+                        painter.line_segment(
+                            [Pos2::new(tcx, line_top), Pos2::new(tcx, bot_y)],
+                            stroke,
+                        );
+
+                        if top_cut == bot_cut {
+                            // Blunt: straight line through both strands.
                             painter.line_segment(
-                                [Pos2::new(cx, cut_site_y), Pos2::new(cx, cut_site_y + 8.0)],
-                                Stroke::new(1.5, CUT_SITE_COLOR),
+                                [Pos2::new(tcx, bot_y), Pos2::new(tcx, bot_y + STRAND_HEIGHT)],
+                                stroke,
                             );
-                            // Enzyme label above the tick
-                            painter.text(
-                                Pos2::new(cx, cut_site_y + 9.0),
-                                Align2::CENTER_TOP,
-                                &site.enzyme,
-                                FontId::proportional(FONT_SIZE - 3.0),
-                                CUT_SITE_COLOR,
+                        } else if bot_cut >= block_start && bot_cut <= block_end {
+                            // Staggered: horizontal step at inter-strand boundary + bottom vertical.
+                            let bcx = seq_x0 + (bot_cut - block_start) as f32 * char_width;
+                            painter.line_segment(
+                                [Pos2::new(tcx, bot_y), Pos2::new(bcx, bot_y)],
+                                stroke,
+                            );
+                            painter.line_segment(
+                                [Pos2::new(bcx, bot_y), Pos2::new(bcx, bot_y + STRAND_HEIGHT)],
+                                stroke,
+                            );
+                        } else {
+                            // Bottom cut in a different block — stub the top half.
+                            painter.line_segment(
+                                [Pos2::new(tcx, bot_y),
+                                 Pos2::new(tcx, bot_y + STRAND_HEIGHT * 0.5)],
+                                Stroke::new(1.5, CUT_SITE_COLOR.gamma_multiply(0.4)),
                             );
                         }
                     }

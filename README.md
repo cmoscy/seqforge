@@ -100,6 +100,17 @@ cargo fmt            # format
 cargo build          # build everything (app + CLI)
 ```
 
+### Testing workflow
+
+The embedded terminal requires both the app and CLI binaries to be present in the same `target/` directory. Build both once, then use `cargo run` for fast iteration:
+
+```bash
+cargo build                        # first time: builds app + CLI
+cargo run -p seqforge-app          # subsequent runs: rebuilds only what changed
+```
+
+The CLI binary (`target/debug/seqforge`) persists between `cargo run` invocations, so the embedded terminal continues to find it as a sibling of the app binary.
+
 The workspace has four crates:
 
 | Crate | Role |

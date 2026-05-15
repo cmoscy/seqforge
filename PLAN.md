@@ -19,6 +19,7 @@ PlasCAD (`David-OConnor/plascad`, MIT, Rust + egui) already covers ~80% of this 
 **Alternative on the table:** `iced` + `iced_term` v0.8.0 (March 2026, actively maintained by Harzu). Defer unless egui's state model becomes painful.
 
 ### Layout (egui_dock)
+
 ```
 ┌──────────┬─────────────────────────┐
 │ File     │   Sequence Viewer       │
@@ -77,7 +78,7 @@ Viewer commands additionally try the GUI socket (see below) and error gracefully
 
 ### GUI session IPC (viewer commands only)
 
-Human users invoke viewer commands via the `:command` prefix in the embedded terminal (intercepted before the PTY sees them). Agents and scripts running as PTY subprocesses use the CLI:
+Both human users and agents invoke viewer commands via `seqforge <subcommand>` in the embedded terminal. The CLI detects `SEQFORGE_SOCKET` and routes them to the GUI:
 
 - On launch, SeqForge opens a Unix domain socket at a temp path and sets `SEQFORGE_SOCKET=/tmp/seqforge-$PID.sock` in the PTY environment.
 - `seqforge-cli`, when executing a `ViewerCommand` and `SEQFORGE_SOCKET` is set, serializes the command and sends it over the socket. The GUI receives it and calls `dispatch_viewer`.
@@ -134,10 +135,12 @@ struct AppState {
 | SnapGene `.dna` (deferred to post-MVP) | None — port from `tg-oss/packages/bio-parsers/src/snapgeneToJson.js` when needed | n/a |
 
 **Targeted ports from `examples/tg-oss` (only as features land beyond MVP):**
+
 - Digest fragment enumeration + overhang classification — `packages/sequence-utils/src/getDigestFragmentsForRestrictionEnzymes.js` (~150 LOC)
 - Golden Gate part assembly (post-MVP) — `packages/sequence-utils/src/getPossiblePartsFromSequenceAndEnzymes.js`
 
 **Already ported:**
+
 - Annotation row-stacking — `stackElements` from `examples/seqviz/src/elementsToRows.ts` (~30 LOC Rust). Landed in Phase 4.
 
 Skip porting: complement, translation, restriction-site finding (covered by `na_seq` + `bio::pattern_matching`).
@@ -148,8 +151,8 @@ Skip porting: complement, translation, restriction-site finding (covered by `na_
 
 - `egui_term` 0.1.0 (Apr 2025) — wraps `alacritty_terminal` and `portable-pty`. Renders into an egui `Ui`.
 - Terminal widget owns its PTY + grid state.
-- **Human path:** lines starting with `:` are intercepted before reaching the PTY, parsed via `clap` as a `ViewerCommand`, and routed to `dispatch_viewer`. Plain lines go straight to the shell.
-- **Agent / script path:** `seqforge-cli` running inside the PTY calls `dispatch_file` directly (no GUI needed) for file operations, or sends a `ViewerCommand` over the session socket for viewer operations. Claude Code, shell scripts, and any other subprocess use `seqforge <subcommand>` as ordinary CLI calls.
+- **Single command path:** `seqforge-cli` is the sole way to issue viewer commands from the terminal — `seqforge goto 100`, `seqforge find ATGC`, etc. The CLI detects `SEQFORGE_SOCKET` and routes over the socket. No keystroke intercept; TUI tools (vim, nvim, less) work normally.
+- **Agent / script path:** same `seqforge <subcommand>` CLI calls. `dispatch_file` runs in-process; viewer commands go over the session socket.
 - For commands that need rich output (e.g., a digest fragment table), the dispatcher pushes `CommandOutput::Panel(...)` which opens a result tab in the dock.
 
 ---
@@ -166,11 +169,14 @@ Skip porting: complement, translation, restriction-site finding (covered by `na_
 
 Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-base ATGC coloring).
 
-**Layout per block (standard convention: ruler → strands → annotations):**
+**Layout per block (standard convention: cut labels → ruler → strands → annotations):**
+
 ```
+[cut label row 0: EcoRI  BamHI ]   ← stacked above ruler; omitted when no sites
+[cut label row 1: HindIII      ]
 [position ruler: 1    10   20 …]
-[top strand 5'→3': A T G C …  ]   ← ATGC colored
-[bottom strand 3'→5': T A C G …]  ← complement, dimmed
+[top strand 5'→3': A T G C …  ]   ← ATGC colored; cut staple passes through
+[bottom strand 3'→5': T A C G …]  ← complement, dimmed; staple ends here
 [annotation row 0              ]   ← stacked below strands
 [annotation row 1              ]
 …
@@ -178,6 +184,7 @@ Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-ba
 ```
 
 **Key design decisions made during implementation:**
+
 - **Dynamic line width:** computed each frame from available pane width (`floor((width - margins) / char_width)`), not a fixed 60 bp. Blocks reflow on pane resize.
 - **char_width source:** measured from an actual laid-out galley (`layout_no_wrap("A" × 64).width / 64`) rather than `glyph_width()`, which can differ due to subpixel rounding. This ensures annotation bar edges align exactly with character cell boundaries.
 - **Annotation stacking:** port of seqviz `stackElements` — sort by start, greedily pack into the first non-overlapping row. `O(n log n)`, computed once per document load.
@@ -185,6 +192,7 @@ Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-ba
 - **Annotations render below strands** (standard convention: SnapGene, Benchling, Geneious).
 
 **Performance:**
+
 - Each line rendered as a single `LayoutJob` galley (not per-character `painter.text` calls). Galley cache in egui makes repeat frames cheap.
 - Painter clip-rect culling: blocks outside the visible scroll viewport are skipped before any layout work.
 
@@ -204,6 +212,7 @@ seqforge/
 │   └── seqforge-app/      # eframe binary: egui + egui_dock + egui_term wiring
 └── examples/              # existing reference repos (seqviz, tg-oss) — read-only
 ```
+
 The split keeps GUI out of `core` so the same dispatcher can later back a headless CLI, test harness, or WASM WebView worker.
 
 ---
@@ -225,7 +234,7 @@ The split keeps GUI out of `core` so the same dispatcher can later back a headle
 1. `cargo run` opens the app with the three-pane dock layout.
 2. File browser shows `examples/` and lets you double-click a `.gb` file (use any GenBank file; if none in repo, drop one in).
 3. Viewer pane renders top + bottom strands with index ruler, fills pane width dynamically, shows annotations stacked below with correct colors; clicking an annotation selects its range.
-4. Embedded terminal accepts: `find ATGCGT`, `enzymes EcoRI BamHI`, `goto 1234`, `help` — each invokes `dispatch` and updates the viewer.
+4. Embedded terminal accepts: `seqforge find ATGCGT`, `seqforge enzymes EcoRI BamHI`, `seqforge goto 1234`, `seqforge --help` — each invokes `dispatch` and updates the viewer.
 5. Same operations work from the menu (`Edit → Find...`, `Tools → Restriction Sites...`, `Navigate → Go to position...`).
 6. `seqforge goto 100` (no `:` prefix, plain shell command) in the embedded terminal also works — CLI detects `SEQFORGE_SOCKET` and routes to `dispatch_viewer`. `seqforge digest plasmid.gb --enzymes EcoRI -o out.gb` works in any terminal, GUI open or not.
 7. App quits cleanly; on relaunch, recent files and dock layout are restored (`eframe` persistence).
@@ -235,6 +244,7 @@ The split keeps GUI out of `core` so the same dispatcher can later back a headle
 ---
 
 ## Out of scope for MVP (explicit non-goals)
+
 - Linear/circular graphical viewers (tg-oss/seqviz LinearView/CircularView)
 - Editing, undo/redo, save
 - SnapGene `.dna` support
@@ -251,6 +261,7 @@ The split keeps GUI out of `core` so the same dispatcher can later back a headle
 Each phase is independently testable. Don't start phase N+1 until phase N's "done" check passes.
 
 ### Phase 0 — Workspace skeleton ✅ DONE
+
 **Goal:** Cargo workspace compiles, CI green, zero functionality.
 
 - [x] `cargo new --bin seqforge-app` inside a workspace `Cargo.toml`
@@ -266,6 +277,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ---
 
 ### Phase 1 — Bio core: parse + model ✅ DONE
+
 **Goal:** Load a GenBank file from disk into a GUI-free `Document` struct, exercise it via a headless CLI.
 
 - [x] Define `Document { name, sequence: Vec<u8>, topology: Linear|Circular, features: Vec<Feature>, source_path }` in `seqforge-core`
@@ -275,6 +287,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] Snapshot tests: round-trip 3 reference files (small linear, circular plasmid, multi-feature)
 
 **Notes:**
+
 - `na_seq` uses its own `Nucleotide` enum, not `&[u8]`. `reverse_complement` and `complement` are implemented directly with an IUPAC byte table.
 - `gb_io::reader::GbParserError` is the public path (not `gb_io::errors::`).
 
@@ -283,6 +296,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ---
 
 ### Phase 2 — egui dock shell ✅ DONE
+
 **Goal:** Three-pane layout renders, no real content.
 
 - [x] `egui_dock` skeleton with three tabs: `FileBrowser`, `Viewer`, `Terminal`
@@ -291,6 +305,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] Menu bar stub: `File`, `Edit`, `View`, `Tools`, `Navigate`, `Help` (items disabled)
 
 **Notes:**
+
 - `egui_dock` requires `features = ["serde"]` in `Cargo.toml` for `DockState: Serialize`.
 - `TabViewer` holds a `'a` lifetime reference to mutable sub-state (browser) so tabs can mutate app state during rendering.
 - Layout: FileBrowser 20% left; Viewer top-right 70%; Terminal bottom-right 30%.
@@ -300,6 +315,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ---
 
 ### Phase 3 — File browser pane ✅ DONE
+
 **Goal:** Open a directory, click a `.gb` file, emit an `OpenFile` intent (no handler yet).
 
 - [x] `BrowserState { root, expanded: HashSet<PathBuf>, selected: Option<PathBuf> }`
@@ -309,6 +325,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] Double-click on `.gb` / `.gbk` / `.fasta` / `.fa` / `.fna` logs `OpenFile(path)` to stdout
 
 **Notes:**
+
 - `egui-file-dialog 0.9` API: `dialog.state()` returns `DialogState` enum; there is no `is_open()` method.
 - `BrowserState` is `#[serde(skip)]` on `file_dialog` since `FileDialog` is not serializable.
 
@@ -317,6 +334,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ---
 
 ### Phase 4 — Viewer widget (dual-strand text) ✅ DONE
+
 **Goal:** Render an open `Document` as dual-strand text with ruler, stacked annotations, and sequence selection.
 
 - [x] `SequenceView` widget using `egui::Painter` + `LayoutJob` galleys
@@ -331,11 +349,13 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] `SequenceView::reset()` clears selection + selected feature on new doc load
 
 **Implementation notes:**
+
 - `cached_seq_len` guard: complement + stacking are computed once when `seq.len()` changes, cached in `SequenceView`. Not recomputed per frame.
 - `pending_open: Option<PathBuf>` side-channel in `AppState`: `TabViewer` sets it during `DockArea` rendering; `update()` consumes it afterward. Phase 5 generalizes this to `pending_commands: Vec<ViewerCommand>`.
 - Feature labels: rendered on any segment (including continuations) where `bar.width() >= label.chars().count() * char_width`. Omitted on narrow segments, consistent with SnapGene/Benchling behavior.
 
 **Key files:**
+
 - `crates/seqforge-app/src/viewer.rs` — `SequenceView`, `stack_features`, `annot_bar_rect`, `build_strand_galley`
 - `crates/seqforge-bio/src/dna.rs` — added `complement()`
 
@@ -362,9 +382,11 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] `Selection` struct added to `seqforge-core`: `{ anchor, focus }` — cursor when equal, range when not; single click on strand places cursor, drag builds range, annotation click sets feature range
 
 **Notes:**
+
 - `Selection` replaces raw `Option<(usize, usize)>` — cursor = zero-length selection (seqviz/SnapGene pattern)
 - `SideEffect::LoadDocument` bridges the core/bio crate boundary: dispatch returns it, app layer calls `seqforge_bio::load`
-- `ViewerCli` wrapper struct enables `:goto 100` terminal intercept pattern (Phase 6)
+- `GoTo` dispatch validates that `position` is in `[1, seq_len]`; out-of-range returns `DispatchError::OutOfRange { position, seq_len }` with a clear message
+- `scroll_to: Option<usize>` on `ViewerState` is a one-shot field: set by `GoTo` dispatch, consumed by the viewer each frame to center the target position in the viewport
 
 **Done when:** opening files works via menu *and* file-browser double-click, both go through `dispatch_viewer`. Both dispatch functions are unit-tested. ✅
 
@@ -374,41 +396,46 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 **Goal:** Terminal pane runs a real shell; `:viewer-commands` route to `dispatch_viewer`; plain shell commands and `seqforge file-commands` run normally; `seqforge viewer-commands` route to `dispatch_viewer` via session socket.
 
-**Human path:**
+**Terminal:**
+
 - [x] `egui_term 0.1.0` widget in the Terminal tab, spawning `$SHELL`
-- [x] Intercept lines starting with `:` before they reach the PTY: drain events from `ctx.input_mut` before `TerminalView` renders (which reads `ctx.input(|i| i.events.clone())`)
-- [x] Command buffer shown in yellow overlay bar; Enter dispatches, Escape/backspace-past-colon cancels
-- [x] `parse_colon_command` uses `ViewerCli::try_parse_from` — clap-generated help text available
+- [x] No keystroke intercept — viewer commands issued via `seqforge <subcommand>` CLI directly in the shell; TUI tools (nvim, vim, less, htop) work unaffected
+- [x] Embedded terminal history isolated to `~/.local/share/seqforge/terminal_history` via `HISTFILE` set before PTY spawn
 
 **Session socket (viewer commands from CLI/agents):**
+
 - [x] On app start, open Unix socket at `/tmp/seqforge-{pid}.sock`; set `SEQFORGE_SOCKET` in env before PTY spawn (child shell inherits it)
 - [x] Socket listener thread receives newline-delimited JSON `ViewerCommand`, pushes to `socket_rx` mpsc channel; main `update()` drains it into `pending_commands` each frame
 - [x] `seqforge-cli`: viewer subcommands (`open`, `close`, `goto`, `find`, `enzymes`) read `SEQFORGE_SOCKET` and send JSON over socket; error if unset
 - [x] File subcommands (`info`, `digest`, `annotate`) always run in-process; `FileCommand` never touches socket
 
 **Sandboxing stubs (design only — implement post-MVP):**
+
 - [x] PTY spawn: comment stub in `TerminalPane::new` — `sandbox_wrapper: Option<Vec<String>>` hook location documented
 - [x] Socket listener: comment stub in `handle_connection` — `CommandPolicy` validation hook location documented
 
 **Implementation notes:**
+
 - `TerminalPane` and `socket_rx` live in `AppState` as `#[serde(skip)]` fields — avoids split-borrow issues and keeps initialization in `SeqForgeApp::new`
 - `TerminalView::new(ui, ...)` assigned to a local before `ui.add(...)` to satisfy borrow checker (both borrow `ui`)
 - `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024 edition; wrapped with safety comments
 
 **CLI PATH scoping (added post-Phase 6):**
+
 - `seqforge` CLI is embedded-terminal-only by default (VS Code "Install command in PATH" pattern)
 - `sibling_seqforge_dir()` in `terminal.rs` finds the `seqforge` binary next to the running app binary and prepends it to the PTY's PATH — `cargo build` (not `cargo install`) is sufficient for embedded terminal use
 - `cli_install.rs` in `seqforge-app`: `install_cli_to_path()` symlinks the bundled CLI to `/usr/local/bin/seqforge` or `~/.local/bin/seqforge`; `is_installed()` checks for an existing symlink
 - `Tools → Install 'seqforge' CLI to PATH` menu item (or `Reinstall…` if already linked); result shown in a centered modal window via `cli_status: Option<String>` in `AppState`
 - `seqforge-app --install-cli` flag for headless/scripted installs (prints result and exits)
-- `README.md` written with install instructions, `:command` syntax, CLI usage, opt-in PATH install, supported formats, and dev workflow
+- `README.md` written with install instructions, `seqforge <subcommand>` CLI usage, opt-in PATH install, supported formats, and dev workflow
 
-**Tests (24 total across workspace):**
-- `terminal::tests` — 5 parse round-trips for `parse_colon_command`
+**Tests (18 total across workspace):**
+
 - `socket::tests` — JSON command round-trip via `UnixStream::pair()`; `FileCommand` serialization check
 - `seqforge_cli::tests` — viewer cmd fails cleanly without `SEQFORGE_SOCKET`
+- `seqforge_core::commands::tests` — dispatch coverage for GoTo bounds, Find, Enzymes, error cases
 
-**Done when:** `:open path/to/file.gb`, `:find ATGCGT`, `:goto 1234` work from the terminal. `seqforge goto 500` (no colon) works via socket. `seqforge digest plasmid.gb --enzymes EcoRI -o out.gb` works whether or not the GUI is open. ✅
+**Done when:** `seqforge open path/to/file.gb`, `seqforge find ATGCGT`, `seqforge goto 1234` work from the terminal via socket. `seqforge digest plasmid.gb --enzymes EcoRI -o out.gb` works whether or not the GUI is open. ✅
 
 ---
 
@@ -419,25 +446,37 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] Use `na_seq`'s restriction enzyme module (`re_lib::load_re_library` + `find_re_matches`) to find cut sites
 - [x] `find_iupac_matches` — own O(n·m) IUPAC scanner with Hamming-distance mismatch allowance; circular extension handled by appending first `pat_len-1` bases before scanning
 - [x] Both forward + reverse-complement search; palindromic patterns deduplicated
-- [x] `SearchHit { start, end, strand }` and `CutSite { enzyme, recognition_start, recognition_end, cut_pos }` types in `seqforge-core`
+- [x] `SearchHit { start, end, strand }` and `CutSite { enzyme, recognition_start, recognition_end, cut_pos, bottom_cut_pos }` types in `seqforge-core`
+- [x] `bottom_cut_pos` for palindromic enzymes derived from palindrome symmetry: `recognition_end - cut_after - 1`; equals `cut_pos` for blunt cutters
 - [x] `ViewerState` gains `search_hits`, `cut_sites`, `active_enzymes` (all `#[serde(skip)]`, cleared on new doc load)
 - [x] `SideEffect::SearchPattern` and `SideEffect::ShowEnzymes` bridge core/bio boundary; `app.rs` calls bio and populates state
-- [x] Render search hits as amber (forward) / cyan (reverse) semi-transparent highlights behind strand text
-- [x] Render cut sites as magenta tick marks below annotation rows with enzyme name labels; `block_h` grows by `CUT_SITE_ROW_HEIGHT` (22 px) when sites are present
-- [x] Empty `:find` clears hits; empty `:enzymes` clears cut sites; both require an open document
+- [x] Render search hits as amber (forward) / cyan (reverse) semi-transparent highlights behind strand text; clicking a hit selects its range
+- [x] Render cut sites as **staple shapes** through the strand rows — vertical top line from stacked label through top strand, horizontal bridge to `bottom_cut_pos`, vertical bottom line through bottom strand; blunt cutters use a single straight line
+- [x] Cut site labels stacked above the ruler using the same greedy interval algorithm as feature stacking; `block_h` grows by `n_label_rows × CUT_LABEL_ROW_H` (14 px/row)
+- [x] Cut label stacking cached in `SequenceView` (`cached_cut_site_key`, `cached_char_width`); invalidation key is a sorted `Vec<usize>` of cut positions — catches same-count enzyme swaps that a bare count check would miss
+- [x] Clicking a cut site label selects the recognition site range; staple line area remains clickable for cursor placement (not enzyme selection)
+- [x] Empty `seqforge find` clears hits; empty `seqforge enzymes` clears cut sites; both require an open document
 
 **Implementation notes:**
+
 - `na_seq::restriction_enzyme::find_re_matches` only searches forward — correct for palindromic enzymes (all entries in na_seq's library); circular handled by extending input sequence
 - na_seq's `find_re_matches` skips the last `re_seq_len + 1` positions (off-by-one in upstream code); circular extension compensates
 - `SideEffect::SearchPattern / ShowEnzymes` follow the same core/bio bridge pattern as `SideEffect::LoadDocument`
 - `find_iupac_matches` and `find_cut_sites` live in `seqforge-bio/src/search.rs`
+- `stack_features` and `stack_cut_labels` are thin wrappers over a shared `greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize)`; algorithm lives in one place
+- Label width approximated by `LABEL_CHAR_W` const (`(FONT_SIZE - 3.0) * 0.55`) — used by both `stack_cut_labels` and Pass 1 click-rect computation
+- `open_doc(state) -> Result<&Document, DispatchError>` helper replaces the `require_document` + `.unwrap()` two-step that appeared in three dispatch arms
+- `Close` dispatch calls `clear_results()` — fixes stale `search_hits`/`cut_sites` that persisted after document close
+- `Find` dispatch sets `selection` to the first hit's range alongside `scroll_to`, so the viewer lands on the first result with it visually selected
+- Cut site x positions are inter-base: `seq_x0 + col * char_width` places lines between character cells, matching the cursor line convention
 
 **Tests (14 in `seqforge-bio::search`, 4 new in `seqforge-core::commands`):**
+
 - `exact_forward_hit`, `palindrome_not_double_counted`, `reverse_complement_hit`, `iupac_n_wildcard`, `mismatch_allowance`, `circular_wrap_around`
 - `find_ecori_cut_sites`, `unknown_enzyme_returns_empty`, `enzyme_name_case_insensitive`, `multiple_enzymes`
 - `find_returns_search_side_effect`, `enzymes_returns_show_enzymes_side_effect`, `find_without_doc_returns_error`, `enzymes_empty_clears_cut_sites`
 
-**Done when:** `:enzymes EcoRI BamHI` shows ticks at known positions; `:find ATGCNNNNGCAT` highlights IUPAC matches. ✅
+**Done when:** `seqforge enzymes EcoRI BamHI` shows staple-shaped cut sites with stacked labels above the ruler at known positions; `seqforge find ATGCNNNNGCAT` highlights IUPAC matches on both strands; clicking a search hit or enzyme label selects the corresponding range. ✅
 
 ---
 
@@ -466,6 +505,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ---
 
 ## Dependency-of-phases graph
+
 ```
 0 → 1 → 2 → 3 → 5 → 6
                ↓    ↑
@@ -473,11 +513,13 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
                     ↓
                     7 → 8 → 9
 ```
+
 Phase 4 (viewer) and Phase 5 (dispatch) can be developed in parallel after Phase 3. Phase 6 needs both. Phase 7 needs viewer + dispatch.
 
 ---
 
 ## Conventions summary (apply across all phases)
+
 - **Errors:** `thiserror` in libs, `anyhow` at app boundary. No `unwrap()` in non-test code.
 - **State:** `AppState` is the single source of truth; widgets receive `&mut` references, never own data.
 - **Commands:** every user-visible action goes through `dispatch`. No menu handler does work directly.
@@ -489,6 +531,7 @@ Phase 4 (viewer) and Phase 5 (dispatch) can be developed in parallel after Phase
 ---
 
 ## Reference repos (clone separately, do not vendor)
+
 | Repo | Used for |
 |---|---|
 | `David-OConnor/plascad` | egui + bio crate wiring, sequence rendering reference |

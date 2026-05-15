@@ -109,6 +109,8 @@ pub enum FileCommand {
 pub enum DispatchError {
     #[error("no document is open")]
     NoDocument,
+    #[error("position {position} is out of range (sequence length: {seq_len})")]
+    OutOfRange { position: usize, seq_len: usize },
     #[error("`{0}` is not yet implemented")]
     Unimplemented(&'static str),
     #[error("bio operation failed: {0}")]
@@ -175,8 +177,8 @@ pub trait BioOps {
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
-fn require_document(state: &ViewerState) -> Result<(), DispatchError> {
-    if state.open_doc.is_none() { Err(DispatchError::NoDocument) } else { Ok(()) }
+fn open_doc(state: &ViewerState) -> Result<&Document, DispatchError> {
+    state.open_doc.as_ref().ok_or(DispatchError::NoDocument)
 }
 
 /// Dispatch a `ViewerRequest` against mutable viewer state, calling into `bio`
@@ -199,13 +201,17 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::Close => {
             state.open_doc = None;
             state.clear_selection();
+            state.clear_results();
             state.scroll_to = None;
             Ok(ViewerResponse::Ok)
         }
 
         ViewerRequest::GoTo { position } => {
-            require_document(state)?;
-            let idx = position.saturating_sub(1);
+            let seq_len = open_doc(state)?.sequence.len();
+            if position == 0 || position > seq_len {
+                return Err(DispatchError::OutOfRange { position, seq_len });
+            }
+            let idx = position - 1;
             state.scroll_to = Some(idx);
             state.selection = Some(Selection::cursor(idx));
             state.selected_feature = None;
@@ -213,30 +219,29 @@ pub fn dispatch<B: BioOps>(
         }
 
         ViewerRequest::Find { pattern, mismatches } => {
-            require_document(state)?;
+            let doc = open_doc(state)?;
             if pattern.is_empty() {
                 state.search_hits.clear();
                 return Ok(ViewerResponse::SearchResults { count: 0, hits: vec![] });
             }
-            let doc = state.open_doc.as_ref().unwrap();
             let circular = matches!(doc.topology, Topology::Circular);
             let hits = bio.find_matches(&doc.sequence, pattern.as_bytes(), mismatches, circular);
             let count = hits.len();
             if let Some(first) = hits.first() {
                 state.scroll_to = Some(first.start);
+                state.selection = Some(Selection::range(first.start, first.end));
             }
             state.search_hits = hits.clone();
             Ok(ViewerResponse::SearchResults { count, hits })
         }
 
         ViewerRequest::Enzymes { enzymes } => {
-            require_document(state)?;
+            let doc = open_doc(state)?;
             if enzymes.is_empty() {
                 state.cut_sites.clear();
                 state.active_enzymes.clear();
                 return Ok(ViewerResponse::CutSites { count: 0, sites: vec![] });
             }
-            let doc = state.open_doc.as_ref().unwrap();
             let circular = matches!(doc.topology, Topology::Circular);
             let enzyme_refs: Vec<&str> = enzymes.iter().map(String::as_str).collect();
             let sites = bio.find_cut_sites(&doc.sequence, &enzyme_refs, circular);
@@ -257,22 +262,11 @@ pub fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError> {
     }
 }
 
-// ── CLI wrapper for terminal intercept ───────────────────────────────────────
-
-/// Parser wrapper so `:goto 100` in the terminal can be parsed as a subcommand.
-#[derive(Debug, clap::Parser)]
-#[command(name = "seqforge")]
-pub struct ViewerCli {
-    #[command(subcommand)]
-    pub command: ViewerRequest,
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     fn fixture_state_with_doc() -> ViewerState {
         ViewerState {
@@ -429,6 +423,22 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_goto_out_of_range_returns_error() {
+        let mut state = fixture_state_with_doc(); // seq len = 8
+        let err =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 9 }).unwrap_err();
+        assert!(matches!(err, DispatchError::OutOfRange { position: 9, seq_len: 8 }));
+    }
+
+    #[test]
+    fn dispatch_goto_position_zero_returns_error() {
+        let mut state = fixture_state_with_doc();
+        let err =
+            dispatch(&mut state, &FakeBio::new(), ViewerRequest::GoTo { position: 0 }).unwrap_err();
+        assert!(matches!(err, DispatchError::OutOfRange { position: 0, .. }));
+    }
+
+    #[test]
     fn dispatch_find_no_doc_returns_error() {
         let mut state = ViewerState::default();
         let err = dispatch(
@@ -474,6 +484,7 @@ mod tests {
             recognition_start: 0,
             recognition_end: 6,
             cut_pos: 1,
+            bottom_cut_pos: 5,
         });
         let resp =
             dispatch(&mut state, &FakeBio::new(), ViewerRequest::Enzymes { enzymes: vec![] })
@@ -506,29 +517,4 @@ mod tests {
         assert!(matches!(resp, ViewerResponse::SearchResults { count: 0, .. }));
     }
 
-    // ── Terminal CLI parsing ──────────────────────────────────────────────────
-
-    #[test]
-    fn parse_goto_from_terminal_args() {
-        let cli = ViewerCli::try_parse_from(["seqforge", "goto", "100"]).unwrap();
-        assert!(matches!(cli.command, ViewerRequest::GoTo { position: 100 }));
-    }
-
-    #[test]
-    fn parse_find_from_terminal_args() {
-        let cli = ViewerCli::try_parse_from(["seqforge", "find", "ATGC"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            ViewerRequest::Find { ref pattern, mismatches: 0 } if pattern == "ATGC"
-        ));
-    }
-
-    #[test]
-    fn parse_enzymes_from_terminal_args() {
-        let cli =
-            ViewerCli::try_parse_from(["seqforge", "enzymes", "EcoRI", "BamHI"]).unwrap();
-        assert!(
-            matches!(cli.command, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
-        );
-    }
 }

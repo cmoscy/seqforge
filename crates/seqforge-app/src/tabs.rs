@@ -51,11 +51,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 self.seq_view.show(ui, self.viewer);
             }
             Tab::Terminal => match self.terminal.as_mut() {
-                Some(term) => {
-                    if let Some(req) = term.show(ui) {
-                        self.pending_requests.push((req, None));
-                    }
-                }
+                Some(term) => term.show(ui),
                 None => {
                     ui.centered_and_justified(|ui| {
                         ui.label("Terminal failed to initialise.\nCheck stderr for details.");

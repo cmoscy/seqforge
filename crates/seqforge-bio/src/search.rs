@@ -148,11 +148,16 @@ pub fn find_cut_sites(seq: &[u8], enzyme_names: &[&str], circular: bool) -> Vec<
             let recognition_start = rec_start_ext % seq_len;
             let recognition_end = recognition_start + re.cut_seq.len();
             let cut_pos = recognition_start + re.cut_after as usize + 1;
+            // For palindromic enzymes the bottom strand cuts symmetrically:
+            //   bottom_cut_pos = recognition_end - cut_after - 1
+            // Blunt cutters: top == bottom. 5' overhang: bottom > top. 3' overhang: bottom < top.
+            let bottom_cut_pos = recognition_end.saturating_sub(re.cut_after as usize + 1);
             Some(CutSite {
                 enzyme: re.name.clone(),
                 recognition_start,
                 recognition_end,
                 cut_pos,
+                bottom_cut_pos,
             })
         })
         .collect()
@@ -267,8 +272,9 @@ mod tests {
         assert_eq!(sites[0].enzyme, "EcoRI");
         assert_eq!(sites[0].recognition_start, 3);
         assert_eq!(sites[0].recognition_end, 9); // 3 + 6
-        // cut_after = 0 for EcoRI, so cut_pos = 3 + 0 + 1 = 4
+        // cut_after = 0 for EcoRI: cut_pos = 3+0+1 = 4, bottom_cut_pos = 9-0-1 = 8 (4-base 5' overhang)
         assert_eq!(sites[0].cut_pos, 4);
+        assert_eq!(sites[0].bottom_cut_pos, 8);
     }
 
     #[test]

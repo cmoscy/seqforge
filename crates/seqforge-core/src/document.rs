@@ -23,6 +23,10 @@ pub struct CutSite {
     pub recognition_end: usize,
     /// Inter-base position of the top-strand cut (between bases `cut_pos-1` and `cut_pos`).
     pub cut_pos: usize,
+    /// Inter-base position of the bottom-strand cut — derived from palindrome symmetry.
+    /// Equal to `cut_pos` for blunt-end enzymes. Greater than `cut_pos` for 5' overhangs,
+    /// less than `cut_pos` for 3' overhangs.
+    pub bottom_cut_pos: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
