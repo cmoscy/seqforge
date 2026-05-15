@@ -11,6 +11,7 @@ use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
 use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
+use crate::keymap;
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
@@ -184,34 +185,12 @@ impl eframe::App for SeqForgeApp {
             self.state.event_log.drain_from(rx);
         }
 
-        // ── Keyboard shortcuts ────────────────────────────────────────────────
-        // Stage 2: hotkeys still consumed inline here, but each one enqueues
-        // an `AppCommand` instead of mutating state directly. Stage 4 will
-        // replace this block with `keymap::dispatch(...)` driven by a
-        // declarative KEYMAP table.
-        let cmd_mod = egui::Modifiers::COMMAND;
-        let mut hotkey_cmds: Vec<AppCommand> = Vec::new();
-        ctx.input_mut(|i| {
-            if i.consume_key(cmd_mod, egui::Key::O) {
-                hotkey_cmds.push(AppCommand::PromptOpenFile);
-            }
-            if i.consume_key(cmd_mod, egui::Key::W)
-                && command::is_enabled(&AppCommand::CloseDoc, &self.state)
-            {
-                hotkey_cmds.push(AppCommand::CloseDoc);
-            }
-            if i.consume_key(cmd_mod, egui::Key::F)
-                && command::is_enabled(&AppCommand::OpenFind, &self.state)
-            {
-                hotkey_cmds.push(AppCommand::OpenFind);
-            }
-            if i.consume_key(cmd_mod, egui::Key::G)
-                && command::is_enabled(&AppCommand::OpenGoTo, &self.state)
-            {
-                hotkey_cmds.push(AppCommand::OpenGoTo);
-            }
-        });
-        for c in hotkey_cmds {
+        // ── Keymap dispatch ───────────────────────────────────────────────────
+        // Single source of truth for keyboard shortcuts. Bindings live in
+        // `keymap::KEYMAP`; this call is the *only* place app-level
+        // `consume_key` runs. See `docs/focus-refactor.md` §2.4.
+        let key_cmds = keymap::dispatch(&self.state.focus, &self.state, ctx);
+        for c in key_cmds {
             enqueue(&mut self.state, c);
         }
 

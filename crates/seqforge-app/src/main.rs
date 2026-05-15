@@ -5,6 +5,7 @@ mod cli_install;
 mod command;
 mod event;
 mod focus;
+mod keymap;
 mod socket;
 mod tabs;
 mod terminal;
