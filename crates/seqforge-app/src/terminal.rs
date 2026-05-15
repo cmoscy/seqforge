@@ -71,19 +71,15 @@ impl TerminalPane {
     /// socket (`seqforge goto 100`, `seqforge find ATGC`, etc.) — the CLI
     /// detects `SEQFORGE_SOCKET` and routes them without any keystroke intercept.
     ///
-    /// `terminal_has_focus` is the pane-scope signal from `FocusState`: true
-    /// when the user last clicked the terminal pane (Stage 1 of the focus
-    /// refactor — see `docs/focus-refactor.md`). Combined with the legacy
-    /// `bar_field_has_focus` check, the terminal captures keyboard input
-    /// only when both gates allow it. Stage 5 will delete the legacy check
-    /// once the overlay stack drives the same signal through `KeyContext`.
+    /// `terminal_has_focus` is the single keyboard-ownership signal,
+    /// computed in `tabs.rs` as `focus.scope == Terminal && overlays.is_empty()`.
+    /// The terminal does not probe egui memory or any other widget state —
+    /// state flows outward (see `docs/focus-refactor.md` §2.1).
     pub fn show(&mut self, ui: &mut egui::Ui, terminal_has_focus: bool) {
-        let bar_focused = crate::bar::bar_field_has_focus(ui.ctx());
-        let should_focus = terminal_has_focus && !bar_focused;
         let term_size = ui.available_size();
         // Create the view before calling ui.add to avoid a double-borrow of `ui`.
         let view = TerminalView::new(ui, &mut self.backend)
-            .set_focus(should_focus)
+            .set_focus(terminal_has_focus)
             .set_size(term_size);
         ui.add(view);
     }

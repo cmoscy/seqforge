@@ -2,16 +2,15 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
-use egui_file_dialog::FileDialog;
 use serde::{Deserialize, Serialize};
 use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse, ViewerState};
 
-use crate::bar::ActiveBar;
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
 use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::keymap;
+use crate::overlay::OverlayStack;
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
@@ -62,25 +61,20 @@ pub struct AppState {
     /// frame. See `docs/focus-refactor.md` §2 for the lifecycle.
     #[serde(skip)]
     pub pending_commands: Vec<PendingCommand>,
-    #[serde(skip)]
-    pub open_dialog: Option<FileDialog>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
     #[serde(skip)]
     pub terminal: Option<TerminalPane>,
     /// Receiver for requests arriving via the Unix domain socket.
     #[serde(skip)]
     pub socket_rx: Option<mpsc::Receiver<SocketRequest>>,
-    /// Ephemeral status message shown after a CLI install attempt.
-    #[serde(skip)]
-    pub cli_status: Option<String>,
     #[serde(skip)]
     pub(crate) toasts: egui_notify::Toasts,
-    /// Inline Find / GoTo bar shown at the top of the Viewer tab.
+    /// All transient UI (Find/GoTo bars, file dialog, CLI status).
+    /// See `docs/focus-refactor.md` §2.5.
     #[serde(skip)]
-    pub active_bar: Option<ActiveBar>,
-    /// Active pane + key-context stack. Stage 1 of the focus refactor;
-    /// see `docs/focus-refactor.md`. Not persisted — startup always
-    /// begins on `FocusScope::Terminal`.
+    pub overlays: OverlayStack,
+    /// Active pane + key-context stack. See `docs/focus-refactor.md` §2.1.
+    /// Not persisted — startup always begins on `FocusScope::Terminal`.
     #[serde(skip)]
     pub focus: FocusState,
     /// Producer side of the event bus. `apply()` emits through here.
@@ -112,12 +106,10 @@ impl Default for AppState {
             recent_files: Vec::new(),
             seq_view: SequenceView::default(),
             pending_commands: Vec::new(),
-            open_dialog: None,
             terminal: None,
             socket_rx: None,
-            cli_status: None,
             toasts: egui_notify::Toasts::default(),
-            active_bar: None,
+            overlays: OverlayStack::default(),
             focus: FocusState::new(),
             events,
             event_rx: Some(event_rx),
@@ -185,6 +177,14 @@ impl eframe::App for SeqForgeApp {
             self.state.event_log.drain_from(rx);
         }
 
+        // ── Rebuild key context ───────────────────────────────────────────────
+        // Pull the fresh overlay tags onto the context stack each frame
+        // before keymap dispatch reads it. Drift-proof: the overlay
+        // stack is the source of truth.
+        let overlay_tags: Vec<&'static str> =
+            self.state.overlays.context_tags().collect();
+        self.state.focus.rebuild_context(overlay_tags.into_iter());
+
         // ── Keymap dispatch ───────────────────────────────────────────────────
         // Single source of truth for keyboard shortcuts. Bindings live in
         // `keymap::KEYMAP`; this call is the *only* place app-level
@@ -194,21 +194,31 @@ impl eframe::App for SeqForgeApp {
             enqueue(&mut self.state, c);
         }
 
-        // ── File-open dialog (menu-triggered) ─────────────────────────────────
-        // Dialog lifecycle stays direct: it's egui widget state, not a user
-        // command. Completion enqueues AppCommand::OpenFile.
-        if let Some(dialog) = &mut self.state.open_dialog {
+        // ── File-open dialog lifecycle ────────────────────────────────────────
+        // The dialog overlay drives itself via egui events; we tick its
+        // state machine each frame. On pick or cancel we enqueue the
+        // appropriate AppCommand and let `apply()` pop the overlay.
+        let mut dialog_followup: Option<AppCommand> = None;
+        if let Some(dialog) = self.state.overlays.file_dialog_mut() {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
                 let path = picked.to_owned();
-                self.state.open_dialog = None;
-                self.state.pending_commands.push((AppCommand::OpenFile(path), None));
+                dialog_followup = Some(AppCommand::OpenFile(path));
             } else if matches!(
                 dialog.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
             ) {
-                self.state.open_dialog = None;
+                dialog_followup = Some(AppCommand::DismissOverlay);
             }
+        }
+        if let Some(cmd) = dialog_followup {
+            // OpenFile carries its own seq_view reset; DismissOverlay
+            // pops the FileDialog from the stack. Both go through the
+            // single applier.
+            if matches!(cmd, AppCommand::OpenFile(_)) {
+                self.state.overlays.pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
+            }
+            enqueue(&mut self.state, cmd);
         }
 
         // ── Menu bar ─────────────────────────────────────────────────────────
@@ -329,7 +339,7 @@ impl eframe::App for SeqForgeApp {
         });
 
         // ── CLI install status window ─────────────────────────────────────────
-        if let Some(msg) = self.state.cli_status.clone() {
+        if let Some(msg) = self.state.overlays.cli_status().map(str::to_owned) {
             let mut open = true;
             let mut dismiss = false;
             egui::Window::new("CLI Install")
@@ -357,7 +367,7 @@ impl eframe::App for SeqForgeApp {
             seq_view,
             pending_commands,
             terminal,
-            active_bar,
+            overlays,
             focus,
             ..
         } = &mut self.state;
@@ -375,7 +385,7 @@ impl eframe::App for SeqForgeApp {
                             seq_view,
                             pending_commands,
                             terminal,
-                            active_bar,
+                            overlays,
                             focus,
                         },
                     );

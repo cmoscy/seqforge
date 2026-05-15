@@ -22,17 +22,10 @@ use seqforge_core::{
 };
 
 use crate::app::AppState;
-use crate::bar::ActiveBar;
 use crate::cli_install;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
-
-// Overlay tag constants used by `AppEvent::Overlay{Pushed,Popped}`.
-// Stage 5 formalises these as `OverlayStack` named identifiers; for
-// now they live alongside the variants that emit them.
-const TAG_FIND_BAR: &str = "FindBar";
-const TAG_GOTO_BAR: &str = "GoToBar";
-const TAG_CLI_STATUS: &str = "CliStatus";
+use crate::overlay::{FindBar, GoToBar, Overlay};
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
@@ -130,7 +123,12 @@ pub fn apply<B: BioOps>(
         PromptOpenFile => {
             let mut dialog = FileDialog::new();
             dialog.pick_file();
-            state.open_dialog = Some(dialog);
+            if let Some(tag) = state
+                .overlays
+                .push_unique(Overlay::FileDialog(Box::new(dialog)))
+            {
+                state.events.emit(AppEvent::OverlayPushed(tag));
+            }
             Ok(None)
         }
 
@@ -165,34 +163,34 @@ pub fn apply<B: BioOps>(
         }
 
         OpenFind => {
-            if state.active_bar.is_none() {
-                state.active_bar = Some(ActiveBar::Find(Default::default()));
-                state.events.emit(AppEvent::OverlayPushed(TAG_FIND_BAR));
+            if let Some(tag) = state
+                .overlays
+                .push_unique(Overlay::FindBar(FindBar::default()))
+            {
+                state.events.emit(AppEvent::OverlayPushed(tag));
             }
             Ok(None)
         }
 
         OpenGoTo => {
-            if state.active_bar.is_none() {
-                state.active_bar = Some(ActiveBar::GoTo(Default::default()));
-                state.events.emit(AppEvent::OverlayPushed(TAG_GOTO_BAR));
+            if let Some(tag) = state
+                .overlays
+                .push_unique(Overlay::GoToBar(GoToBar::default()))
+            {
+                state.events.emit(AppEvent::OverlayPushed(tag));
             }
             Ok(None)
         }
 
         DismissOverlay => {
-            // Stage 5 will pop a real OverlayStack; for now the only
-            // bar-type overlay is `active_bar`.
-            if let Some(tag) = active_bar_tag(&state.active_bar) {
-                state.active_bar = None;
+            if let Some(tag) = state.overlays.pop() {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
             Ok(None)
         }
 
         SubmitFind { pattern, mismatches } => {
-            if let Some(tag) = active_bar_tag(&state.active_bar) {
-                state.active_bar = None;
+            if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_FIND_BAR) {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
             let sel_before = state.viewer.selection;
@@ -209,8 +207,7 @@ pub fn apply<B: BioOps>(
         }
 
         SubmitGoTo { position } => {
-            if let Some(tag) = active_bar_tag(&state.active_bar) {
-                state.active_bar = None;
+            if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_GOTO_BAR) {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
             let sel_before = state.viewer.selection;
@@ -224,9 +221,8 @@ pub fn apply<B: BioOps>(
         }
 
         DismissCliStatus => {
-            if state.cli_status.is_some() {
-                state.cli_status = None;
-                state.events.emit(AppEvent::OverlayPopped(TAG_CLI_STATUS));
+            if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_CLI_STATUS) {
+                state.events.emit(AppEvent::OverlayPopped(tag));
             }
             Ok(None)
         }
@@ -245,15 +241,20 @@ pub fn apply<B: BioOps>(
         }
 
         InstallCli => {
-            state.cli_status = Some(match cli_install::install_cli_to_path() {
+            let msg = match cli_install::install_cli_to_path() {
                 Ok(r) => format!(
                     "✓ seqforge installed to {}{}",
                     r.target.display(),
                     if r.was_updated { " (updated)" } else { "" }
                 ),
                 Err(e) => format!("✗ Install failed: {e}"),
-            });
-            state.events.emit(AppEvent::OverlayPushed(TAG_CLI_STATUS));
+            };
+            // Replace any prior CliStatus (a previous install attempt
+            // may still be showing) so the user sees the latest result.
+            state.overlays.pop_kind(Overlay::TAG_CLI_STATUS);
+            if let Some(tag) = state.overlays.push_unique(Overlay::CliStatus(msg)) {
+                state.events.emit(AppEvent::OverlayPushed(tag));
+            }
             Ok(None)
         }
 
@@ -293,13 +294,3 @@ fn emit_selection_diff(state: &AppState, before: Option<seqforge_core::Selection
     }
 }
 
-/// Returns the overlay tag for whichever bar is currently active, or
-/// `None` if no bar is open. Stage 5 replaces this with a real
-/// `OverlayStack::top_tag()`.
-fn active_bar_tag(bar: &Option<ActiveBar>) -> Option<&'static str> {
-    match bar {
-        Some(ActiveBar::Find(_)) => Some(TAG_FIND_BAR),
-        Some(ActiveBar::GoTo(_)) => Some(TAG_GOTO_BAR),
-        None => None,
-    }
-}

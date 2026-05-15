@@ -28,6 +28,7 @@ use egui::{Key, Modifiers};
 use crate::app::AppState;
 use crate::command::{self, AppCommand};
 use crate::focus::{FocusState, KeyContext};
+use crate::overlay::Overlay;
 
 /// One row of [`KEYMAP`]. A chord fires when:
 /// 1. every tag in `when_context` is present on `focus.context`, **and**
@@ -75,6 +76,17 @@ pub const KEYMAP: &[Binding] = &[
         chord: (Modifiers::COMMAND, Key::G),
         when_context: &[KeyContext::WORKSPACE],
         command: || AppCommand::OpenGoTo,
+    },
+    // ── Overlay-scoped ──────────────────────────────────────────────
+    // Escape dismisses the topmost overlay regardless of which widget
+    // (terminal, viewer, bar text field) has egui focus. Gated on the
+    // generic `Overlay` tag, which `OverlayStack::context_tags` emits
+    // whenever any overlay is on the stack — so Escape passes through
+    // to the terminal as usual when no overlay is open.
+    Binding {
+        chord: (Modifiers::NONE, Key::Escape),
+        when_context: &[Overlay::TAG_ACTIVE],
+        command: || AppCommand::DismissOverlay,
     },
 ];
 

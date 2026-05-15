@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use seqforge_core::ViewerState;
 
-use crate::bar::{show_bar, ActiveBar};
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
 use crate::focus::{FocusScope, FocusState};
+use crate::overlay::{self, OverlayStack};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
 
@@ -21,7 +21,7 @@ pub struct TabViewer<'a> {
     pub seq_view: &'a mut SequenceView,
     pub pending_commands: &'a mut Vec<PendingCommand>,
     pub terminal: &'a mut Option<TerminalPane>,
-    pub active_bar: &'a mut Option<ActiveBar>,
+    pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
 }
 
@@ -60,14 +60,18 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             }
             Tab::Viewer => {
                 // Inline Find / GoTo bar at the top of the viewer pane.
-                if let Some(cmd) = show_bar(self.active_bar, ui) {
+                if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
                 }
                 self.seq_view.show(ui, self.viewer);
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
-                    let terminal_has_focus = self.focus.scope == FocusScope::Terminal;
+                    // Terminal yields keyboard whenever *any* overlay is
+                    // active — even a non-focus-capturing one — so Escape
+                    // and other dismiss bindings work uniformly.
+                    let terminal_has_focus = self.focus.scope == FocusScope::Terminal
+                        && self.overlays.is_empty();
                     term.show(ui, terminal_has_focus);
                 }
                 None => {
@@ -82,7 +86,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         // click, so the actual clicked widget (button, text field, terminal
         // grid) still handles it normally. Routed through AppCommand so the
         // focus mutation goes through the same single applier as everything
-        // else (Stage 2 of the focus refactor).
+        // else.
         if ui.rect_contains_pointer(pane_rect)
             && ui.ctx().input(|i| i.pointer.any_pressed())
             && self.focus.scope != pane_scope

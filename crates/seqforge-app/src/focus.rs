@@ -124,9 +124,9 @@ impl FocusState {
         s
     }
 
-    /// Sets the active pane. No-op if `scope` is unchanged. Rebuilds the
-    /// base context tags; any overlay tags layered on top will be pushed
-    /// fresh each frame by the overlay stack (Stage 5).
+    /// Sets the active pane. No-op if `scope` is unchanged. Rebuilds
+    /// the base context tags (Workspace + pane); overlay tags get
+    /// layered on top per-frame by [`Self::rebuild_context`].
     pub fn set_scope(&mut self, scope: FocusScope) {
         if self.scope == scope {
             return;
@@ -138,6 +138,21 @@ impl FocusState {
     fn rebuild_base_context(&mut self) {
         self.context.clear_to_workspace();
         self.context.push(self.scope.pane_tag());
+    }
+
+    /// Rebuild the full context stack: workspace + pane + overlay
+    /// tags. Called once per frame from `app.rs::update()` before
+    /// keymap dispatch. Overlay tags come from
+    /// [`crate::overlay::OverlayStack::context_tags`].
+    ///
+    /// Pull-based: the source of truth is the overlay stack, the
+    /// scope field, and this function. Drift is impossible because we
+    /// rebuild from scratch every frame.
+    pub fn rebuild_context(&mut self, overlay_tags: impl Iterator<Item = &'static str>) {
+        self.rebuild_base_context();
+        for tag in overlay_tags {
+            self.context.push(tag);
+        }
     }
 }
 
