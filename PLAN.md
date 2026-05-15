@@ -41,24 +41,32 @@ Commands fall into two distinct categories that determine how `seqforge-cli` exe
 ```rust
 // seqforge-core — no GUI dep, runs anywhere
 enum FileCommand {
+    Info { input: PathBuf },
     Digest { input: PathBuf, enzymes: Vec<String>, output: PathBuf },
-    Annotate { input: PathBuf, output: PathBuf, /* ... */ },
-    Align { query: PathBuf, reference: PathBuf, output: PathBuf },
-    GoldenGate { parts: Vec<PathBuf>, enzyme: String, output: PathBuf },
-    // grows as editing features land
+    Annotate { input: PathBuf, output: PathBuf },
 }
 
-// seqforge-core — requires a running GUI instance
-enum ViewerCommand {
-    OpenFile(PathBuf),
-    CloseDocument(DocId),
-    GoTo(usize),
-    Search { pattern: String, mismatches: u8 },
-    FindRestrictionSites { enzymes: Vec<String> },
+// seqforge-core — requires a running GUI instance; JSON-RPC wire encoding
+#[serde(tag = "method", rename_all = "snake_case")]
+enum ViewerRequest {
+    Open { path: PathBuf },
+    Close,
+    GoTo { position: usize },
+    Find { pattern: String, mismatches: u8 },
+    Enzymes { enzymes: Vec<String> },
 }
 
-fn dispatch_file(cmd: FileCommand) -> Result<CommandOutput>;
-fn dispatch_viewer(state: &mut AppState, cmd: ViewerCommand) -> Result<CommandOutput>;
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ViewerResponse {
+    Ok,
+    Navigated { position: usize },
+    SearchResults { count: usize, hits: Vec<SearchHit> },
+    CutSites { count: usize, sites: Vec<CutSite> },
+}
+
+fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError>;
+fn dispatch<B: BioOps>(state: &mut ViewerState, bio: &B, req: ViewerRequest)
+    -> Result<ViewerResponse, DispatchError>;
 ```
 
 Both menu clicks and terminal input parse to the appropriate `Command` type and call the right dispatch function. Terminal uses a thin parser (`clap` derive) so commands have help text and validation for free. **Reference: Helix's `helix-term/src/commands.rs` for the typed-action shape.**
@@ -104,17 +112,20 @@ Defer until the basic app is stable and sequence editing works smoothly.
 // seqforge-core — pure data, no GUI types
 struct ViewerState {
     open_doc: Option<Document>,
-    selection: Option<(usize, usize)>,
+    selection: Option<Selection>,      // cursor or range
     selected_feature: Option<usize>,
-    // scroll position, search hits, restriction sites (added as features land)
+    scroll_to: Option<usize>,          // one-shot; consumed by viewer each frame
+    search_hits: Vec<SearchHit>,
+    cut_sites: Vec<CutSite>,
+    active_enzymes: Vec<String>,
 }
 
 // seqforge-app — GUI shell
 struct AppState {
-    viewer: ViewerState,        // passed to dispatch_viewer
-    dock_state: DockState<Tab>, // egui_dock — GUI only
+    viewer: ViewerState,               // passed to dispatch()
+    dock_state: DockState<Tab>,        // egui_dock — GUI only
     browser: BrowserState,
-    pending_commands: Vec<ViewerCommand>, // consumed each frame
+    pending_requests: Vec<PendingReq>, // (ViewerRequest, Option<oneshot_tx>); consumed each frame
 }
 ```
 
@@ -152,8 +163,8 @@ Skip porting: complement, translation, restriction-site finding (covered by `na_
 - `egui_term` 0.1.0 (Apr 2025) — wraps `alacritty_terminal` and `portable-pty`. Renders into an egui `Ui`.
 - Terminal widget owns its PTY + grid state.
 - **Single command path:** `seqforge-cli` is the sole way to issue viewer commands from the terminal — `seqforge goto 100`, `seqforge find ATGC`, etc. The CLI detects `SEQFORGE_SOCKET` and routes over the socket. No keystroke intercept; TUI tools (vim, nvim, less) work normally.
-- **Agent / script path:** same `seqforge <subcommand>` CLI calls. `dispatch_file` runs in-process; viewer commands go over the session socket.
-- For commands that need rich output (e.g., a digest fragment table), the dispatcher pushes `CommandOutput::Panel(...)` which opens a result tab in the dock.
+- **Agent / script path:** same `seqforge <subcommand>` CLI calls. `dispatch_file` runs in-process; viewer commands go over the session socket and return structured JSON-RPC responses an agent can parse.
+- For commands that need rich output (e.g., a digest fragment table), `ViewerResponse` carries the data; the app layer can open a result tab from the response kind.
 
 ---
 
@@ -206,10 +217,10 @@ Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-ba
 seqforge/
 ├── Cargo.toml             # workspace
 ├── crates/
-│   ├── seqforge-core/     # Document, ViewerState, FileCommand, ViewerCommand, dispatch — no GUI deps
-│   ├── seqforge-bio/      # thin wrappers over na_seq + gb-io + bio; ported workflows
-│   ├── seqforge-cli/      # standalone tool: FileCommand runs locally always; ViewerCommand uses socket when SEQFORGE_SOCKET set
-│   └── seqforge-app/      # eframe binary: egui + egui_dock + egui_term wiring
+│   ├── seqforge-core/     # Document, ViewerState, ViewerRequest/Response, BioOps, dispatch — no GUI deps
+│   ├── seqforge-bio/      # thin wrappers over na_seq + gb-io + bio; ported workflows; impl BioOps
+│   ├── seqforge-cli/      # standalone tool: FileCommand runs locally always; ViewerRequest sent via JSON-RPC socket when SEQFORGE_SOCKET set
+│   └── seqforge-app/      # eframe binary: egui + egui_dock + egui_term wiring; AppBio impl
 └── examples/              # existing reference repos (seqviz, tg-oss) — read-only
 ```
 
@@ -351,7 +362,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 **Implementation notes:**
 
 - `cached_seq_len` guard: complement + stacking are computed once when `seq.len()` changes, cached in `SequenceView`. Not recomputed per frame.
-- `pending_open: Option<PathBuf>` side-channel in `AppState`: `TabViewer` sets it during `DockArea` rendering; `update()` consumes it afterward. Phase 5 generalizes this to `pending_commands: Vec<ViewerCommand>`.
+- `pending_open: Option<PathBuf>` side-channel in `AppState`: `TabViewer` sets it during `DockArea` rendering; `update()` consumes it afterward. Phase 5 generalizes this to `pending_requests: Vec<PendingReq>`.
 - Feature labels: rendered on any segment (including continuations) where `bar.width() >= label.chars().count() * char_width`. Omitted on narrow segments, consistent with SnapGene/Benchling behavior.
 
 **Key files:**
@@ -369,24 +380,24 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 **Architecture note:** `dispatch_viewer` takes `&mut ViewerState` (pure data, in `seqforge-core`) not `&mut AppState`. `AppState` in `seqforge-app` holds `ViewerState` and passes a `&mut` reference. This keeps `seqforge-core` free of egui deps and makes Phase 6 socket IPC straightforward (the socket thread only needs `ViewerState`).
 
-- [x] Extract `ViewerState { open_doc, selection, selected_feature }` from current `SequenceView` / `AppState` into `seqforge-core`; add clap dep to seqforge-core
-- [x] Define `ViewerCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; variants: `Open`, `Close`, `GoTo`, `Find`, `Enzymes`
-- [x] Define `FileCommand` enum in `seqforge-core` with `#[derive(clap::Subcommand)]`; stub variants: `Info`, `Digest`, `Annotate`
-- [x] `dispatch_viewer(state: &mut ViewerState, cmd: ViewerCommand) -> Result<CommandOutput>` in `seqforge-core`
-- [x] `dispatch_file(cmd: FileCommand) -> Result<CommandOutput>` in `seqforge-core`
-- [x] `CommandOutput { messages: Vec<String>, side_effects: Vec<SideEffect> }` — `SideEffect::LoadDocument`, `FocusRange`, `OpenTab`
-- [x] Update `AppState` in `seqforge-app`: `viewer: ViewerState` + `seq_view: SequenceView` + `pending_commands: Vec<ViewerCommand>`
+- [x] Extract `ViewerState` from `SequenceView` / `AppState` into `seqforge-core`; add clap dep to seqforge-core
+- [x] Define `ViewerRequest` enum (`Open`, `Close`, `GoTo`, `Find`, `Enzymes`) + `ViewerResponse` enum; both derive clap + serde; wire encoding is `{"method":"..."}` JSON-RPC 2.0
+- [x] Define `FileCommand` enum; stub variants: `Info`, `Digest`, `Annotate`
+- [x] `BioOps` trait in `seqforge-core` — `load`, `find_matches`, `find_cut_sites`; `AppBio` in `seqforge-app` implements it; breaks core/bio dep cycle
+- [x] `dispatch<B: BioOps>(state, bio, req) -> Result<ViewerResponse, DispatchError>` — single dispatch function; no `SideEffect` indirection
+- [x] `dispatch_file(cmd: FileCommand) -> Result<(), DispatchError>` in `seqforge-core`
+- [x] `AppState`: `viewer: ViewerState` + `seq_view: SequenceView` + `pending_requests: Vec<PendingReq>` (request + optional oneshot response channel)
 - [x] `SequenceView` reads from `&mut ViewerState` rather than holding document data itself
 - [x] Wire `File → Open…` and `File → Close` menu items; `Edit → Find…`, `Navigate → Go to…`, `Tools → Restriction Sites…` stubs
-- [x] File-browser double-click emits `ViewerCommand::Open` through dispatch
-- [x] `Selection` struct added to `seqforge-core`: `{ anchor, focus }` — cursor when equal, range when not; single click on strand places cursor, drag builds range, annotation click sets feature range
+- [x] File-browser double-click emits `ViewerRequest::Open` through dispatch
+- [x] `Selection { anchor, focus }` — cursor when equal, range when not; single click places cursor, drag builds range, annotation/hit/site click sets range
 
 **Notes:**
 
 - `Selection` replaces raw `Option<(usize, usize)>` — cursor = zero-length selection (seqviz/SnapGene pattern)
-- `SideEffect::LoadDocument` bridges the core/bio crate boundary: dispatch returns it, app layer calls `seqforge_bio::load`
-- `GoTo` dispatch validates that `position` is in `[1, seq_len]`; out-of-range returns `DispatchError::OutOfRange { position, seq_len }` with a clear message
-- `scroll_to: Option<usize>` on `ViewerState` is a one-shot field: set by `GoTo` dispatch, consumed by the viewer each frame to center the target position in the viewport
+- `BioOps` trait bridges the core/bio crate boundary: dispatch calls `bio.load` / `bio.find_matches` / `bio.find_cut_sites` directly — no `SideEffect` round-trip through the app layer
+- `GoTo` dispatch validates `position` in `[1, seq_len]`; out-of-range returns `DispatchError::OutOfRange { position, seq_len }`
+- `scroll_to: Option<usize>` on `ViewerState` is a one-shot field: set by `GoTo`/`Find` dispatch, consumed by the viewer to center in viewport
 
 **Done when:** opening files works via menu *and* file-browser double-click, both go through `dispatch_viewer`. Both dispatch functions are unit-tested. ✅
 
@@ -405,7 +416,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 **Session socket (viewer commands from CLI/agents):**
 
 - [x] On app start, open Unix socket at `/tmp/seqforge-{pid}.sock`; set `SEQFORGE_SOCKET` in env before PTY spawn (child shell inherits it)
-- [x] Socket listener thread receives newline-delimited JSON `ViewerCommand`, pushes to `socket_rx` mpsc channel; main `update()` drains it into `pending_commands` each frame
+- [x] Socket listener thread receives newline-delimited JSON-RPC 2.0 requests, parses into `ViewerRequest` via serde tagged enum, dispatches, returns a JSON-RPC response on the same connection; pushes `(ViewerRequest, oneshot_tx)` to `socket_rx` mpsc channel; main `update()` drains it into `pending_requests` each frame
 - [x] `seqforge-cli`: viewer subcommands (`open`, `close`, `goto`, `find`, `enzymes`) read `SEQFORGE_SOCKET` and send JSON over socket; error if unset
 - [x] File subcommands (`info`, `digest`, `annotate`) always run in-process; `FileCommand` never touches socket
 
@@ -449,7 +460,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] `SearchHit { start, end, strand }` and `CutSite { enzyme, recognition_start, recognition_end, cut_pos, bottom_cut_pos }` types in `seqforge-core`
 - [x] `bottom_cut_pos` for palindromic enzymes derived from palindrome symmetry: `recognition_end - cut_after - 1`; equals `cut_pos` for blunt cutters
 - [x] `ViewerState` gains `search_hits`, `cut_sites`, `active_enzymes` (all `#[serde(skip)]`, cleared on new doc load)
-- [x] `SideEffect::SearchPattern` and `SideEffect::ShowEnzymes` bridge core/bio boundary; `app.rs` calls bio and populates state
+- [x] `BioOps` trait bridges core/bio boundary — `dispatch` calls `bio.find_matches` / `bio.find_cut_sites` directly and populates `ViewerState`; no `SideEffect` indirection
 - [x] Render search hits as amber (forward) / cyan (reverse) semi-transparent highlights behind strand text; clicking a hit selects its range
 - [x] Render cut sites as **staple shapes** through the strand rows — vertical top line from stacked label through top strand, horizontal bridge to `bottom_cut_pos`, vertical bottom line through bottom strand; blunt cutters use a single straight line
 - [x] Cut site labels stacked above the ruler using the same greedy interval algorithm as feature stacking; `block_h` grows by `n_label_rows × CUT_LABEL_ROW_H` (14 px/row)
@@ -461,7 +472,6 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 
 - `na_seq::restriction_enzyme::find_re_matches` only searches forward — correct for palindromic enzymes (all entries in na_seq's library); circular handled by extending input sequence
 - na_seq's `find_re_matches` skips the last `re_seq_len + 1` positions (off-by-one in upstream code); circular extension compensates
-- `SideEffect::SearchPattern / ShowEnzymes` follow the same core/bio bridge pattern as `SideEffect::LoadDocument`
 - `find_iupac_matches` and `find_cut_sites` live in `seqforge-bio/src/search.rs`
 - `stack_features` and `stack_cut_labels` are thin wrappers over a shared `greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize)`; algorithm lives in one place
 - Label width approximated by `LABEL_CHAR_W` const (`(FONT_SIZE - 3.0) * 0.55`) — used by both `stack_cut_labels` and Pass 1 click-rect computation
@@ -500,6 +510,8 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [ ] Walk the MVP verification checklist on macOS
 - [ ] CI runs Linux + Windows builds (manual smoke deferred)
 - [ ] `README.md` screenshots (README prose written in Phase 6; add screenshots here)
+- [ ] Socket hardening: prefer `$XDG_RUNTIME_DIR/seqforge-{pid}.sock` over `/tmp`; `chmod 0600` immediately after `bind`; update `SEQFORGE_SOCKET` propagation to PTY
+- [ ] Write `docs/socket-protocol.md` — one-page JSON-RPC 2.0 wire format reference (method names, params shape, response variants, standard error codes)
 - [ ] Tag `v0.1.0`
 
 ---
