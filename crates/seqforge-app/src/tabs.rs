@@ -63,7 +63,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
                 }
-                self.seq_view.show(ui, self.viewer);
+                self.seq_view.show(ui, self.viewer, self.pending_commands);
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {

@@ -19,7 +19,7 @@ use std::sync::mpsc;
 
 use egui_file_dialog::FileDialog;
 use seqforge_core::{
-    dispatch, BioOps, DispatchError, ViewerRequest, ViewerResponse,
+    dispatch, BioOps, DispatchError, Selection, ViewerRequest, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -76,6 +76,16 @@ pub enum AppCommand {
     /// Reset the dock layout to defaults.
     ResetLayout,
 
+    // ── Selection (user-driven, click/drag) ──────────────────────────
+    /// Set the cursor / range selection. `None` clears it. Issued by the
+    /// viewer widget for every click / drag / shift-extend so the
+    /// resulting mutation goes through the single `apply` site and
+    /// `AppEvent::SelectionChanged` fires from one place.
+    SetSelection(Option<Selection>),
+    /// Set (or clear with `None`) the feature-bar highlight. Independent
+    /// of `SetSelection`; clicks that select an annotation push both.
+    SelectFeature(Option<usize>),
+
     // ── Tools ────────────────────────────────────────────────────────
     /// Symlink the bundled CLI into PATH.
     InstallCli,
@@ -100,6 +110,10 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         }
         // Pass-through: the underlying dispatcher enforces preconditions.
         Viewer(_) => true,
+        // Selection commands only meaningful with a doc open, but harmless
+        // as no-ops otherwise — keep them enabled so the viewer doesn't
+        // need to ask before enqueuing.
+        SetSelection(_) | SelectFeature(_) => true,
         // Universally available.
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | ResetLayout | InstallCli => true,
@@ -237,6 +251,18 @@ pub fn apply<B: BioOps>(
 
         ResetLayout => {
             state.dock_state = AppState::default().dock_state;
+            Ok(None)
+        }
+
+        SetSelection(new_sel) => {
+            let before = state.viewer.selection;
+            state.viewer.selection = new_sel;
+            emit_selection_diff(state, before);
+            Ok(None)
+        }
+
+        SelectFeature(new_feat) => {
+            state.viewer.selected_feature = new_feat;
             Ok(None)
         }
 

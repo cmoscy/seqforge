@@ -2,6 +2,8 @@ use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, 
 use seqforge_bio::complement;
 use seqforge_core::{Feature, FeatureKind, Selection, Strand, ViewerState};
 
+use crate::command::{AppCommand, PendingCommand};
+
 const FONT_SIZE: f32 = 13.0;
 const ANNOT_ROW_HEIGHT: f32 = 16.0;
 const CUT_LABEL_ROW_H: f32 = 14.0;
@@ -148,9 +150,16 @@ impl SequenceView {
         self.cached_n_cut_label_rows = 0;
     }
 
-    /// Render the sequence viewer. Selection and document data are read/written
-    /// through `vstate` so dispatch_viewer can mutate them independently.
-    pub fn show(&mut self, ui: &mut egui::Ui, vstate: &mut ViewerState) {
+    /// Render the sequence viewer. Document data is read from `vstate`; the
+    /// viewer never mutates selection / feature directly — it pushes
+    /// `AppCommand::SetSelection` / `SelectFeature` to `cmds` so the
+    /// single-applier invariant from the focus refactor holds.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        vstate: &mut ViewerState,
+        cmds: &mut Vec<PendingCommand>,
+    ) {
         let doc = match vstate.open_doc.as_ref() {
             Some(d) => d,
             None => {
@@ -320,46 +329,58 @@ impl SequenceView {
 
                 let shift_held = ui.input(|i| i.modifiers.shift);
 
+                // Helpers that close over `cmds` so each branch is one push.
+                // The viewer never mutates `vstate.selection` / `selected_feature`
+                // directly; one-frame visual lag is the documented trade-off
+                // (see focus-refactor §2, "render never mutates state").
+                let push_sel = |cmds: &mut Vec<PendingCommand>, sel: Option<Selection>| {
+                    cmds.push((AppCommand::SetSelection(sel), None));
+                };
+                let push_feat = |cmds: &mut Vec<PendingCommand>, feat: Option<usize>| {
+                    cmds.push((AppCommand::SelectFeature(feat), None));
+                };
+
                 if response.clicked() {
                     if let Some(pos) = ptr {
                         if shift_held {
                             // Shift+click: extend focus while keeping existing anchor.
                             if let Some(seq_pos) = ptr_seq {
-                                if let Some(sel) = vstate.selection {
-                                    vstate.selection =
-                                        Some(Selection { anchor: sel.anchor, focus: seq_pos });
-                                } else {
-                                    vstate.selection = Some(Selection::cursor(seq_pos));
-                                }
+                                let new_sel = match vstate.selection {
+                                    Some(sel) => Selection { anchor: sel.anchor, focus: seq_pos },
+                                    None => Selection::cursor(seq_pos),
+                                };
+                                push_sel(cmds, Some(new_sel));
                             }
                         } else if let Some(&(_, feat_idx)) =
                             annot_hits.iter().find(|(r, _)| r.contains(pos))
                         {
                             let feat = &doc.features[feat_idx];
-                            vstate.selection =
-                                Some(Selection::range(feat.range.start, feat.range.end));
-                            vstate.selected_feature = Some(feat_idx);
+                            push_sel(cmds, Some(Selection::range(feat.range.start, feat.range.end)));
+                            push_feat(cmds, Some(feat_idx));
                         } else if let Some(&(_, hit_idx)) =
                             search_hit_rects.iter().find(|(r, _)| r.contains(pos))
                         {
                             let hit = &vstate.search_hits[hit_idx];
-                            vstate.selection = Some(Selection::range(hit.start, hit.end));
-                            vstate.selected_feature = None;
+                            push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
+                            push_feat(cmds, None);
                         } else if let Some(&(_, site_idx)) =
                             cut_site_rects.iter().find(|(r, _)| r.contains(pos))
                         {
                             let site = &vstate.cut_sites[site_idx];
-                            vstate.selection = Some(Selection::range(
-                                site.recognition_start,
-                                site.recognition_end,
-                            ));
-                            vstate.selected_feature = None;
+                            push_sel(
+                                cmds,
+                                Some(Selection::range(
+                                    site.recognition_start,
+                                    site.recognition_end,
+                                )),
+                            );
+                            push_feat(cmds, None);
                         } else if let Some(seq_pos) = ptr_seq {
-                            vstate.selection = Some(Selection::cursor(seq_pos));
-                            vstate.selected_feature = None;
+                            push_sel(cmds, Some(Selection::cursor(seq_pos)));
+                            push_feat(cmds, None);
                         } else {
-                            vstate.selection = None;
-                            vstate.selected_feature = None;
+                            push_sel(cmds, None);
+                            push_feat(cmds, None);
                         }
                     }
                 }
@@ -369,14 +390,16 @@ impl SequenceView {
                     let on_hit = ptr.is_some_and(|p| search_hit_rects.iter().any(|(r, _)| r.contains(p)));
                     let on_site = ptr.is_some_and(|p| cut_site_rects.iter().any(|(r, _)| r.contains(p)));
                     if !on_annot && !on_hit && !on_site {
+                        // drag_start is view-local (not document state) so it
+                        // stays on `self`.
                         self.drag_start = ptr_seq;
-                        vstate.selected_feature = None;
-                        vstate.selection = ptr_seq.map(Selection::cursor);
+                        push_feat(cmds, None);
+                        push_sel(cmds, ptr_seq.map(Selection::cursor));
                     }
                 }
                 if response.dragged() {
                     if let (Some(anchor), Some(focus)) = (self.drag_start, ptr_seq) {
-                        vstate.selection = Some(Selection { anchor, focus });
+                        push_sel(cmds, Some(Selection { anchor, focus }));
                     }
                 }
                 if response.drag_stopped() {
