@@ -106,7 +106,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
     use AppCommand::*;
     match cmd {
         OpenFind | OpenGoTo | SubmitFind { .. } | SubmitGoTo { .. } | CloseDoc => {
-            state.viewer.open_doc.is_some()
+            state.workspace.active_view().is_some()
         }
         // Pass-through: the underlying dispatcher enforces preconditions.
         Viewer(_) => true,
@@ -118,6 +118,85 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | ResetLayout | InstallCli => true,
     }
+}
+
+/// Read the active view's selection. Used by `emit_selection_diff` and
+/// by command arms that need a before-snapshot.
+fn active_selection(state: &AppState) -> Option<Selection> {
+    state.workspace.active_view().and_then(|v| v.selection)
+}
+
+/// Snapshot helper: emits `SelectionChanged` iff the active view's
+/// selection differs from `before`. Pulled out so every dispatching
+/// variant has the same diffing contract.
+fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
+    let after = active_selection(state);
+    if after != before {
+        state.events.emit(AppEvent::SelectionChanged { selection: after });
+    }
+}
+
+/// Shared apply path for both menu-driven `OpenFile` and socket-driven
+/// `Viewer(ViewerRequest::Open { path })` — they should be observably
+/// indistinguishable from event subscribers' perspective.
+fn apply_open_file<B: BioOps>(
+    state: &mut AppState,
+    bio: &B,
+    path: PathBuf,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    state.seq_view.reset();
+    state.recent_files.retain(|p| p != &path);
+    state.recent_files.insert(0, path.clone());
+    state.recent_files.truncate(crate::app::MAX_RECENT);
+    let sel_before = active_selection(state);
+
+    // Workspace::open_path loads the buffer (via BioOps) and attaches a
+    // new View in the active pane. Errors bubble up as BioError.
+    let view_id = state
+        .workspace
+        .open_path(&path, bio)
+        .map_err(DispatchError::BioError)?;
+
+    // Emit DocOpened with the new view's buffer summary.
+    if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
+        state
+            .workspace
+            .buffers
+            .get(v.buffer_id)
+            .and_then(|arc| arc.read().ok().map(|b| (b.name.clone(), b.len())))
+    }) {
+        state.events.emit(AppEvent::DocOpened { name, len });
+    }
+
+    emit_selection_diff(state, sel_before);
+    Ok(Some(ViewerResponse::Ok))
+}
+
+/// Shared apply path for `CloseDoc` (menu / hotkey) and
+/// `Viewer(ViewerRequest::Close)` (socket).
+fn apply_close_doc(
+    state: &mut AppState,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let sel_before = active_selection(state);
+    state.workspace.close_active_view()?;
+    state.events.emit(AppEvent::DocClosed);
+    emit_selection_diff(state, sel_before);
+    state.seq_view.reset();
+    Ok(Some(ViewerResponse::Ok))
+}
+
+/// Dispatch a view-scoped `ViewerRequest` against the active view +
+/// its buffer. Flattens the `with_active_buffer` -> dispatch nesting so
+/// callers get a single `Result<ViewerResponse, DispatchError>`.
+fn dispatch_active<B: BioOps>(
+    state: &mut AppState,
+    bio: &B,
+    req: ViewerRequest,
+) -> Result<ViewerResponse, DispatchError> {
+    state
+        .workspace
+        .with_active_buffer(|view, buf, ann| dispatch(view, buf, ann, bio, req))
+        .and_then(|inner| inner)
 }
 
 /// The single mutation site. Every command's effect on `AppState` is
@@ -146,35 +225,14 @@ pub fn apply<B: BioOps>(
             Ok(None)
         }
 
-        OpenFile(path) => {
-            state.seq_view.reset();
-            state.recent_files.retain(|p| p != &path);
-            state.recent_files.insert(0, path.clone());
-            state.recent_files.truncate(crate::app::MAX_RECENT);
-            let sel_before = state.viewer.selection;
-            let resp = dispatch(&mut state.viewer, bio, ViewerRequest::Open { path })?;
-            if let Some(doc) = &state.viewer.open_doc {
-                state.events.emit(AppEvent::DocOpened {
-                    name: doc.name.clone(),
-                    len: doc.sequence.len(),
-                });
-            }
-            emit_selection_diff(state, sel_before);
-            Ok(Some(resp))
-        }
+        OpenFile(path) => apply_open_file(state, bio, path),
 
         ClearRecent => {
             state.recent_files.clear();
             Ok(None)
         }
 
-        CloseDoc => {
-            let sel_before = state.viewer.selection;
-            let resp = dispatch(&mut state.viewer, bio, ViewerRequest::Close)?;
-            state.events.emit(AppEvent::DocClosed);
-            emit_selection_diff(state, sel_before);
-            Ok(Some(resp))
-        }
+        CloseDoc => apply_close_doc(state),
 
         OpenFind => {
             if let Some(tag) = state
@@ -207,12 +265,8 @@ pub fn apply<B: BioOps>(
             if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_FIND_BAR) {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
-            let sel_before = state.viewer.selection;
-            let resp = dispatch(
-                &mut state.viewer,
-                bio,
-                ViewerRequest::Find { pattern, mismatches },
-            )?;
+            let sel_before = active_selection(state);
+            let resp = dispatch_active(state, bio, ViewerRequest::Find { pattern, mismatches })?;
             if let ViewerResponse::SearchResults { count, .. } = &resp {
                 state.events.emit(AppEvent::SearchCompleted { hits: *count });
             }
@@ -224,12 +278,8 @@ pub fn apply<B: BioOps>(
             if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_GOTO_BAR) {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
-            let sel_before = state.viewer.selection;
-            let resp = dispatch(
-                &mut state.viewer,
-                bio,
-                ViewerRequest::GoTo { position },
-            )?;
+            let sel_before = active_selection(state);
+            let resp = dispatch_active(state, bio, ViewerRequest::GoTo { position })?;
             emit_selection_diff(state, sel_before);
             Ok(Some(resp))
         }
@@ -255,14 +305,18 @@ pub fn apply<B: BioOps>(
         }
 
         SetSelection(new_sel) => {
-            let before = state.viewer.selection;
-            state.viewer.selection = new_sel;
+            let before = active_selection(state);
+            if let Some(view) = state.workspace.active_view_mut() {
+                view.selection = new_sel;
+            }
             emit_selection_diff(state, before);
             Ok(None)
         }
 
         SelectFeature(new_feat) => {
-            state.viewer.selected_feature = new_feat;
+            if let Some(view) = state.workspace.active_view_mut() {
+                view.selected_feature = new_feat;
+            }
             Ok(None)
         }
 
@@ -285,38 +339,23 @@ pub fn apply<B: BioOps>(
         }
 
         Viewer(req) => {
-            // Pass-through path: classify response shape into the right
-            // events so socket-originated commands generate the same
-            // signals as their GUI-originated equivalents.
-            let was_open = state.viewer.open_doc.is_some();
-            let sel_before = state.viewer.selection;
-            let resp = dispatch(&mut state.viewer, bio, req)?;
-            match &resp {
-                ViewerResponse::SearchResults { count, .. } => {
-                    state.events.emit(AppEvent::SearchCompleted { hits: *count });
-                }
-                ViewerResponse::Ok => {
-                    // Close manifests as Ok with the doc cleared.
-                    if was_open && state.viewer.open_doc.is_none() {
-                        state.events.emit(AppEvent::DocClosed);
+            // Pass-through path: socket-originated commands. Open/Close
+            // route through the same shared helpers as menu/hotkey so
+            // event emission is identical regardless of origin.
+            match req {
+                ViewerRequest::Open { path } => apply_open_file(state, bio, path),
+                ViewerRequest::Close => apply_close_doc(state),
+                other => {
+                    let sel_before = active_selection(state);
+                    let resp = dispatch_active(state, bio, other)?;
+                    if let ViewerResponse::SearchResults { count, .. } = &resp {
+                        state.events.emit(AppEvent::SearchCompleted { hits: *count });
                     }
+                    emit_selection_diff(state, sel_before);
+                    Ok(Some(resp))
                 }
-                _ => {}
             }
-            emit_selection_diff(state, sel_before);
-            Ok(Some(resp))
         }
-    }
-}
-
-/// Snapshot helper: emits `SelectionChanged` iff `state.viewer.selection`
-/// differs from `before`. Pulled out so every viewer-dispatching variant
-/// has the same diffing contract.
-fn emit_selection_diff(state: &AppState, before: Option<seqforge_core::Selection>) {
-    if state.viewer.selection != before {
-        state.events.emit(AppEvent::SelectionChanged {
-            selection: state.viewer.selection,
-        });
     }
 }
 

@@ -1,6 +1,7 @@
 use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use seqforge_bio::complement;
-use seqforge_core::{Feature, FeatureKind, Selection, Strand, ViewerState};
+use seqforge_core::{
+    Annotations, Buffer, BufferId, Feature, FeatureKind, Selection, Strand, View,
+};
 
 use crate::command::{AppCommand, PendingCommand};
 
@@ -120,28 +121,35 @@ fn annot_bar_rect(
 // ── Widget state ──────────────────────────────────────────────────────────────
 
 /// Rendering caches and interaction state for the sequence viewer widget.
-/// Selection and document data live in `ViewerState` (seqforge-core).
+/// Document data lives on [`Buffer`]; selection / scroll / search live
+/// on [`View`]. Caches invalidate on `(buffer_id, buffer.version)` —
+/// version-keyed invalidation is the Tier 3a contract, available for
+/// free now even though edits don't bump the version yet.
 #[derive(Debug, Default)]
 pub struct SequenceView {
     drag_start: Option<usize>,
-    // Cached per-document values — recomputed only when seq_len changes.
-    cached_seq_len: usize,
-    cached_complement: Vec<u8>,
+    /// Buffer this widget was last rendered against; differs from
+    /// current → tear down all caches.
+    cached_buffer_id: Option<BufferId>,
+    /// Buffer version at last cache fill. Bumped on every future edit.
+    cached_version: u64,
     cached_feat_row: Vec<usize>, // feat_idx → stacked row index
     cached_n_annot_rows: usize,
-    // Cached per-enzyme-result values — recomputed when cut site positions or char_width changes.
-    cached_cut_site_key: Vec<usize>, // sorted cut positions — invalidation key
+    // Cut-label cache invalidates on cut-site positions + char_width.
+    cached_cut_site_key: Vec<usize>, // sorted cut positions
     cached_char_width: f32,
     cached_cut_label_row: Vec<usize>, // site_idx → stacked row index
     cached_n_cut_label_rows: usize,
 }
 
 impl SequenceView {
-    /// Call when a new document is loaded so stale caches are cleared.
+    /// Clear caches so the next `show()` recomputes from scratch.
+    /// Called by `command::apply` on Open / Close so per-doc derived
+    /// data doesn't leak across document boundaries.
     pub fn reset(&mut self) {
         self.drag_start = None;
-        self.cached_seq_len = 0;
-        self.cached_complement.clear();
+        self.cached_buffer_id = None;
+        self.cached_version = 0;
         self.cached_feat_row.clear();
         self.cached_n_annot_rows = 0;
         self.cached_cut_site_key = Vec::new();
@@ -150,26 +158,23 @@ impl SequenceView {
         self.cached_n_cut_label_rows = 0;
     }
 
-    /// Render the sequence viewer. Document data is read from `vstate`; the
-    /// viewer never mutates selection / feature directly — it pushes
-    /// `AppCommand::SetSelection` / `SelectFeature` to `cmds` so the
-    /// single-applier invariant from the focus refactor holds.
+    /// Render the sequence viewer. Caller must have already resolved an
+    /// active view and locked its buffer for read; this widget is
+    /// inert if there's no doc — the placeholder rendering lives in
+    /// `tabs.rs::ui` so this function can assume a real buffer.
+    ///
+    /// Selection / feature highlight mutations go through
+    /// `AppCommand::SetSelection` / `SelectFeature` (pushed to `cmds`)
+    /// so the single-applier invariant from the focus refactor holds.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        vstate: &mut ViewerState,
+        view: &mut View,
+        buffer: &Buffer,
+        annotations: &Annotations,
         cmds: &mut Vec<PendingCommand>,
     ) {
-        let doc = match vstate.open_doc.as_ref() {
-            Some(d) => d,
-            None => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No file open.\nDouble-click a .gb or .fasta file in the browser.");
-                });
-                return;
-            }
-        };
-        let seq = &doc.sequence;
+        let seq = &buffer.text;
         let seq_len = seq.len();
 
         if seq_len == 0 {
@@ -179,16 +184,23 @@ impl SequenceView {
             return;
         }
 
-        // Recompute doc-derived values only when the document changes.
-        if self.cached_seq_len != seq_len {
-            self.cached_complement = complement(seq);
-            let (feat_rows, n_rows) = stack_features(&doc.features);
+        // Version-keyed cache invalidation. Mismatch on `buffer_id` ⇒
+        // we're rendering a different buffer (e.g. after tab switch
+        // in Stage 2.5b). Mismatch on `version` ⇒ buffer was edited
+        // (Tier 3d). Both rebuild from scratch.
+        let cache_stale = self.cached_buffer_id != Some(view.buffer_id)
+            || self.cached_version != buffer.version;
+        if cache_stale {
+            let (feat_rows, n_rows) = stack_features(&annotations.features);
             self.cached_feat_row = feat_rows;
             self.cached_n_annot_rows = n_rows;
-            self.cached_seq_len = seq_len;
+            self.cached_buffer_id = Some(view.buffer_id);
+            self.cached_version = buffer.version;
         }
 
-        let comp = &self.cached_complement;
+        // Complement lives on Buffer (computed at load time, recomputed
+        // on edit by Buffer's mutator). View-side caching no longer needed.
+        let comp = &buffer.complement;
         let feat_row = &self.cached_feat_row;
         let n_annot_rows = self.cached_n_annot_rows;
 
@@ -214,14 +226,14 @@ impl SequenceView {
         // char_width is pane-width-dependent, so a resize also invalidates the cache.
         let cut_site_key: Vec<usize> = {
             let mut positions: Vec<usize> =
-                vstate.cut_sites.iter().map(|s| s.cut_pos).collect();
+                view.cut_sites.iter().map(|s| s.cut_pos).collect();
             positions.sort_unstable();
             positions
         };
         if cut_site_key != self.cached_cut_site_key
             || (char_width - self.cached_char_width).abs() > 0.5
         {
-            let (rows, n_rows) = stack_cut_labels(&vstate.cut_sites, char_width);
+            let (rows, n_rows) = stack_cut_labels(&view.cut_sites, char_width);
             self.cached_cut_label_row = rows;
             self.cached_n_cut_label_rows = n_rows;
             self.cached_cut_site_key = cut_site_key;
@@ -239,7 +251,7 @@ impl SequenceView {
 
         // Consume the one-shot scroll request: center the target block in the
         // viewport this frame, then clear so the user can scroll freely.
-        let scroll_offset = vstate.scroll_to.take().map(|pos| {
+        let scroll_offset = view.scroll_to.take().map(|pos| {
             let block_top = (pos / line_width) as f32 * block_h;
             let viewport_h = ui.available_height();
             (block_top - viewport_h / 2.0 + block_h / 2.0).max(0.0)
@@ -278,7 +290,7 @@ impl SequenceView {
                     let bot_y = top_y + STRAND_HEIGHT;
                     let annot_base_y = bot_y + STRAND_HEIGHT;
 
-                    for (feat_idx, feat) in doc.features.iter().enumerate() {
+                    for (feat_idx, feat) in annotations.features.iter().enumerate() {
                         let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
                         if let Some(r) =
                             annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
@@ -286,7 +298,7 @@ impl SequenceView {
                             annot_hits.push((r, feat_idx));
                         }
                     }
-                    for (hit_idx, hit) in vstate.search_hits.iter().enumerate() {
+                    for (hit_idx, hit) in view.search_hits.iter().enumerate() {
                         let vis_s = hit.start.max(block_start).min(block_end);
                         let vis_e = hit.end.min(block_end);
                         if vis_s < vis_e && vis_e > block_start {
@@ -304,7 +316,7 @@ impl SequenceView {
                     // Click target is the label only — not the staple line through the
                     // strands. Clicking the strand near a cut site places a cursor as
                     // expected; only the label is the intentional selection handle.
-                    for (site_idx, site) in vstate.cut_sites.iter().enumerate() {
+                    for (site_idx, site) in view.cut_sites.iter().enumerate() {
                         if site.cut_pos >= block_start && site.cut_pos <= block_end {
                             let cx = seq_x0 + (site.cut_pos - block_start) as f32 * char_width;
                             let label_w = site.enzyme.len() as f32 * LABEL_CHAR_W + 8.0;
@@ -330,7 +342,7 @@ impl SequenceView {
                 let shift_held = ui.input(|i| i.modifiers.shift);
 
                 // Helpers that close over `cmds` so each branch is one push.
-                // The viewer never mutates `vstate.selection` / `selected_feature`
+                // The viewer never mutates `view.selection` / `selected_feature`
                 // directly; one-frame visual lag is the documented trade-off
                 // (see focus-refactor §2, "render never mutates state").
                 let push_sel = |cmds: &mut Vec<PendingCommand>, sel: Option<Selection>| {
@@ -345,7 +357,7 @@ impl SequenceView {
                         if shift_held {
                             // Shift+click: extend focus while keeping existing anchor.
                             if let Some(seq_pos) = ptr_seq {
-                                let new_sel = match vstate.selection {
+                                let new_sel = match view.selection {
                                     Some(sel) => Selection { anchor: sel.anchor, focus: seq_pos },
                                     None => Selection::cursor(seq_pos),
                                 };
@@ -354,19 +366,19 @@ impl SequenceView {
                         } else if let Some(&(_, feat_idx)) =
                             annot_hits.iter().find(|(r, _)| r.contains(pos))
                         {
-                            let feat = &doc.features[feat_idx];
+                            let feat = &annotations.features[feat_idx];
                             push_sel(cmds, Some(Selection::range(feat.range.start, feat.range.end)));
                             push_feat(cmds, Some(feat_idx));
                         } else if let Some(&(_, hit_idx)) =
                             search_hit_rects.iter().find(|(r, _)| r.contains(pos))
                         {
-                            let hit = &vstate.search_hits[hit_idx];
+                            let hit = &view.search_hits[hit_idx];
                             push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
                             push_feat(cmds, None);
                         } else if let Some(&(_, site_idx)) =
                             cut_site_rects.iter().find(|(r, _)| r.contains(pos))
                         {
-                            let site = &vstate.cut_sites[site_idx];
+                            let site = &view.cut_sites[site_idx];
                             push_sel(
                                 cmds,
                                 Some(Selection::range(
@@ -442,7 +454,7 @@ impl SequenceView {
                     let annot_base_y = bot_y + STRAND_HEIGHT;
 
                     // ── Search hit highlights (behind selection and text) ──────
-                    for hit in &vstate.search_hits {
+                    for hit in &view.search_hits {
                         let vis_s = hit.start.max(block_start).min(block_end);
                         let vis_e = hit.end.min(block_end); // clamp wrap-arounds
                         if vis_s < vis_e && vis_e > block_start {
@@ -463,7 +475,7 @@ impl SequenceView {
                     }
 
                     // ── Selection highlight / cursor (behind text) ────────────
-                    if let Some(sel) = vstate.selection {
+                    if let Some(sel) = view.selection {
                         if sel.is_cursor() {
                             // Thin vertical line between bases spanning both strands.
                             let pos = sel.anchor;
@@ -533,12 +545,12 @@ impl SequenceView {
                     painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
 
                     // ── Annotation bars (below strands) ───────────────────────
-                    for (feat_idx, feat) in doc.features.iter().enumerate() {
+                    for (feat_idx, feat) in annotations.features.iter().enumerate() {
                         let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
                         if let Some(bar) =
                             annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
                         {
-                            let is_selected = vstate.selected_feature == Some(feat_idx);
+                            let is_selected = view.selected_feature == Some(feat_idx);
                             painter.rect_filled(bar, 2.0, feature_color(feat.kind));
                             if is_selected {
                                 painter.rect_stroke(
@@ -566,7 +578,7 @@ impl SequenceView {
                     // line descends from the label through both strands at inter-base
                     // x positions (same coordinate system as the cursor). The horizontal
                     // connector at bot_y encodes the overhang; blunt = straight line.
-                    for (site_idx, site) in vstate.cut_sites.iter().enumerate() {
+                    for (site_idx, site) in view.cut_sites.iter().enumerate() {
                         let top_cut = site.cut_pos;
                         let bot_cut = site.bottom_cut_pos;
                         if top_cut < block_start || top_cut > block_end {

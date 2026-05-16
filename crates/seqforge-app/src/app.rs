@@ -3,7 +3,7 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use serde::{Deserialize, Serialize};
-use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse, ViewerState};
+use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse};
 
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
@@ -15,6 +15,7 @@ use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+use crate::workspace::Workspace;
 
 pub(crate) const MAX_RECENT: usize = 10;
 
@@ -48,8 +49,10 @@ impl BioOps for AppBio {
 pub struct AppState {
     pub dock_state: DockState<Tab>,
     pub browser: BrowserState,
-    /// Document + selection state — no GUI deps; persisted across restarts.
-    pub viewer: ViewerState,
+    /// Workspace = pane tree + buffer store + active-view bookkeeping.
+    /// Replaces the old `viewer: ViewerState` flat field; see PLAN.md
+    /// Tier 2.5 for the design.
+    pub workspace: Workspace,
     /// Recently opened files (most-recent first, max 10).
     pub recent_files: Vec<PathBuf>,
     // ── Transient: not persisted ──────────────────────────────────────────
@@ -102,7 +105,7 @@ impl Default for AppState {
         Self {
             dock_state,
             browser: BrowserState::default(),
-            viewer: ViewerState::default(),
+            workspace: Workspace::default(),
             recent_files: Vec::new(),
             seq_view: SequenceView::default(),
             pending_commands: Vec::new(),
@@ -310,14 +313,19 @@ impl eframe::App for SeqForgeApp {
         }
 
         // ── Status bar ────────────────────────────────────────────────────────
+        // Reads the active view + its buffer. A briefly-held read lock is
+        // the only access the status bar needs; no events bus required.
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                if let Some(doc) = &self.state.viewer.open_doc {
-                    let seq_len = doc.sequence.len();
-                    let topology = format!("{:?}", doc.topology);
+                let info = self.state.workspace.active_view().and_then(|v| {
+                    let buf_arc = self.state.workspace.buffers.get(v.buffer_id)?;
+                    let buf = buf_arc.read().ok()?;
+                    Some((buf.len(), format!("{:?}", buf.topology), v.selection))
+                });
+                if let Some((seq_len, topology, selection)) = info {
                     ui.label(format!("{seq_len} bp  ·  {topology}"));
-                    if let Some(sel) = self.state.viewer.selection {
+                    if let Some(sel) = selection {
                         if sel.is_cursor() {
                             ui.label(format!("pos {}", sel.anchor + 1));
                         } else {
@@ -356,7 +364,7 @@ impl eframe::App for SeqForgeApp {
         let AppState {
             dock_state,
             browser,
-            viewer,
+            workspace,
             seq_view,
             pending_commands,
             terminal,
@@ -374,7 +382,7 @@ impl eframe::App for SeqForgeApp {
                         ui,
                         &mut TabViewer {
                             browser,
-                            viewer,
+                            workspace,
                             seq_view,
                             pending_commands,
                             terminal,

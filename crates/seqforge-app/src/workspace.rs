@@ -10,9 +10,11 @@
 //! these types embody (Pane = dock-tab unit, `Arc<RwLock<Buffer>>` for
 //! shared ownership, same-buffer-in-multiple-panes, etc.).
 //!
-//! `dead_code` is allowed module-wide because the consumers land in the
-//! next sub-commits of Stage 2.5a; lifting the attribute is a checkpoint
-//! that the migration is complete.
+//! Some methods (`view`, `view_mut`, the `with_view_*` by-id primitives)
+//! are currently used only by tests; their consumers land in Stage 2.5b
+//! (multi-tab support) and 2.5d (socket-protocol explicit targeting).
+//! Lifting the dead_code allowance is the checkpoint that Stage 2.5 is
+//! complete.
 
 #![allow(dead_code)]
 
@@ -22,7 +24,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use seqforge_core::{
-    Annotations, BioOps, Buffer, BufferId, View, ViewId, ViewKind,
+    Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind,
 };
 
 // ── PaneId ───────────────────────────────────────────────────────────────────
@@ -306,6 +308,36 @@ impl Workspace {
         self.buffers.get(view.buffer_id)
     }
 
+    /// Close the active view in the active pane. If that was the last
+    /// view referencing its buffer, the buffer is dropped from the store
+    /// too. Returns the closed view's id, or `NoActiveView` if none.
+    pub fn close_active_view(&mut self) -> Result<ViewId, DispatchError> {
+        let view_id = self
+            .active_view()
+            .ok_or(DispatchError::NoActiveView)?
+            .id;
+        self.close_view(view_id)
+    }
+
+    /// Close a specific view. If its buffer is no longer referenced by
+    /// any view after removal, the buffer is dropped from the store.
+    pub fn close_view(&mut self, view_id: ViewId) -> Result<ViewId, DispatchError> {
+        let (pid, _) = self
+            .locate(view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let pane = self.panes.get_mut(&pid).expect("located");
+        let removed = pane.close(view_id).expect("located");
+
+        // Drop the buffer if no view in any pane still references it.
+        let still_referenced = self.panes.values().any(|p| {
+            p.views.iter().any(|v| v.buffer_id == removed.buffer_id)
+        });
+        if !still_referenced {
+            self.buffers.remove(removed.buffer_id);
+        }
+        Ok(view_id)
+    }
+
     /// Open `path` and attach a new View in the active pane. Returns the
     /// new view's id, or an error if no pane is active or load failed.
     pub fn open_path(
@@ -320,6 +352,141 @@ impl Workspace {
             .ok_or_else(|| "no active pane".to_string())?;
         pane.push_active(View::new(view_id, buffer_id, ViewKind::TextView));
         Ok(view_id)
+    }
+
+    // ── Lookup primitives ─────────────────────────────────────────────────────
+
+    /// Locate which pane holds `view_id` and where in its view list.
+    /// Returns `(pane_id, index_in_pane)` or `None` if not found.
+    pub fn locate(&self, view_id: ViewId) -> Option<(PaneId, usize)> {
+        for (&pid, pane) in &self.panes {
+            if let Some(idx) = pane.find(view_id) {
+                return Some((pid, idx));
+            }
+        }
+        None
+    }
+
+    /// Read-only view-by-id accessor.
+    pub fn view(&self, view_id: ViewId) -> Option<&View> {
+        let (pid, idx) = self.locate(view_id)?;
+        self.panes.get(&pid)?.views.get(idx)
+    }
+
+    /// Mutable view-by-id accessor.
+    pub fn view_mut(&mut self, view_id: ViewId) -> Option<&mut View> {
+        let (pid, idx) = self.locate(view_id)?;
+        self.panes.get_mut(&pid)?.views.get_mut(idx)
+    }
+
+    // ── Buffer-locking helpers ────────────────────────────────────────────────
+    //
+    // Three lock levels × two addressing modes = six helpers. All share the
+    // same closure shape (Zed's `model.read(cx, f)` / `model.update(cx, f)`
+    // pattern) so lock acquisition is bounded by the closure scope and
+    // borrow conflicts are confined to one method's body.
+    //
+    //   ┌─────────────────┬──────────────┬───────────────────────────────────┐
+    //   │ Lock level      │ By id        │ Active                            │
+    //   ├─────────────────┼──────────────┼───────────────────────────────────┤
+    //   │ View only       │ view_mut()   │ active_view_mut()                 │
+    //   │ View + buf read │ with_buffer  │ with_active_buffer                │
+    //   │ View + buf write│ with_buffer_ │ with_active_buffer_mut            │
+    //   │                 │ mut          │                                   │
+    //   └─────────────────┴──────────────┴───────────────────────────────────┘
+
+    /// Run `f` against the view (mutable), buffer (read-locked), and
+    /// annotations (mutable). Used by query operations like Find /
+    /// Enzymes that mutate per-view derived state (`search_hits`,
+    /// `cut_sites`) while only reading the underlying sequence.
+    pub fn with_buffer<R>(
+        &mut self,
+        view_id: ViewId,
+        f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
+    ) -> Result<R, DispatchError> {
+        let (pid, idx, bid) = {
+            let (pid, idx) = self
+                .locate(view_id)
+                .ok_or(DispatchError::ViewNotFound(view_id))?;
+            let bid = self
+                .panes
+                .get(&pid)
+                .and_then(|p| p.views.get(idx))
+                .map(|v| v.buffer_id)
+                .ok_or(DispatchError::ViewNotFound(view_id))?;
+            (pid, idx, bid)
+        };
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
+        let view = self
+            .panes
+            .get_mut(&pid)
+            .and_then(|p| p.views.get_mut(idx))
+            .expect("located above");
+        let ann = self
+            .buffers
+            .annotations_mut(bid)
+            .expect("located above");
+        Ok(f(view, &buf, ann))
+    }
+
+    /// Run `f` against the view, buffer (write-locked), and annotations,
+    /// all mutable. Used by edit operations (Tier 3d) and by `Open` /
+    /// `Close` style commands that need to mutate the buffer in place.
+    pub fn with_buffer_mut<R>(
+        &mut self,
+        view_id: ViewId,
+        f: impl FnOnce(&mut View, &mut Buffer, &mut Annotations) -> R,
+    ) -> Result<R, DispatchError> {
+        let (pid, idx, bid) = {
+            let (pid, idx) = self
+                .locate(view_id)
+                .ok_or(DispatchError::ViewNotFound(view_id))?;
+            let bid = self
+                .panes
+                .get(&pid)
+                .and_then(|p| p.views.get(idx))
+                .map(|v| v.buffer_id)
+                .ok_or(DispatchError::ViewNotFound(view_id))?;
+            (pid, idx, bid)
+        };
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let view = self
+            .panes
+            .get_mut(&pid)
+            .and_then(|p| p.views.get_mut(idx))
+            .expect("located above");
+        let ann = self
+            .buffers
+            .annotations_mut(bid)
+            .expect("located above");
+        Ok(f(view, &mut buf, ann))
+    }
+
+    /// `with_buffer` against the active view; convenience for the common
+    /// "current user-focused thing" case.
+    pub fn with_active_buffer<R>(
+        &mut self,
+        f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
+    ) -> Result<R, DispatchError> {
+        let view_id = self.active_view().ok_or(DispatchError::NoActiveView)?.id;
+        self.with_buffer(view_id, f)
+    }
+
+    /// `with_buffer_mut` against the active view.
+    pub fn with_active_buffer_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut View, &mut Buffer, &mut Annotations) -> R,
+    ) -> Result<R, DispatchError> {
+        let view_id = self.active_view().ok_or(DispatchError::NoActiveView)?.id;
+        self.with_buffer_mut(view_id, f)
     }
 }
 
@@ -393,6 +560,61 @@ mod tests {
         // Active clamps back to the remaining view.
         assert_eq!(p.active, 0);
         assert_eq!(p.views.len(), 1);
+    }
+
+    #[test]
+    fn with_active_buffer_passes_correct_handles() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let view_id = ws.alloc_view_id();
+        let pane = ws.active_pane_mut().unwrap();
+        pane.push_active(View::new(view_id, bid, ViewKind::TextView));
+
+        let outcome = ws
+            .with_active_buffer(|view, buf, ann| {
+                assert_eq!(view.id, view_id);
+                assert_eq!(buf.text, b"ATGC");
+                assert!(ann.features.is_empty());
+                42
+            })
+            .unwrap();
+        assert_eq!(outcome, 42);
+    }
+
+    #[test]
+    fn with_buffer_mut_allows_mutation() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let view_id = ws.alloc_view_id();
+        ws.active_pane_mut()
+            .unwrap()
+            .push_active(View::new(view_id, bid, ViewKind::TextView));
+
+        ws.with_buffer_mut(view_id, |_view, buf, _ann| {
+            buf.version += 1;
+            buf.text.push(b'G');
+        })
+        .unwrap();
+
+        ws.with_active_buffer(|_view, buf, _ann| {
+            assert_eq!(buf.text, b"ATG");
+            assert_eq!(buf.version, 1);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn with_active_buffer_without_view_errors() {
+        let mut ws = Workspace::default();
+        let err = ws.with_active_buffer(|_, _, _| ()).unwrap_err();
+        assert!(matches!(err, DispatchError::NoActiveView));
+    }
+
+    #[test]
+    fn with_buffer_unknown_view_errors() {
+        let mut ws = Workspace::default();
+        let err = ws.with_buffer(ViewId(999), |_, _, _| ()).unwrap_err();
+        assert!(matches!(err, DispatchError::ViewNotFound(ViewId(999))));
     }
 
     #[test]

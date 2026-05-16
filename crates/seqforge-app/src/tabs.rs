@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use seqforge_core::ViewerState;
 
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
@@ -7,6 +6,7 @@ use crate::focus::{FocusScope, FocusState};
 use crate::overlay::{self, OverlayStack};
 use crate::terminal::TerminalPane;
 use crate::viewer::SequenceView;
+use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
@@ -17,7 +17,7 @@ pub enum Tab {
 
 pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
-    pub viewer: &'a mut ViewerState,
+    pub workspace: &'a mut Workspace,
     pub seq_view: &'a mut SequenceView,
     pub pending_commands: &'a mut Vec<PendingCommand>,
     pub terminal: &'a mut Option<TerminalPane>,
@@ -31,13 +31,17 @@ impl egui_dock::TabViewer for TabViewer<'_> {
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         match tab {
             Tab::FileBrowser => "Files".into(),
-            Tab::Viewer => self
-                .viewer
-                .open_doc
-                .as_ref()
-                .map(|d| format!("Viewer — {}", d.name))
-                .unwrap_or_else(|| "Sequence Viewer".to_owned())
-                .into(),
+            Tab::Viewer => {
+                let name = self.workspace.active_view().and_then(|v| {
+                    let arc = self.workspace.buffers.get(v.buffer_id)?;
+                    let buf = arc.read().ok()?;
+                    Some(buf.name.clone())
+                });
+                match name {
+                    Some(n) => format!("Viewer — {n}").into(),
+                    None => "Sequence Viewer".into(),
+                }
+            }
             Tab::Terminal => "Terminal".into(),
         }
     }
@@ -63,7 +67,28 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
                 }
-                self.seq_view.show(ui, self.viewer, self.pending_commands);
+                // Resolve the active view + lock its buffer for the
+                // duration of the paint. No active view ⇒ placeholder.
+                //
+                // Split `self` into disjoint borrows so the closure can
+                // capture `seq_view` and `pending_commands` while
+                // `workspace` provides the locking helper.
+                let TabViewer {
+                    workspace,
+                    seq_view,
+                    pending_commands,
+                    ..
+                } = self;
+                let rendered = workspace.with_active_buffer(|view, buf, ann| {
+                    seq_view.show(ui, view, buf, ann, pending_commands);
+                });
+                if rendered.is_err() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            "No file open.\nDouble-click a .gb or .fasta file in the browser.",
+                        );
+                    });
+                }
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
