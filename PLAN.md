@@ -878,27 +878,54 @@ The MVP architecture is well-shaped for the editor transition — single `apply`
 
 This section is the gate between read-only MVP and the editor transition. **Apply these refactors before planning the editor path** so the editor work changes one layer at a time instead of all of them at once.
 
-## Tier 1 — Bug fixes and security hardening (do first)
+## Current Status (auto-updated as commits land)
+
+Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
+
+| Stage | Status | Commits |
+|---|---|---|
+| Tier 1 #2 — `set_var` ordering | ✅ | `cadd087` |
+| Tier 1 #3 — Selection events from clicks | ✅ | `395eb2d` |
+| Tier 1 #1 — Socket hardening | 📋 | — |
+| Tier 1 #4 — Stale socket cleanup | 📋 | — |
+| Tier 1 #5 — Windows build (`#[cfg(unix)]` or `interprocess`) | 📋 | — |
+| Tier 2 #6–#10 — Code consolidation | 📋 | — |
+| **Stage 2.5a — Model split (Buffer / View / Workspace)** | ✅ | `3a6fd38`, `a0332bf`, `f40bd4d` |
+| **Stage 2.5b — Multi-tab within a pane** | ✅ | `5316cae` |
+| Stage 2.5c — Multi-pane split-view via egui_dock | ⏳ | — |
+| Stage 2.5d — `ViewKind` plumbing + socket protocol updates | 📋 | — |
+| Tier 3a — Buffer version counter (cache invalidation key) | 🟡 | landed as side effect of 2.5a; bump-on-edit waits for 3d |
+| Tier 3b — Rope-backed Buffer | 📋 | — |
+| Tier 3c — Anchors | 📋 | — |
+| Tier 3d — Transactional edits + undo | 📋 | — |
+| Tier 4 — Nice-to-haves | 📋 | — |
+
+**At a glance:**
+- All structural prerequisites for editor work are landed except multi-pane (2.5c) and the `ViewKind` plumbing (2.5d).
+- `Buffer::version` exists and the viewer's caches key on it; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
+- 58 tests pass; clippy clean; full build green; macOS smoke-tested through Stage 2.5b.
+
+---
+
+## Tier 1 — Bug fixes and security hardening
 
 These are real defects in the current code, independent of editor work. Land them as standalone PRs.
 
-1. **Socket hardening** (Phase 9 above). `$XDG_RUNTIME_DIR` preference; `chmod 0600` after `bind`; document threat model in `docs/socket-protocol.md`.
-2. **Fix `set_var`-after-thread-spawn ordering.** In `SeqForgeApp::new` (`app.rs:142-156`) `start_socket_listener` spawns a thread *before* `TerminalPane::new` does `unsafe { std::env::set_var("SEQFORGE_SOCKET", ...) }`. Rust 2024 considers this UB-adjacent (env mutation while another thread exists). Move all `set_var` calls to before any thread spawn — set env vars in `SeqForgeApp::new` *before* `start_socket_listener`, then pass the socket path through as an arg.
-3. **Selection events from clicks.** The viewer widget mutates `vstate.selection` directly during click/drag (`viewer.rs:323-385`) and never emits `AppEvent::SelectionChanged`. `command::apply` carefully emits it on every other path. Either:
-   - **(preferred)** Route click/drag through `AppCommand::SetSelection(Selection)` / `AppCommand::DragSelection(...)` — keeps the "render never mutates state" invariant from the focus refactor.
-   - **(quicker)** Snapshot `viewer.selection` before render, diff after, emit from the frame loop.
-4. **Stale socket file cleanup.** `accept_loop` only removes the socket on listener error; normal exit leaks the file. Either register a `Drop` guard on a wrapper held in `AppState`, or rely on per-PID uniqueness (which you do — fine to document and move on).
-5. **Windows build.** `socket.rs` uses `std::os::unix::net` unconditionally. If Windows is in scope for v0.1, switch to the `interprocess` crate (cross-platform local sockets). If not, gate `socket` and the viewer-IPC half of `seqforge-cli` behind `#[cfg(unix)]`.
+1. 📋 **Socket hardening** (Phase 9 above). `$XDG_RUNTIME_DIR` preference; `chmod 0600` after `bind`; document threat model in `docs/socket-protocol.md`.
+2. ✅ **Fix `set_var`-after-thread-spawn ordering** (`cadd087`). All `unsafe { set_var(...) }` calls moved to `terminal::install_pty_env`, which `SeqForgeApp::new` invokes **before** `start_socket_listener` spawns the listener thread. `socket_path()` exposed so the caller can sequence env mutation between the two.
+3. ✅ **Selection events from clicks** (`395eb2d`). Added `AppCommand::SetSelection(Option<Selection>)` and `AppCommand::SelectFeature(Option<usize>)`. The viewer pushes commands instead of mutating `vstate.selection` directly; `command::apply`'s existing `emit_selection_diff` helper now fires `AppEvent::SelectionChanged` from a single path for every click / drag / shift-extend / menu / hotkey / socket origin.
+4. 📋 **Stale socket file cleanup.** `accept_loop` only removes the socket on listener error; normal exit leaks the file. Either register a `Drop` guard on a wrapper held in `AppState`, or rely on per-PID uniqueness (which we do — fine to document and move on).
+5. 📋 **Windows build.** `socket.rs` uses `std::os::unix::net` unconditionally. If Windows is in scope for v0.1, switch to the `interprocess` crate (cross-platform local sockets). If not, gate `socket` and the viewer-IPC half of `seqforge-cli` behind `#[cfg(unix)]`.
 
 ## Tier 2 — Code consolidation (cleanup pass)
 
 Small, low-risk refactors that pay back as the editor lands.
 
-6. **`Document::is_circular()` helper.** `matches!(doc.topology, Topology::Circular)` appears in `commands.rs:227, :245` and the bio crate. One method, three call sites cleaned up.
-7. **`InteractiveLayer` enum for viewer hit-testing.** Three parallel hit-test passes (annot / search / cut, `viewer.rs:255-312`) are structurally identical. One enum + one generic collector trims ~50 lines and keeps z-order explicit. Becomes essential when the linear/circular graphical views land (they'll share interaction logic).
-8. **`BlockLayout` value type.** Block geometry (`block_h`, `n_blocks`, `block_y`, `seq_x0`, `line_width`) is recomputed in three places in `viewer.rs` (pass 1, pass 2, `screen_to_seq`). Compute once into a `BlockLayout`, pass everywhere. Eliminates a class of off-by-one bugs and is a pre-req for #7.
-9. **`screen_to_seq` end-of-doc cursor.** Currently rejects `p >= seq_len` (`viewer.rs:633-634`). For editing the valid cursor range is `0..=seq_len` (cursor *after* last base = "insert at end"). Easier to fix now, while there's only one consumer.
-10. **`Find` should clear `selection` on empty pattern** (currently only clears `search_hits`). Inconsistent with `Open` / `Close`. Minor.
+6. 📋 **`Buffer::is_circular()` helper.** Already exists on `Buffer` after 2.5a. Audit remaining `matches!(_, Topology::Circular)` call sites and replace.
+7. 📋 **`InteractiveLayer` enum for viewer hit-testing.** Three parallel hit-test passes (annot / search / cut, `viewer.rs:255-312`) are structurally identical. One enum + one generic collector trims ~50 lines and keeps z-order explicit. Becomes essential when the linear/circular graphical views land (they'll share interaction logic).
+8. 📋 **`BlockLayout` value type.** Block geometry (`block_h`, `n_blocks`, `block_y`, `seq_x0`, `line_width`) is recomputed in three places in `viewer.rs` (pass 1, pass 2, `screen_to_seq`). Compute once into a `BlockLayout`, pass everywhere. Eliminates a class of off-by-one bugs and is a pre-req for #7.
+9. 📋 **`screen_to_seq` end-of-doc cursor.** Currently rejects `p >= seq_len`. For editing the valid cursor range is `0..=seq_len` (cursor *after* last base = "insert at end"). Easier to fix now, while there's only one consumer.
+10. 📋 **`Find` should clear `selection` on empty pattern** (currently only clears `search_hits`). Inconsistent with `Open` / `Close`. Minor.
 
 ## Tier 2.5 — Model object split + Workspace/Pane/View hierarchy
 
@@ -1113,19 +1140,38 @@ Agents can target any open view; humans get the default-to-active behavior via t
 
 Each stage compiles and runs; `main` stays shippable.
 
-- **Stage 2.5a — Types + single-pane/single-view migration.**
-  Introduce `Buffer`, `Annotations`, `View`, `ViewKind`, `Pane`, `BufferStore`, `Workspace`. `AppState::viewer: ViewerState` → `AppState::workspace: Workspace` with exactly one pane, one view, one buffer. **No behavior change** — everything still works, just renamed and re-homed. Dispatch reshaped to take `(view, buffer, annotations)`. Events get `pane_id`/`view_id` always set to the single defaults. The viewer widget's click/drag mutations stay where they are (Tier 1 #3 still applies).
+- ✅ **Stage 2.5a — Types + single-pane/single-view migration** (`3a6fd38`, `a0332bf`, `f40bd4d`).
+  Landed in three sub-commits:
+  1. Introduced `Buffer`, `Annotations`, `View`, `ViewKind`, `Pane`, `BufferStore`, `Workspace` types — unused, with 14 new tests.
+  2. Migrated `AppState::viewer: ViewerState` → `AppState::workspace: Workspace`. `dispatch` reshaped to `(view, buffer, annotations, bio, req)`. `Open` / `Close` moved out of dispatch into `Workspace::open_path` / `close_active_view`. Six closure helpers (`with_buffer{,_mut}`, `with_active_buffer{,_mut}`, `view{,_mut}`) hide lock acquisition and disjoint-borrow ceremony. Viewer caches re-key on `(buffer_id, buffer.version)`. New `DispatchError` variants: `NoActiveView`, `ViewNotFound(ViewId)`, `PoisonedLock`.
+  3. Cleanup — deleted legacy `ViewerState` and `DispatchError::NoDocument` alias.
 
-- **Stage 2.5b — Multi-tab support within a pane.**
-  `SwitchTab`, `CloseTab`, `NextTab`, `PrevTab` commands. Tab strip widget. `Cmd+W` closes active tab; closing the last tab leaves an empty pane. `Cmd+Shift+]` / `[` cycle tabs. Find bar contents bound to active view's `find_query`. Recent files behavior unchanged. Persistence: tab list + active view per pane.
+- ✅ **Stage 2.5b — Multi-tab support within a pane** (`5316cae`).
+  `SwitchTab { pane, view }`, `CloseTab { pane, view }`, `NextTab`, `PrevTab` commands. Tab strip widget (`tabs.rs::render_tab_strip`) above the viewer area: selectable labels + × close buttons. `Cmd+W` closes active tab; closing the last view of a buffer also drops the buffer (emits `DocClosed`). `Cmd+Shift+]` / `[` cycle tabs. Open-of-already-open dedupes via `find_open_view_for` — switches to the existing tab instead of duplicating. New events: `TabSwitched`, `TabClosed`. `AppState::workspace` marked `#[serde(skip)]` because `BufferStore` holds `Arc<RwLock<Buffer>>` that can't round-trip; `recent_files` restores the working set across restarts.
 
-- **Stage 2.5c — Multi-pane support.**
-  `DockTab::Pane(PaneId)` replaces `Tab::Viewer`. `FocusScope::Pane(PaneId)`. Splits via egui_dock's existing split capabilities. `Cmd+\` (or similar) splits the active pane. Same buffer in two panes works (`BufferStore` already supports it). Cross-pane focus transitions through `FocusPane(PaneId)`.
+- ⏳ **Stage 2.5c — Multi-pane support (split-view via egui_dock).**
+  The structural change that unlocks `linear view + circular view + text view` side-by-side, two-doc comparison, and any other multi-pane workflow. Concretely:
+  - **`DockTab::Pane(PaneId)` replaces `Tab::Viewer`** in `tabs.rs`. `egui_dock` continues to manage horizontal/vertical splits + tab drag-rearrange — we get split-view for free.
+  - **`FocusScope::Pane(PaneId)` replaces `FocusScope::Viewer`.** The geometry-only pane-click detector in `tabs.rs::ui` already emits `FocusPane`; that signature widens to carry a `PaneId`.
+  - **`SequenceView` moves from `AppState` onto `Pane`** so each pane has its own rendering cache (no thrash on focus switch).
+  - **`AppCommand::SplitPane { direction: SplitDirection }`** with a `Cmd+\` binding for horizontal split; vertical via menu. Same buffer in two panes works automatically via `BufferStore`'s existing Arc-clone behaviour.
+  - **`AppCommand::FocusPane(PaneId)`** replaces `FocusPane(FocusScope)`. The keymap's `Pane:Viewer` tag becomes `Pane:<ViewKind>` (filled in by 2.5d).
+  - **Cross-pane keyboard navigation:** `Cmd+1`..`Cmd+N` jumps to the Nth pane in `pane_order`; `Cmd+Alt+arrow` moves focus directionally. Defer the directional move to 2.5c if time-boxed.
+  - **The status bar** continues to read from `workspace.active_view()` — no change needed.
+  - **Tests** cover: open same file in split panes (shared buffer), close one pane (buffer survives), close last pane (workspace returns to single-pane default).
 
-- **Stage 2.5d — `ViewKind` plumbing + socket protocol updates.**
-  `ViewKind::TextView` is the only variant but `View::kind` is read by render dispatch. Keymap `when_context` gains `Pane:TextView`. Socket protocol gains optional `pane`/`view` params; `docs/socket-protocol.md` written. Background-task contract documented in `docs/architecture.md` (or appended to this PLAN).
+- 📋 **Stage 2.5d — `ViewKind` plumbing + socket protocol + background-task contract.**
+  - **`ViewKind` consumers wired in.** `View::kind` is read by `render_pane()`'s match — today only `TextView` exists, but the dispatch is in place for future `LinearView` / `CircularView` variants to land as `+1 enum variant + impl`.
+  - **Keymap `when_context` gains `Pane:TextView`** (and is ready to gain `Pane:LinearView` etc. later). Keymap bindings can target view kinds without naming specific panes.
+  - **Socket protocol gains optional `pane` and `view` params.** Default behaviour unchanged (operates on active view); explicit targeting available for agents:
+    ```json
+    {"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":100,"view":17}}
+    ```
+    `docs/socket-protocol.md` written: method list, params shape, response variants, standard error codes, error semantics for `ViewNotFound`, threat model documented.
+  - **Background-task contract documented** in `docs/architecture.md` (or appended here): write locks only inside `apply()` on the UI thread; background work read-locks or takes `BufferSnapshot` and posts results back as `AppCommand::TaskResult(...)`. No background tasks exist yet; documenting the contract now keeps the door open for Tier 4.
+  - **`BioOps::load` widening** (optional). Today the `BufferStore::open_path` adapter calls `bio.load(path)` (returns `Document`) and shells it into `Buffer + Annotations`, duplicating `complement` computation. 2.5d either widens `BioOps::load` to return `(Buffer, Annotations)` directly or accepts the adapter as good-enough. Calls the question explicitly so the answer doesn't drift.
 
-Each stage is independently mergeable. Stage 2.5a is the load-bearing one; b/c/d each add a user-visible capability on top.
+Each stage is independently mergeable. Stage 2.5a was the load-bearing one; b/c/d each add a user-visible capability on top.
 
 ---
 
@@ -1133,11 +1179,15 @@ Each stage is independently mergeable. Stage 2.5a is the load-bearing one; b/c/d
 
 With Tier 2.5 in place, each item below is a **local PR inside `Buffer`** (or `Annotations` for 3c features). Order matters: each builds on the previous one. Do them as four separate PRs, in this order, **before** writing any edit-feature code.
 
-### 3a. Buffer version counter
+### 3a. 🟡 Buffer version counter — wired into cache, awaits edits to bump
 
-`Buffer::version: u64` already exists from Tier 2.5; wire it through cache invalidation. Replace the `cached_seq_len != seq_len` invalidation key in `SequenceView` (`viewer.rs:174`) with `cached_version != buffer.version()`. Same for the cut-label cache (`cached_cut_site_key`) and any future per-view cache. Cheap, isolated.
+The cache-invalidation half of 3a landed as a side effect of Stage 2.5a:
 
-A point mutation (same length, one base changed) would silently render with a stale complement cache today. This fixes it preemptively.
+- `Buffer::version: u64` exists.
+- `SequenceView` caches re-key on `(cached_buffer_id, cached_version)` instead of the old `cached_seq_len`. Mismatch on either ⇒ teardown.
+- The complement cache moved onto `Buffer` itself (no separate viewer-side cache to invalidate).
+
+What's left for 3a: nothing today, because no code mutates `Buffer::version` yet. The first edit operation (Tier 3d) will bump it, and the caching infrastructure picks up automatically. Audit + close-out when 3d lands.
 
 ### 3b. Rope-backed Buffer
 
@@ -1204,19 +1254,39 @@ Defer until you actually feel the pain.
 ## Sequencing summary
 
 ```
-Phase 9 verification
-  ↓
-Tier 1 (bug fixes, socket hardening)
-  ↓
-Tier 2 (consolidation cleanup)
-  ↓
-Tier 2.5 (Workspace / Pane / View / Buffer split — staged a → b → c → d)
-  ↓
-Tier 3a (version-keyed caches) → 3b (rope) → 3c (anchors) → 3d (transactions / undo)
-  ↓
-[Editor transition plan starts here — separate document]
-  ↓
-Tier 4 as needed
+Phase 9 verification (in progress)
+  │
+  │   Tier 1 — bug fixes
+  ├─→ #2 set_var ordering         ✅ cadd087
+  ├─→ #3 selection events         ✅ 395eb2d
+  ├─→ #1 socket hardening         📋
+  ├─→ #4 stale socket cleanup     📋
+  └─→ #5 Windows build            📋
+
+  Tier 2 — consolidation
+  └─→ #6–#10                       📋  (opportunistic; not blocking)
+
+  Tier 2.5 — model object split
+  ├─→ 2.5a (1/3) types unused      ✅ 3a6fd38
+  ├─→ 2.5a (2/3) migration         ✅ a0332bf
+  ├─→ 2.5a (3/3) cleanup           ✅ f40bd4d
+  ├─→ 2.5b multi-tab               ✅ 5316cae
+  ├─→ 2.5c multi-pane split-view   ⏳ NEXT
+  └─→ 2.5d ViewKind + socket proto 📋
+
+  Tier 3 — editor prerequisites
+  ├─→ 3a version-keyed caches      🟡 (caches done; edit-bump in 3d)
+  ├─→ 3b rope-backed Buffer        📋
+  ├─→ 3c anchors                   📋
+  └─→ 3d transactions + undo       📋
+       │
+       ▼
+  [Editor transition plan — separate document]
+       │
+       ▼
+  Tier 4 — nice-to-haves (interval tree, background executor, etc.)
 ```
 
-Tier 1 and Tier 2 can land in parallel with Phase 9 verification. Tier 2.5 is one focused effort, staged into four PRs (a/b/c/d) — 2.5a is the load-bearing structural change; b/c/d each unlock a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
+Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 was staged into four PRs (a/b/c/d) — 2.5a was the load-bearing structural change; b/c/d each unlock a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
+
+**Snapshot:** main is on `5316cae`. The structural foundation for the editor (Workspace / Pane / View / Buffer + Arc<RwLock> sharing + version-keyed caches + tab management) is landed. Next concrete piece of work is **Stage 2.5c — multi-pane split-view via egui_dock**.
