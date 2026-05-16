@@ -10,6 +10,7 @@ mod socket;
 mod tabs;
 mod terminal;
 mod viewer;
+mod workspace;
 
 use clap::Parser;
 
