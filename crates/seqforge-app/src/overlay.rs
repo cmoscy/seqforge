@@ -2,12 +2,12 @@
 //!
 //! See [`docs/focus-refactor.md`](../../../docs/focus-refactor.md) §2.5.
 //!
-//! Stage 5 of the focus refactor collapses three previously-independent
-//! `AppState` fields (`active_bar`, `open_dialog`, `cli_status`) into
-//! one [`OverlayStack`]. The stack is the single source of truth for
-//! which transient surfaces are present; rendering still fans out to
-//! the appropriate site per overlay kind (inline bars in the viewer
-//! pane; dialogs and status windows at the top level of `update()`).
+//! Three previously-independent `AppState` fields (`active_bar`,
+//! `open_dialog`, `cli_status`) are collapsed into one [`OverlayStack`].
+//! The stack is the single source of truth for which transient surfaces
+//! are present; rendering still fans out to the appropriate site per
+//! overlay kind (inline bars in the viewer pane; dialogs and status
+//! windows at the top level of `update()`).
 //!
 //! ## Rendering model
 //!

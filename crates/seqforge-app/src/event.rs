@@ -2,18 +2,15 @@
 //!
 //! See [`docs/focus-refactor.md`](../../../docs/focus-refactor.md) §2.3.
 //!
-//! Stage 3 implementation: `EventSink` wraps a `Sender<AppEvent>`;
-//! `update()` drains the matching `Receiver` into a bounded `EventLog`
-//! each frame. The status bar reads the latest entry. Stage 2-era
-//! callers (`apply`) emit through `EventSink::emit` and don't care
-//! who's listening.
+//! [`EventSink`] wraps a `Sender<AppEvent>`; `app::update()` drains the
+//! matching receiver into a bounded [`EventLog`] each frame.
+//! [`crate::command::apply`] emits through `EventSink::emit` and does
+//! not care who is listening — subscribers attach on their own.
 //!
-//! Future subscribers (panels, plugins) attach by holding their own
-//! receiver — for now there is exactly one consumer, the log drainer,
-//! so the wire is a single channel rather than a broadcast fan-out.
-//! When the second consumer appears, swap to `tokio::sync::broadcast`
-//! or hand-rolled fan-out at that single point; no caller has to
-//! change.
+//! There is currently a single consumer (the log drainer); when a
+//! second one appears (future panels or plugins), swap the single
+//! channel for `tokio::sync::broadcast` or hand-rolled fan-out at this
+//! one point. Callers do not change.
 
 use std::collections::VecDeque;
 use std::sync::mpsc;
@@ -30,6 +27,12 @@ pub const EVENT_LOG_CAP: usize = 100;
 /// Variants are coarse — one event per user-visible state change, not
 /// one per field touched. Subscribers re-read `AppState` for full
 /// detail; events are notifications, not payloads.
+///
+/// Field-level `#[allow(dead_code)]` is intentional: emitters populate
+/// payloads now so subscribers (future panels, plugins) have the
+/// detail when they land. Removing the data and adding it back later
+/// would touch every emit site.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     DocOpened { name: String, len: usize },
@@ -45,6 +48,7 @@ pub enum AppEvent {
     OverlayPopped(&'static str),
 }
 
+#[allow(dead_code)] // Read by future status / debug panels.
 impl AppEvent {
     /// Short one-line label for status-bar display. Format is chosen
     /// to stay readable when the bar is narrow.
@@ -115,6 +119,7 @@ pub struct EventLog {
     entries: VecDeque<AppEvent>,
 }
 
+#[allow(dead_code)] // `latest` is the future-panel read surface.
 impl EventLog {
     pub fn push(&mut self, event: AppEvent) {
         if self.entries.len() == EVENT_LOG_CAP {

@@ -2,16 +2,17 @@
 //!
 //! See [`docs/focus-refactor.md`](../../../docs/focus-refactor.md) §2.2.
 //!
-//! Stage 2 of the focus refactor: every user-, menu-, hotkey-, bar-, and
-//! socket-initiated action becomes an [`AppCommand`]. The `update()` loop
-//! drains a queue of these and routes them through [`apply`] — the *only*
-//! function that mutates [`AppState`] in response to a command.
+//! Every user-, menu-, hotkey-, bar-, and socket-initiated action is an
+//! [`AppCommand`]. The frame loop in [`crate::app`] drains
+//! `pending_commands` and routes each through [`apply`] — the *only*
+//! function that mutates [`AppState`] in response to a command. Nothing
+//! else in the crate may construct a `ViewerRequest` or directly touch
+//! the fields that `apply` writes.
 //!
-//! Why a closed enum: the binding set is fixed during this refactor.
-//! Plugin extensibility (an `AppCommand::Custom` variant + handler
-//! registry) is deferred to the future plugin work (§7 of the refactor
-//! doc). Keeping the enum closed gives us exhaustive-match safety in
-//! `apply()` and `is_enabled()`.
+//! Why a closed enum: plugin extensibility (an `AppCommand::Custom`
+//! variant + handler registry) is deferred to future plugin work (§7
+//! of the refactor doc). Keeping the enum closed buys exhaustive-match
+//! safety in `apply()` and `is_enabled()`.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -59,8 +60,7 @@ pub enum AppCommand {
     OpenFind,
     /// Open the inline GoTo bar.
     OpenGoTo,
-    /// Close the topmost overlay (Stage 5 will generalise this to a
-    /// proper overlay stack; Stage 2 only knows about `active_bar`).
+    /// Pop the topmost overlay from [`AppState::overlays`].
     DismissOverlay,
     /// Bar submission: run a search.
     SubmitFind { pattern: String, mismatches: u8 },

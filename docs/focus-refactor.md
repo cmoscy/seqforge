@@ -1,6 +1,6 @@
 # Focus & Command Refactor
 
-Status: **proposed** — not yet implemented. Tick stage checkboxes as PRs land.
+Status: **active** — all six stages landed. This document is the binding architecture reference; the staged checklist below records how we got here and what each commit changed.
 
 This document is the durable reference for SeqForge's keyboard-focus, command-dispatch, and event architecture. It supersedes the "Keyboard focus model" sketch in `PLAN.md` (which now links here).
 
@@ -260,69 +260,49 @@ crates/seqforge-app/src/
 Each stage compiles, runs, and is independently mergeable. `main` stays shippable.
 
 ### Stage 0 — Pre-flight (no code)
-- [ ] This document merged.
-- [ ] `PLAN.md` "Keyboard focus model" section updated to point here.
+- [x] This document merged.
+- [x] `PLAN.md` "Keyboard focus model" section updated to point here.
 
-### Stage 1 — `FocusState` + `KeyContext` (skeleton only)
-**Goal:** introduce the focus state types and wire pane click → `scope`, without changing input routing yet.
+### Stage 1 — `FocusState` + `KeyContext` (skeleton only) — commit `42efc2f`
+- [x] Add `focus.rs` with `FocusScope`, `KeyContext`, `FocusState`.
+- [x] Add `FocusState` to `AppState` (`#[serde(skip)]`).
+- [x] `tabs.rs` pane click → `focus.scope` (geometry-only rect check, does not consume widget clicks).
+- [x] `terminal.rs::show` ANDs the new `terminal_has_focus` signal with the legacy `bar_field_has_focus` check.
 
-- [ ] Add `focus.rs` with `FocusScope`, `KeyContext`, `FocusState`.
-- [ ] Add `FocusState` to `AppState` (`#[serde(skip)]` — focus does not persist).
-- [ ] In `tabs.rs`, each pane's response: on click, set `focus.scope`.
-- [ ] `terminal.rs::show` keeps `bar_field_has_focus()` for now **but also** reads `focus.scope == Terminal` — both must be true to capture. Verifies the scope wiring works.
-- [ ] No keymap or command changes yet.
+### Stage 2 — `AppCommand` + `apply()` — commit `3361170`
+- [x] `command.rs` with `AppCommand`, `apply`, `is_enabled`, `PendingCommand`.
+- [x] `event.rs` with `AppEvent` and a no-op `EventSink` for the wire surface.
+- [x] `pending_requests` → `pending_commands` (commands carry the optional one-shot for socket replies).
+- [x] Every menu, hotkey, bar, socket, and pane-click handler enqueues `AppCommand`; no inline state mutation.
+- [x] Single `apply` loop at end of `update()`.
+- [x] Menus use `is_enabled` for greying.
 
-**Done when:** clicking each pane updates a debug-rendered scope label in the status bar; nothing else regresses.
+### Stage 3 — `AppEvent` bus + first subscriber — commit `62d83a2`
+- [x] `EventSink` wraps `mpsc::Sender<AppEvent>`; receiver lives on `AppState`. (stdlib `mpsc` since emit + consume are both on the UI thread — `crossbeam` is unnecessary today.)
+- [x] Each frame drains receiver into a bounded `EventLog` (cap 100).
+- [x] `apply` emits `DocOpened`/`Closed`, `SelectionChanged` (via before/after snapshot), `SearchCompleted`, `FocusChanged`, `OverlayPushed`/`Popped`.
+- [x] Pass-through `Viewer(req)` classifies the response so socket-originated commands generate the same events as GUI-originated equivalents.
 
-### Stage 2 — `AppCommand` + `apply()`
-**Goal:** make every action go through a single typed channel.
+### Stage 4 — Declarative keymap — commit `4d73110`
+- [x] `keymap.rs` with `Binding` and a const `KEYMAP`.
+- [x] `keymap::dispatch` called once per frame; inline `consume_key` block in `update()` deleted.
+- [x] All Cmd-letter chords are `Workspace`-scoped per the Zed/VSCode convention. Pane-scope scaffolding stays in `KeyContext` for future unmodified-key bindings (editor mode, vim-style chords).
 
-- [ ] Add `command.rs` with `AppCommand`, `apply`, `is_enabled`, `AppError`.
-- [ ] Add `event.rs` with `AppEvent`, `EventSink` (internal, no subscribers yet — `apply` emits into the sink and the sink drops events on the floor for now; this keeps the surface stable).
-- [ ] Replace `pending_requests: Vec<PendingReq>` with `pending_commands: Vec<(AppCommand, Option<oneshot>)>`.
-- [ ] Convert menu handlers, hotkey block, bar submit, socket consumer, file-dialog completion to enqueue `AppCommand`.
-- [ ] Single `apply` loop at end of `update()`.
-- [ ] Menu items use `is_enabled` instead of inline `add_enabled(open_doc.is_some(), ...)`.
-
-**Done when:** every existing feature works identically; `app.rs::update()` no longer constructs `ViewerRequest` values directly anywhere except inside `apply`.
-
-### Stage 3 — `AppEvent` bus + first subscriber
-**Goal:** make events real, on one consumer, to validate the surface.
-
-- [ ] `EventSink` becomes a `crossbeam::channel::Sender`; `AppState` holds a `Receiver`.
-- [ ] Each frame, drain receiver and update a small `EventLog` (cap 100) used by the status bar.
-- [ ] `apply` emits `DocOpened`, `DocClosed`, `SelectionChanged`, `SearchCompleted`, `FocusChanged`, `OverlayPushed`, `OverlayPopped`.
-
-**Done when:** status bar reflects the most recent event; events fire from menu, hotkey, and socket paths.
-
-### Stage 4 — Declarative keymap
-**Goal:** delete the `ctx.input_mut` block in `app.rs`; introduce `KEYMAP`.
-
-- [ ] Add `keymap.rs` with `Binding` and `KEYMAP` const.
-- [ ] `keymap::dispatch` called once per frame after socket drain, before render.
-- [ ] Remove the inline `consume_key` block in `app.rs::update`.
-- [ ] Confirm each existing hotkey still fires exactly when before (no regressions in scope-gated cases: ⌘F now requires `Pane:Viewer` on the stack).
-
-**Done when:** ⌘F pressed while terminal pane is focused does **not** open Find — by design. ⌘F pressed in Viewer pane does. Menu items still work.
-
-### Stage 5 — Overlay stack
-**Goal:** collapse `active_bar`, `open_dialog`, `cli_status` into one stack; remove `bar_field_has_focus`.
-
-- [ ] Add `overlay.rs` with `Overlay`, `OverlayStack`.
-- [ ] Move `FindBar`, `GoToBar` from `bar.rs` to `overlay.rs`; delete `bar.rs`.
-- [ ] Replace `active_bar`, `open_dialog`, `cli_status` fields with `overlays: OverlayStack`.
-- [ ] `OpenFind` / `OpenGoTo` / `PromptOpenFile` / CLI install path push onto the stack; `DismissOverlay` pops.
-- [ ] `OverlayStack::context_tags` is appended to `KeyContext` each frame before keymap dispatch.
-- [ ] `TerminalPane::show` reads `is_focused = focus.scope == Terminal && overlays.is_empty()`. **Delete `bar_field_has_focus`.**
-
-**Done when:** open Find, open a file dialog on top, Esc closes the dialog and returns focus to the Find input. Today this is broken.
+### Stage 5 — Overlay stack — commit `3bac5a2`
+- [x] `overlay.rs` with `Overlay`, `OverlayStack`, `show_inline_bar`.
+- [x] `FindBar`/`GoToBar` moved from `bar.rs`; `bar.rs` deleted.
+- [x] `active_bar`, `open_dialog`, `cli_status` → `overlays: OverlayStack`.
+- [x] `OverlayStack::context_tags` layered onto `KeyContext` each frame before keymap dispatch.
+- [x] Escape binding in `KEYMAP` gated on `Overlay::TAG_ACTIVE` — dismisses any overlay regardless of widget focus.
+- [x] Terminal yields when `scope == Terminal && overlays.is_empty()`. `bar_field_has_focus` deleted.
 
 ### Stage 6 — Cleanup + docs
-- [ ] Module-level `//!` docstrings on `focus.rs`, `command.rs`, `event.rs`, `keymap.rs`, `overlay.rs` linking back to this document (relative path `../../../docs/focus-refactor.md`).
-- [ ] Update `PLAN.md` "Find / GoTo UX" section to point at `overlay.rs`.
-- [ ] Update `PLAN.md` "Keyboard focus model" section: short summary, pointer here.
-- [ ] Smoke-test recipes in this doc filled in with real keymap snippets.
-- [ ] Tick all stage checkboxes; mark this doc Status: **active**.
+- [x] Module-level `//!` docstrings on `focus.rs`, `command.rs`, `event.rs`, `keymap.rs`, `overlay.rs` link back to this document.
+- [x] `PLAN.md` "Find / GoTo UX" section points at `overlay.rs`.
+- [x] `PLAN.md` "Keyboard focus model" section: short summary + pointer here.
+- [x] Recipes in §5 verified against real code.
+- [x] Tick all stage checkboxes; status → **active**.
+- [x] Remove the temporary `focus:` / `last event:` status-bar debug indicators.
 
 ---
 
@@ -339,11 +319,14 @@ Do **not** add `ctx.input_mut().consume_key(...)` anywhere else.
 Same as a hotkey, minus the `KEYMAP` entry. Menu code calls `pending_commands.push((AppCommand::X, None))` and uses `is_enabled` to grey itself.
 
 ### A new overlay (modal, dialog, popup bar)
-1. Add an `Overlay::X` variant in `overlay.rs`.
-2. Render in `overlay.rs::show_top` (matches top of stack).
-3. Add a `"Overlay:X"` context tag in `OverlayStack::context_tags`.
-4. Submission paths enqueue `AppCommand` and call `pending_commands.push((AppCommand::DismissOverlay, None))`.
-5. If the overlay captures text, also push `"TextInput"` while it owns focus.
+1. Add an `Overlay::X(...)` variant in `overlay.rs` and a matching `Overlay::TAG_X: &'static str` constant; extend the `Overlay::tag()` match.
+2. Add a typed accessor on `OverlayStack` (`x_mut(&mut self) -> Option<&mut X>`) if callers need to read the inner state.
+3. Choose a render site:
+   - **Inline-in-pane** (Find/GoTo style): render inside `overlay::show_inline_bar` (or a sibling fn) called from the relevant `tabs.rs` arm.
+   - **Top-level window/dialog**: render directly in `app.rs::update()` after fetching state via the typed accessor, the same way `cli_status()` and `file_dialog_mut()` do.
+4. Push from `command::apply` via `state.overlays.push_unique(Overlay::X(...))`; on push emit `AppEvent::OverlayPushed(tag)`. Dismiss via `pop_kind(Overlay::TAG_X)` or generic `DismissOverlay` (top-of-stack).
+5. `OverlayStack::context_tags` already emits the tag and the generic `"Overlay"` — no change needed there.
+6. If the overlay should be Escape-dismissable from any widget focus, no work needed: the keymap's existing Escape binding handles it via `TAG_ACTIVE`.
 
 ### A new pane (e.g. live metadata panel)
 1. Add a `Tab::X` variant; render in `tabs.rs::TabViewer`.

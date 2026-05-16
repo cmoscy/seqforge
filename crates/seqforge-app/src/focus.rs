@@ -1,14 +1,16 @@
 //! Keyboard focus state and key-context stack.
 //!
-//! See [`docs/focus-refactor.md`](../../../docs/focus-refactor.md) for the
-//! full architecture rationale. This module is Stage 1 of that refactor:
-//! it introduces the focus types and pane-scope tracking, but does **not**
-//! yet drive keymap dispatch (that lands in Stage 4).
+//! See [`docs/focus-refactor.md`](../../../docs/focus-refactor.md) §2.1
+//! for the full architecture rationale.
 //!
 //! State flows *outward*: the app sets `FocusState` from explicit signals
 //! (pane clicks, programmatic `FocusPane` commands), and widgets read it.
 //! Widgets must not probe `egui::Memory` to reconstruct focus after the
-//! fact — that is the anti-pattern this refactor exists to remove.
+//! fact — that is the anti-pattern this refactor was built to remove.
+//!
+//! Each frame, [`crate::app`] rebuilds [`FocusState::context`] from the
+//! current pane scope plus the tags emitted by [`crate::overlay::OverlayStack::context_tags`].
+//! [`crate::keymap::dispatch`] reads the context to gate bindings.
 
 use serde::{Deserialize, Serialize};
 

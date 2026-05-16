@@ -323,18 +323,6 @@ impl eframe::App for SeqForgeApp {
                 } else {
                     ui.label("No file open");
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Stage 1 debug indicator: confirms pane-click → FocusScope wiring.
-                    ui.label(format!("focus: {:?}", self.state.focus.scope));
-                    // Stage 3 debug indicator: shows the most recent AppEvent.
-                    // Confirms the event bus is actually firing. Both labels are
-                    // diagnostic — replace with proper status surfaces once the
-                    // refactor lands.
-                    if let Some(ev) = self.state.event_log.latest() {
-                        ui.separator();
-                        ui.label(ev.short_label());
-                    }
-                });
             });
         });
 
