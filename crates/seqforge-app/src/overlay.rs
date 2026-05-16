@@ -27,7 +27,7 @@
 //!   `!overlays.is_empty()` and releases keyboard capture while any
 //!   overlay is active.
 
-use egui::{Key, Modifiers};
+use egui::Key;
 use egui_file_dialog::FileDialog;
 
 use crate::command::AppCommand;
@@ -222,8 +222,6 @@ fn render_find_bar(b: &mut FindBar, ui: &mut egui::Ui) -> Option<AppCommand> {
             ui.label("Mismatches:");
             let mismatch_resp = ui.add(egui::DragValue::new(&mut b.mismatches).range(0..=5));
 
-            let any_focused = text_resp.has_focus() || mismatch_resp.has_focus();
-
             if ui.button("Find").clicked() {
                 command = Some(AppCommand::SubmitFind {
                     pattern: b.pattern.clone(),
@@ -237,9 +235,14 @@ fn render_find_bar(b: &mut FindBar, ui: &mut egui::Ui) -> Option<AppCommand> {
                 });
             }
 
-            // Enter submits when a bar widget has focus. Consumed so it
-            // doesn't fall through (newline in editor, etc.).
-            if any_focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            // Enter submits. egui idiom: a singleline `TextEdit` gives up
+            // focus on Enter, so by the time control returns to us the
+            // field's `has_focus()` is already false. `lost_focus()` is
+            // the one-frame transition that catches the exact moment;
+            // gating on `key_pressed(Enter)` distinguishes Enter-dismiss
+            // from click-away and Tab-out.
+            let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
+            if enter_pressed && (text_resp.lost_focus() || mismatch_resp.lost_focus()) {
                 command = Some(AppCommand::SubmitFind {
                     pattern: b.pattern.clone(),
                     mismatches: b.mismatches,
@@ -274,15 +277,16 @@ fn render_goto_bar(b: &mut GoToBar, ui: &mut egui::Ui) -> Option<AppCommand> {
                 b.needs_focus = false;
             }
 
-            let any_focused = text_resp.has_focus();
-
             if ui.button("Go").clicked() {
                 if let Ok(pos) = b.input.trim().parse::<usize>() {
                     command = Some(AppCommand::SubmitGoTo { position: pos });
                 }
             }
 
-            if any_focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            // Enter submits. See `render_find_bar` for the lost_focus +
+            // key_pressed(Enter) idiom rationale.
+            let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
+            if enter_pressed && text_resp.lost_focus() {
                 if let Ok(pos) = b.input.trim().parse::<usize>() {
                     command = Some(AppCommand::SubmitGoTo { position: pos });
                 }
