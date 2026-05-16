@@ -65,12 +65,18 @@ fn err_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResp
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Open a Unix domain socket, spawn a listener thread, and return the socket
-/// path + a receiver for incoming `SocketRequest` values.
+/// Open a Unix domain socket at `path`, spawn a listener thread, and return a
+/// receiver for incoming `SocketRequest` values.
+///
+/// The caller is responsible for:
+///  1. Choosing the path (use [`socket_path`]).
+///  2. Setting any process-wide env vars (e.g. `SEQFORGE_SOCKET`) **before**
+///     calling this function — env mutation while another thread exists is
+///     UB-adjacent in Rust 2024.
 pub fn start_socket_listener(
+    path: PathBuf,
     ctx: egui::Context,
-) -> anyhow::Result<(PathBuf, mpsc::Receiver<SocketRequest>)> {
-    let path = socket_path();
+) -> anyhow::Result<mpsc::Receiver<SocketRequest>> {
     let _ = std::fs::remove_file(&path);
 
     let listener = UnixListener::bind(&path)?;
@@ -81,7 +87,7 @@ pub fn start_socket_listener(
         .name("seqforge-socket".into())
         .spawn(move || accept_loop(listener, tx, ctx, path_clone))?;
 
-    Ok((path, rx))
+    Ok(rx)
 }
 
 pub fn socket_path() -> PathBuf {
@@ -217,7 +223,7 @@ mod tests {
         std::thread::spawn(move || {
             let reader = BufReader::new(server.try_clone().unwrap());
             let mut server = server;
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let resp = super::handle_rpc_line(&line, &tx, &egui::Context::default());
                 let json = serde_json::to_string(&resp).unwrap();
                 let _ = server.write_all(format!("{json}\n").as_bytes());

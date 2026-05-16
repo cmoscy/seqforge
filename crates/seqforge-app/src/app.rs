@@ -138,22 +138,27 @@ impl SeqForgeApp {
         state.events = events;
         state.event_rx = Some(event_rx);
 
-        // Start the Unix domain socket listener and wire up the terminal.
-        let socket_path = match socket::start_socket_listener(cc.egui_ctx.clone()) {
-            Ok((path, rx)) => {
+        // ── PTY environment + socket listener ─────────────────────────────────
+        // Sequencing is load-bearing: in Rust 2024 `std::env::set_var` is
+        // unsafe because env mutation while another thread exists is UB. So
+        // we (1) decide the socket path, (2) install all env vars on the
+        // main thread, (3) THEN spawn the listener thread. See
+        // `terminal::install_pty_env`.
+        let socket_path = socket::socket_path();
+        crate::terminal::install_pty_env(Some(&socket_path));
+
+        match socket::start_socket_listener(socket_path, cc.egui_ctx.clone()) {
+            Ok(rx) => {
                 state.socket_rx = Some(rx);
-                Some(path)
             }
             Err(e) => {
                 eprintln!("[seqforge] socket init failed: {e}");
-                None
             }
-        };
+        }
 
-        state.terminal =
-            TerminalPane::new(cc.egui_ctx.clone(), socket_path.as_deref())
-                .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
-                .ok();
+        state.terminal = TerminalPane::new(cc.egui_ctx.clone())
+            .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
+            .ok();
 
         Self { state }
     }

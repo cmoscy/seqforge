@@ -17,6 +17,44 @@ fn sibling_seqforge_dir() -> Option<std::path::PathBuf> {
     candidate.exists().then(|| dir.to_owned())
 }
 
+// ── Process-wide env setup ────────────────────────────────────────────────────
+
+/// Install the process-wide environment variables that the embedded shell (and
+/// any `seqforge` CLI invocations within it) inherit.
+///
+/// **MUST be called from the main thread before any other thread is spawned**,
+/// in particular before [`crate::socket::start_socket_listener`]. Rust 2024
+/// treats `std::env::set_var` as `unsafe` because concurrent env access from
+/// another thread is UB; sequencing this strictly first is how we keep it safe.
+///
+/// Sets:
+/// - `SEQFORGE_SOCKET` — the Unix socket path for viewer-command dispatch.
+/// - `PATH` — prepends the directory of a sibling `seqforge` binary so the
+///   embedded terminal can use it without `cargo install` (mirrors VS Code's
+///   `code` CLI pattern).
+/// - `HISTFILE` — isolates embedded-terminal history from the user's main
+///   shell history.
+pub fn install_pty_env(socket_path: Option<&std::path::Path>) {
+    // Safety: caller contract is "main thread, before any thread spawns".
+    unsafe {
+        if let Some(path) = socket_path {
+            std::env::set_var("SEQFORGE_SOCKET", path);
+        }
+
+        if let Some(bin_dir) = sibling_seqforge_dir() {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{}", bin_dir.display(), current_path);
+            std::env::set_var("PATH", new_path);
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            let dir = std::path::PathBuf::from(&home).join(".local/share/seqforge");
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("HISTFILE", dir.join("terminal_history"));
+        }
+    }
+}
+
 // ── TerminalPane ──────────────────────────────────────────────────────────────
 
 pub struct TerminalPane {
@@ -26,33 +64,9 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
-    pub fn new(ctx: egui::Context, socket_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
-        // Safety: called from the main thread at app startup; no concurrent env reads.
-        unsafe {
-            // Expose the session socket so subprocesses can dispatch viewer commands.
-            if let Some(path) = socket_path {
-                std::env::set_var("SEQFORGE_SOCKET", path);
-            }
-
-            // If a `seqforge` binary lives next to the running app binary, prepend its
-            // directory to PATH so the embedded terminal can use it without a separate
-            // `cargo install` step. Mirrors how VS Code exposes its `code` CLI.
-            if let Some(bin_dir) = sibling_seqforge_dir() {
-                let current_path = std::env::var("PATH").unwrap_or_default();
-                let new_path = format!("{}:{}", bin_dir.display(), current_path);
-                std::env::set_var("PATH", new_path);
-            }
-
-            // Isolate embedded-terminal history from the user's main shell history.
-            // Both bash and zsh honour HISTFILE, so this prevents seqforge commands
-            // from appearing in the user's global history or autocomplete.
-            if let Ok(home) = std::env::var("HOME") {
-                let dir = std::path::PathBuf::from(&home).join(".local/share/seqforge");
-                let _ = std::fs::create_dir_all(&dir);
-                std::env::set_var("HISTFILE", dir.join("terminal_history"));
-            }
-        }
-
+    /// Construct the embedded terminal. Assumes [`install_pty_env`] has
+    /// already been called on the main thread before any thread was spawned.
+    pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let settings = BackendSettings {
             shell,
