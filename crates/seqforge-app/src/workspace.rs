@@ -1,20 +1,23 @@
-//! Workspace, Pane, BufferStore — the GUI-side orchestration of the
-//! editor-ready model types (`Buffer`, `Annotations`, `View`) introduced
-//! in `seqforge-core::model`.
+//! Workspace + BufferStore — the GUI-side orchestration of the
+//! editor-ready model types (`Buffer`, `Annotations`, `View`) from
+//! `seqforge-core::model`.
 //!
-//! Stage 2.5a (this sub-commit): types only. Nothing in `AppState` or
-//! `command::apply` calls these yet. Subsequent sub-commits migrate
-//! state, dispatch, and the viewer widget to use them.
+//! ## Model
 //!
-//! See `PLAN.md` Tier 2.5 for the locked-down architectural decisions
-//! these types embody (Pane = dock-tab unit, `Arc<RwLock<Buffer>>` for
-//! shared ownership, same-buffer-in-multiple-panes, etc.).
+//! After the Stage 2.5c follow-up flatten, the workspace tracks views
+//! as a flat map keyed by `ViewId`. The dock tree (`DockState<Tab>`)
+//! owns layout: which views live in which leaf, the tab order within
+//! a leaf, and the active tab per leaf. A "pane" is no longer a
+//! first-class workspace concept — it's whatever leaf the dock
+//! currently places a view in. egui_dock therefore handles
+//! split-view, drag-rearrange, and per-leaf tab cycling natively
+//! with one tab strip (no second strip needed).
 //!
-//! Some methods (`view`, `view_mut`, the `with_view_*` by-id primitives)
-//! are currently used only by tests; their consumers land in Stage 2.5b
-//! (multi-tab support) and 2.5d (socket-protocol explicit targeting).
-//! Lifting the dead_code allowance is the checkpoint that Stage 2.5 is
-//! complete.
+//! Workspace still owns the things the dock can't: buffer storage,
+//! view identity, the active-view focus marker, and the per-view
+//! render cache (`SequenceView`). Buffer sharing across multiple
+//! views (split-view of the same plasmid) still works via
+//! `BufferStore`'s Arc-clone behaviour.
 
 #![allow(dead_code)]
 
@@ -27,95 +30,15 @@ use seqforge_core::{
     Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind,
 };
 
-// ── PaneId ───────────────────────────────────────────────────────────────────
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
-pub struct PaneId(pub u64);
-
-impl std::fmt::Display for PaneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PaneId({})", self.0)
-    }
-}
-
-// ── Pane ─────────────────────────────────────────────────────────────────────
-
-/// A pane in the dock area. Holds an ordered list of [`View`]s (the tab
-/// strip) and tracks which one is active.
-///
-/// Multi-tab support (Stage 2.5b) gives users a tab strip widget that
-/// renders `views` and routes clicks to `SwitchTab`. Stage 2.5a keeps a
-/// single Pane with a single View — same shape, just renamed.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Pane {
-    pub id: PaneId,
-    pub views: Vec<View>,
-    /// Index into `views`. Always valid when `views` is non-empty.
-    pub active: usize,
-}
-
-impl Pane {
-    pub fn new(id: PaneId) -> Self {
-        Self { id, views: Vec::new(), active: 0 }
-    }
-
-    pub fn active_view(&self) -> Option<&View> {
-        self.views.get(self.active)
-    }
-
-    pub fn active_view_mut(&mut self) -> Option<&mut View> {
-        self.views.get_mut(self.active)
-    }
-
-    /// Push a new view onto the tab strip and make it active.
-    pub fn push_active(&mut self, view: View) {
-        self.views.push(view);
-        self.active = self.views.len() - 1;
-    }
-
-    /// Find a view by id; returns its index in `views`.
-    pub fn find(&self, view_id: ViewId) -> Option<usize> {
-        self.views.iter().position(|v| v.id == view_id)
-    }
-
-    /// Switch focus to the view with the given id. No-op if not present.
-    pub fn switch_to(&mut self, view_id: ViewId) -> bool {
-        if let Some(idx) = self.find(view_id) {
-            self.active = idx;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Remove a view by id. If the removed view was active, falls back to
-    /// the previous index (or 0 if at the head).
-    pub fn close(&mut self, view_id: ViewId) -> Option<View> {
-        let idx = self.find(view_id)?;
-        let removed = self.views.remove(idx);
-        if !self.views.is_empty() && self.active >= self.views.len() {
-            self.active = self.views.len() - 1;
-        }
-        Some(removed)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.views.is_empty()
-    }
-}
+use crate::viewer::SequenceView;
 
 // ── BufferStore ──────────────────────────────────────────────────────────────
 
 /// Buffer + Annotations storage keyed by `BufferId`.
 ///
-/// Same path opens once and is shared across panes via
+/// Same path opens once and is shared across views via
 /// `Arc<RwLock<Buffer>>` — split-view of the same file shares one rope
 /// and one undo history. `by_path` deduplicates on `open_path`.
-///
-/// Tier 3d will add transaction broadcasting (one edit → invalidate all
-/// views referencing the buffer); for 2.5a we just store handles.
 #[derive(Default, Debug)]
 pub struct BufferStore {
     buffers: HashMap<BufferId, Arc<RwLock<Buffer>>>,
@@ -134,7 +57,6 @@ impl BufferStore {
         BufferId(self.next_id)
     }
 
-    /// Look up a buffer handle by id.
     pub fn get(&self, id: BufferId) -> Option<Arc<RwLock<Buffer>>> {
         self.buffers.get(&id).cloned()
     }
@@ -148,9 +70,7 @@ impl BufferStore {
     }
 
     /// Drop a buffer + its annotations and forget any path alias.
-    /// Returns the strong-count of the Arc just before drop (callers use
-    /// this to verify nothing else still holds a reference, mostly for
-    /// tests / debug).
+    /// Returns the strong-count of the Arc just before drop.
     pub fn remove(&mut self, id: BufferId) -> Option<usize> {
         let buf = self.buffers.remove(&id)?;
         self.annotations.remove(&id);
@@ -171,9 +91,6 @@ impl BufferStore {
             return Ok(existing);
         }
         let doc = bio.load(path)?;
-        // Map the legacy `Document` into `Buffer` + `Annotations`. After
-        // sub-commit 5, `BioOps::load` can return the split directly;
-        // for now we adapt here so the existing bio crate stays untouched.
         let complement = pure_complement(&doc.sequence);
         let buffer = Buffer::new(
             doc.name.clone(),
@@ -191,8 +108,7 @@ impl BufferStore {
         Ok(id)
     }
 
-    /// Create a buffer from raw inputs — used by tests and any future
-    /// scratch-buffer support.
+    /// Create a buffer from raw inputs — used by tests.
     #[cfg(test)]
     pub fn insert_raw(
         &mut self,
@@ -217,215 +133,200 @@ impl BufferStore {
     }
 }
 
-/// Local IUPAC complement — duplicated from `seqforge-bio::complement` so
-/// `seqforge-app` can compute it without an extra round-trip while the
-/// migration is in flight. Sub-commit 5 collapses this back into the bio
-/// crate by widening `BioOps::load` to return `(Buffer, Annotations)`
-/// directly.
+/// Local IUPAC complement.
 fn pure_complement(seq: &[u8]) -> Vec<u8> {
     seqforge_bio::complement(seq)
 }
 
 // ── Workspace ────────────────────────────────────────────────────────────────
 
-/// The collection of panes + buffer store. One per `AppState`.
-///
-/// Stage 2.5a (here): one pane, one view, no behavior change.
-/// Stage 2.5b: multi-tab within a pane.
-/// Stage 2.5c: multi-pane via egui_dock splits.
+/// Flat workspace state: view identity + buffer storage + render
+/// caches. The dock tree owns spatial layout (which view is in which
+/// leaf, tab order, per-leaf active tab).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Workspace {
-    pub panes: HashMap<PaneId, Pane>,
-    /// Pane order in the dock — drives Cmd+Shift+] cycling later.
-    pub pane_order: Vec<PaneId>,
-    pub active_pane: Option<PaneId>,
+    /// All open views, keyed by id. Layout (which leaf, which order)
+    /// lives in the dock tree; this map is the source of truth for
+    /// view identity + persistent per-view state.
+    pub views: HashMap<ViewId, View>,
+    /// The view that currently has keyboard focus. Mirrors the dock's
+    /// focused tab; updated by `AppCommand::FocusPane(View(vid))` when
+    /// the user clicks a leaf or programmatic focus moves.
+    pub active_view: Option<ViewId>,
 
-    /// Buffer + annotations storage. Skipped in serde because Arc<RwLock>
-    /// doesn't round-trip through eframe persistence. On restart the
-    /// recent-files / persisted-views list re-opens buffers; for 2.5a
-    /// we just start empty.
+    /// Buffer + annotations storage. Skipped in serde because
+    /// `Arc<RwLock>` doesn't round-trip through eframe persistence.
+    /// `recent_files` restores the working set across restarts.
     #[serde(skip)]
     pub buffers: BufferStore,
 
-    next_pane: u64,
+    /// Per-view render caches for the sequence viewer. Transient;
+    /// rebuilt on next paint via the `(buffer_id, version)` cache
+    /// key. Keyed by `ViewId` so opening the same buffer in two views
+    /// gives each one its own independent cache (e.g. different
+    /// feature-row stacking when zoom levels diverge later).
+    #[serde(skip)]
+    pub seq_views: HashMap<ViewId, SequenceView>,
+
     next_view: u64,
 }
 
 impl Default for Workspace {
     fn default() -> Self {
-        let mut ws = Self {
-            panes: HashMap::new(),
-            pane_order: Vec::new(),
-            active_pane: None,
+        Self {
+            views: HashMap::new(),
+            active_view: None,
             buffers: BufferStore::new(),
-            next_pane: 0,
+            seq_views: HashMap::new(),
             next_view: 0,
-        };
-        // Start with one empty pane — invariant maintained: at least one
-        // pane exists for the dock to render into. Migration sub-commits
-        // rely on this.
-        let pane_id = ws.alloc_pane();
-        ws.panes.insert(pane_id, Pane::new(pane_id));
-        ws.pane_order.push(pane_id);
-        ws.active_pane = Some(pane_id);
-        ws
+        }
     }
 }
 
 impl Workspace {
-    fn alloc_pane(&mut self) -> PaneId {
-        self.next_pane += 1;
-        PaneId(self.next_pane)
-    }
-
     pub fn alloc_view_id(&mut self) -> ViewId {
         self.next_view += 1;
         ViewId(self.next_view)
     }
 
-    pub fn active_pane(&self) -> Option<&Pane> {
-        self.active_pane.and_then(|id| self.panes.get(&id))
-    }
-
-    pub fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        let id = self.active_pane?;
-        self.panes.get_mut(&id)
-    }
-
     pub fn active_view(&self) -> Option<&View> {
-        self.active_pane()?.active_view()
+        self.active_view.and_then(|id| self.views.get(&id))
     }
 
     pub fn active_view_mut(&mut self) -> Option<&mut View> {
-        self.active_pane_mut()?.active_view_mut()
+        let id = self.active_view?;
+        self.views.get_mut(&id)
     }
 
-    /// Resolve the active view's buffer handle. Most dispatch paths go
-    /// through this: it returns both the View (to mutate selection /
-    /// scroll) and the buffer Arc (to read text / version).
+    /// Read-only view-by-id accessor.
+    pub fn view(&self, view_id: ViewId) -> Option<&View> {
+        self.views.get(&view_id)
+    }
+
+    /// Mutable view-by-id accessor.
+    pub fn view_mut(&mut self, view_id: ViewId) -> Option<&mut View> {
+        self.views.get_mut(&view_id)
+    }
+
+    /// Resolve the active view's buffer handle.
     pub fn active_buffer(&self) -> Option<Arc<RwLock<Buffer>>> {
         let view = self.active_view()?;
         self.buffers.get(view.buffer_id)
     }
 
-    /// Close the active view in the active pane. If that was the last
-    /// view referencing its buffer, the buffer is dropped from the store
-    /// too. Returns the closed view's id, or `NoActiveView` if none.
-    pub fn close_active_view(&mut self) -> Result<ViewId, DispatchError> {
-        let view_id = self
-            .active_view()
-            .ok_or(DispatchError::NoActiveView)?
-            .id;
-        self.close_view(view_id)
-    }
-
-    /// Close a specific view. If its buffer is no longer referenced by
-    /// any view after removal, the buffer is dropped from the store.
-    pub fn close_view(&mut self, view_id: ViewId) -> Result<ViewId, DispatchError> {
-        let (pid, _) = self
-            .locate(view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let pane = self.panes.get_mut(&pid).expect("located");
-        let removed = pane.close(view_id).expect("located");
-
-        // Drop the buffer if no view in any pane still references it.
-        let still_referenced = self.panes.values().any(|p| {
-            p.views.iter().any(|v| v.buffer_id == removed.buffer_id)
-        });
-        if !still_referenced {
-            self.buffers.remove(removed.buffer_id);
+    /// Set the active view by id. No-op if `view_id` is unknown.
+    pub fn focus_view(&mut self, view_id: ViewId) {
+        if self.views.contains_key(&view_id) {
+            self.active_view = Some(view_id);
         }
-        Ok(view_id)
     }
 
-    /// Open `path` and attach a new View in the active pane. Returns the
-    /// new view's id, or an error if no pane is active or load failed.
+    /// Allocate a new `View` onto `buffer_id`. The caller is responsible
+    /// for placing the corresponding `Tab::View(id)` into the dock tree.
+    /// Returns the new view's id.
+    pub fn add_view(&mut self, buffer_id: BufferId, kind: ViewKind) -> ViewId {
+        let id = self.alloc_view_id();
+        self.views.insert(id, View::new(id, buffer_id, kind));
+        self.seq_views.insert(id, SequenceView::default());
+        self.active_view = Some(id);
+        id
+    }
+
+    /// Open `path` and attach a new View. Buffer storage dedupes by
+    /// path. Returns the new view's id; caller adds the dock tab.
     pub fn open_path(
         &mut self,
         path: &Path,
         bio: &dyn BioOps,
     ) -> Result<ViewId, String> {
         let buffer_id = self.buffers.open_path(path, bio)?;
-        let view_id = self.alloc_view_id();
-        let pane = self
-            .active_pane_mut()
-            .ok_or_else(|| "no active pane".to_string())?;
-        pane.push_active(View::new(view_id, buffer_id, ViewKind::TextView));
+        Ok(self.add_view(buffer_id, ViewKind::TextView))
+    }
+
+    /// Close a view by id. If the closed view held the last reference
+    /// to its buffer, the buffer is dropped from the store too. The
+    /// caller is responsible for removing the corresponding dock tab.
+    /// Returns Ok(view_id) on success, ViewNotFound otherwise.
+    pub fn close_view(&mut self, view_id: ViewId) -> Result<ViewId, DispatchError> {
+        let view = self
+            .views
+            .remove(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        self.seq_views.remove(&view_id);
+
+        // Drop the buffer if no surviving view references it.
+        let still = self.views.values().any(|v| v.buffer_id == view.buffer_id);
+        if !still {
+            self.buffers.remove(view.buffer_id);
+        }
+
+        if self.active_view == Some(view_id) {
+            self.active_view = self.views.keys().copied().next();
+        }
         Ok(view_id)
     }
 
-    // ── Lookup primitives ─────────────────────────────────────────────────────
-
-    /// Locate which pane holds `view_id` and where in its view list.
-    /// Returns `(pane_id, index_in_pane)` or `None` if not found.
-    pub fn locate(&self, view_id: ViewId) -> Option<(PaneId, usize)> {
-        for (&pid, pane) in &self.panes {
-            if let Some(idx) = pane.find(view_id) {
-                return Some((pid, idx));
+    /// Find an existing view whose buffer's source path matches `path`.
+    /// Used to dedupe open-of-already-open.
+    pub fn find_view_for_path(&self, path: &Path) -> Option<ViewId> {
+        for view in self.views.values() {
+            let arc = self.buffers.get(view.buffer_id)?;
+            if let Ok(buf) = arc.read() {
+                if buf.source_path.as_deref() == Some(path) {
+                    return Some(view.id);
+                }
             }
         }
         None
     }
 
-    /// Read-only view-by-id accessor.
-    pub fn view(&self, view_id: ViewId) -> Option<&View> {
-        let (pid, idx) = self.locate(view_id)?;
-        self.panes.get(&pid)?.views.get(idx)
-    }
-
-    /// Mutable view-by-id accessor.
-    pub fn view_mut(&mut self, view_id: ViewId) -> Option<&mut View> {
-        let (pid, idx) = self.locate(view_id)?;
-        self.panes.get_mut(&pid)?.views.get_mut(idx)
-    }
-
     // ── Buffer-locking helpers ────────────────────────────────────────────────
-    //
-    // Three lock levels × two addressing modes = six helpers. All share the
-    // same closure shape (Zed's `model.read(cx, f)` / `model.update(cx, f)`
-    // pattern) so lock acquisition is bounded by the closure scope and
-    // borrow conflicts are confined to one method's body.
-    //
-    //   ┌─────────────────┬──────────────┬───────────────────────────────────┐
-    //   │ Lock level      │ By id        │ Active                            │
-    //   ├─────────────────┼──────────────┼───────────────────────────────────┤
-    //   │ View only       │ view_mut()   │ active_view_mut()                 │
-    //   │ View + buf read │ with_buffer  │ with_active_buffer                │
-    //   │ View + buf write│ with_buffer_ │ with_active_buffer_mut            │
-    //   │                 │ mut          │                                   │
-    //   └─────────────────┴──────────────┴───────────────────────────────────┘
 
-    /// Run `f` against the view (mutable), buffer (read-locked), and
-    /// annotations (mutable). Used by query operations like Find /
-    /// Enzymes that mutate per-view derived state (`search_hits`,
-    /// `cut_sites`) while only reading the underlying sequence.
-    pub fn with_buffer<R>(
+    /// Run `f` with `(seq_view, view, buffer, annotations)` for a
+    /// specific view. Lock acquisition is bounded by the closure scope.
+    pub fn with_view_buffer<R>(
         &mut self,
         view_id: ViewId,
-        f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
+        f: impl FnOnce(&mut SequenceView, &mut View, &Buffer, &mut Annotations) -> R,
     ) -> Result<R, DispatchError> {
-        let (pid, idx, bid) = {
-            let (pid, idx) = self
-                .locate(view_id)
-                .ok_or(DispatchError::ViewNotFound(view_id))?;
-            let bid = self
-                .panes
-                .get(&pid)
-                .and_then(|p| p.views.get(idx))
-                .map(|v| v.buffer_id)
-                .ok_or(DispatchError::ViewNotFound(view_id))?;
-            (pid, idx, bid)
-        };
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
         let buf_arc = self
             .buffers
             .get(bid)
             .ok_or(DispatchError::ViewNotFound(view_id))?;
         let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
-        let view = self
-            .panes
-            .get_mut(&pid)
-            .and_then(|p| p.views.get_mut(idx))
+        let view = self.views.get_mut(&view_id).expect("located above");
+        let seq_view = self.seq_views.entry(view_id).or_default();
+        let ann = self
+            .buffers
+            .annotations_mut(bid)
             .expect("located above");
+        Ok(f(seq_view, view, &buf, ann))
+    }
+
+    /// `with_view_buffer` variant that read-locks the buffer and only
+    /// provides view + buffer + annotations (no seq_view) — for the
+    /// command-dispatch path where SequenceView isn't relevant.
+    pub fn with_buffer<R>(
+        &mut self,
+        view_id: ViewId,
+        f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
+    ) -> Result<R, DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
+        let view = self.views.get_mut(&view_id).expect("located above");
         let ann = self
             .buffers
             .annotations_mut(bid)
@@ -433,36 +334,24 @@ impl Workspace {
         Ok(f(view, &buf, ann))
     }
 
-    /// Run `f` against the view, buffer (write-locked), and annotations,
-    /// all mutable. Used by edit operations (Tier 3d) and by `Open` /
-    /// `Close` style commands that need to mutate the buffer in place.
+    /// Write-lock variant of `with_buffer`. Used by edit operations
+    /// (Tier 3d) and other commands that need to mutate the buffer.
     pub fn with_buffer_mut<R>(
         &mut self,
         view_id: ViewId,
         f: impl FnOnce(&mut View, &mut Buffer, &mut Annotations) -> R,
     ) -> Result<R, DispatchError> {
-        let (pid, idx, bid) = {
-            let (pid, idx) = self
-                .locate(view_id)
-                .ok_or(DispatchError::ViewNotFound(view_id))?;
-            let bid = self
-                .panes
-                .get(&pid)
-                .and_then(|p| p.views.get(idx))
-                .map(|v| v.buffer_id)
-                .ok_or(DispatchError::ViewNotFound(view_id))?;
-            (pid, idx, bid)
-        };
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
         let buf_arc = self
             .buffers
             .get(bid)
             .ok_or(DispatchError::ViewNotFound(view_id))?;
         let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-        let view = self
-            .panes
-            .get_mut(&pid)
-            .and_then(|p| p.views.get_mut(idx))
-            .expect("located above");
+        let view = self.views.get_mut(&view_id).expect("located above");
         let ann = self
             .buffers
             .annotations_mut(bid)
@@ -470,23 +359,29 @@ impl Workspace {
         Ok(f(view, &mut buf, ann))
     }
 
-    /// `with_buffer` against the active view; convenience for the common
-    /// "current user-focused thing" case.
     pub fn with_active_buffer<R>(
         &mut self,
         f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
     ) -> Result<R, DispatchError> {
-        let view_id = self.active_view().ok_or(DispatchError::NoActiveView)?.id;
-        self.with_buffer(view_id, f)
+        let id = self.active_view.ok_or(DispatchError::NoActiveView)?;
+        self.with_buffer(id, f)
     }
 
-    /// `with_buffer_mut` against the active view.
     pub fn with_active_buffer_mut<R>(
         &mut self,
         f: impl FnOnce(&mut View, &mut Buffer, &mut Annotations) -> R,
     ) -> Result<R, DispatchError> {
-        let view_id = self.active_view().ok_or(DispatchError::NoActiveView)?.id;
-        self.with_buffer_mut(view_id, f)
+        let id = self.active_view.ok_or(DispatchError::NoActiveView)?;
+        self.with_buffer_mut(id, f)
+    }
+
+    /// Reset every per-view render cache. Called by command arms
+    /// (Open, Close, GoTo, etc.) that previously reset the single
+    /// `seq_view` on `AppState`.
+    pub fn reset_all_seq_views(&mut self) {
+        for sv in self.seq_views.values_mut() {
+            sv.reset();
+        }
     }
 }
 
@@ -498,21 +393,17 @@ mod tests {
     use seqforge_core::Topology;
 
     #[test]
-    fn workspace_starts_with_one_empty_pane() {
+    fn workspace_starts_empty() {
         let ws = Workspace::default();
-        assert_eq!(ws.panes.len(), 1);
-        assert_eq!(ws.pane_order.len(), 1);
-        assert!(ws.active_pane.is_some());
-        assert!(ws.active_pane().unwrap().is_empty());
-        assert!(ws.active_view().is_none());
+        assert!(ws.views.is_empty());
+        assert!(ws.active_view.is_none());
+        assert!(ws.buffers.is_empty());
     }
 
     #[test]
     fn buffer_store_dedupes_by_path() {
         let mut ws = Workspace::default();
         let path = PathBuf::from("/tmp/fake.gb");
-        // Stash a buffer by path so the second open returns the same id
-        // without calling load() — we don't want a real BioOps in unit tests.
         let id = ws.buffers.insert_raw(
             "fake".into(),
             b"ATGC".to_vec(),
@@ -522,7 +413,7 @@ mod tests {
 
         struct ExplodingBio;
         impl BioOps for ExplodingBio {
-            fn load(&self, _: &std::path::Path) -> Result<seqforge_core::Document, String> {
+            fn load(&self, _: &Path) -> Result<seqforge_core::Document, String> {
                 panic!("must not load when dedup hits")
             }
             fn find_matches(
@@ -549,30 +440,24 @@ mod tests {
     }
 
     #[test]
-    fn pane_push_and_close() {
-        let mut p = Pane::new(PaneId(1));
-        assert!(p.is_empty());
-        p.push_active(View::new(ViewId(1), BufferId(1), ViewKind::TextView));
-        p.push_active(View::new(ViewId(2), BufferId(1), ViewKind::TextView));
-        assert_eq!(p.views.len(), 2);
-        assert_eq!(p.active, 1);
-        assert!(p.close(ViewId(2)).is_some());
-        // Active clamps back to the remaining view.
-        assert_eq!(p.active, 0);
-        assert_eq!(p.views.len(), 1);
+    fn add_view_makes_it_active() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+        assert_eq!(ws.active_view, Some(vid));
+        assert!(ws.views.contains_key(&vid));
+        assert!(ws.seq_views.contains_key(&vid));
     }
 
     #[test]
     fn with_active_buffer_passes_correct_handles() {
         let mut ws = Workspace::default();
         let bid = ws.buffers.insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
-        let view_id = ws.alloc_view_id();
-        let pane = ws.active_pane_mut().unwrap();
-        pane.push_active(View::new(view_id, bid, ViewKind::TextView));
+        let vid = ws.add_view(bid, ViewKind::TextView);
 
         let outcome = ws
             .with_active_buffer(|view, buf, ann| {
-                assert_eq!(view.id, view_id);
+                assert_eq!(view.id, vid);
                 assert_eq!(buf.text, b"ATGC");
                 assert!(ann.features.is_empty());
                 42
@@ -585,12 +470,9 @@ mod tests {
     fn with_buffer_mut_allows_mutation() {
         let mut ws = Workspace::default();
         let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
-        let view_id = ws.alloc_view_id();
-        ws.active_pane_mut()
-            .unwrap()
-            .push_active(View::new(view_id, bid, ViewKind::TextView));
+        let vid = ws.add_view(bid, ViewKind::TextView);
 
-        ws.with_buffer_mut(view_id, |_view, buf, _ann| {
+        ws.with_buffer_mut(vid, |_view, buf, _ann| {
             buf.version += 1;
             buf.text.push(b'G');
         })
@@ -621,61 +503,67 @@ mod tests {
     fn close_view_drops_buffer_when_last_reference() {
         let mut ws = Workspace::default();
         let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
-        let vid = ws.alloc_view_id();
-        ws.active_pane_mut()
-            .unwrap()
-            .push_active(View::new(vid, bid, ViewKind::TextView));
+        let vid = ws.add_view(bid, ViewKind::TextView);
 
         assert!(ws.buffers.get(bid).is_some());
         ws.close_view(vid).unwrap();
         assert!(ws.buffers.get(bid).is_none(), "buffer should be dropped");
+        assert!(ws.active_view.is_none());
     }
 
     #[test]
     fn close_view_keeps_buffer_when_another_view_holds_it() {
         let mut ws = Workspace::default();
         let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
-        let v1 = ws.alloc_view_id();
-        let v2 = ws.alloc_view_id();
-        let pane = ws.active_pane_mut().unwrap();
-        pane.push_active(View::new(v1, bid, ViewKind::TextView));
-        pane.push_active(View::new(v2, bid, ViewKind::TextView));
+        let v1 = ws.add_view(bid, ViewKind::TextView);
+        let v2 = ws.add_view(bid, ViewKind::TextView);
 
         ws.close_view(v2).unwrap();
-        // v1 still references bid; buffer must survive.
         assert!(ws.buffers.get(bid).is_some(), "buffer should remain");
-        // Pane has one remaining view, which is now active.
-        let pane = ws.active_pane().unwrap();
-        assert_eq!(pane.views.len(), 1);
-        assert_eq!(pane.active_view().unwrap().id, v1);
+        assert_eq!(ws.active_view, Some(v1));
     }
 
     #[test]
-    fn pane_switch_to_unknown_returns_false() {
-        let mut p = Pane::new(PaneId(1));
-        p.push_active(View::new(ViewId(1), BufferId(1), ViewKind::TextView));
-        assert!(!p.switch_to(ViewId(999)));
-        assert_eq!(p.active, 0);
+    fn two_views_can_share_a_buffer() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("shared".into(), b"ATGC".to_vec(), Topology::Linear);
+        let _v1 = ws.add_view(bid, ViewKind::TextView);
+        let _v2 = ws.add_view(bid, ViewKind::TextView);
+        let arc = ws.buffers.get(bid).unwrap();
+        assert!(Arc::strong_count(&arc) >= 2);
     }
 
     #[test]
-    fn locate_finds_view_across_panes() {
+    fn focus_view_sets_active() {
         let mut ws = Workspace::default();
         let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
-        let vid = ws.alloc_view_id();
-        ws.active_pane_mut()
-            .unwrap()
-            .push_active(View::new(vid, bid, ViewKind::TextView));
-        let (pane_id, idx) = ws.locate(vid).unwrap();
-        assert_eq!(idx, 0);
-        assert_eq!(Some(pane_id), ws.active_pane);
+        let v1 = ws.add_view(bid, ViewKind::TextView);
+        let v2 = ws.add_view(bid, ViewKind::TextView);
+        ws.focus_view(v1);
+        assert_eq!(ws.active_view, Some(v1));
+        ws.focus_view(v2);
+        assert_eq!(ws.active_view, Some(v2));
+        ws.focus_view(ViewId(99999));
+        assert_eq!(ws.active_view, Some(v2));
+    }
+
+    #[test]
+    fn find_view_for_path_resolves_existing() {
+        let mut ws = Workspace::default();
+        let path = PathBuf::from("/tmp/q.gb");
+        let bid = ws.buffers.insert_raw("q".into(), b"AT".to_vec(), Topology::Linear);
+        // Wire the buffer onto a path and onto a view.
+        let arc = ws.buffers.get(bid).unwrap();
+        arc.write().unwrap().source_path = Some(path.clone());
+        let vid = ws.add_view(bid, ViewKind::TextView);
+        assert_eq!(ws.find_view_for_path(&path), Some(vid));
+        assert_eq!(ws.find_view_for_path(Path::new("/no.gb")), None);
     }
 
     #[test]
     fn buffer_store_remove_drops_arc() {
         let mut store = BufferStore::new();
         let id = store.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
-        // Take a second handle to verify strong_count > 1 case.
         let _handle = store.get(id).unwrap();
         let strong_before_drop = store.remove(id).unwrap();
         assert!(strong_before_drop >= 2);

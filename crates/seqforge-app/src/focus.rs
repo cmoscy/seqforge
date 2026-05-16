@@ -14,15 +14,23 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which pane "owns" the keyboard when no overlay is active.
+use seqforge_core::ViewId;
+
+/// Which leaf "owns" the keyboard when no overlay is active.
 ///
-/// Sticky: set by pane clicks and by explicit `AppCommand::FocusPane`
-/// (the latter lands in Stage 2). Not persisted across restarts —
-/// startup always begins on [`FocusScope::Terminal`] to preserve the
-/// pre-refactor behaviour where the terminal eagerly captures input.
+/// Sticky: set by leaf clicks and by explicit `AppCommand::FocusPane`.
+/// Not persisted across restarts — startup always begins on
+/// [`FocusScope::Terminal`] to preserve the pre-refactor behaviour
+/// where the terminal eagerly captures input.
+///
+/// After the 2.5c follow-up flatten, `View(ViewId)` (was `Pane(PaneId)`,
+/// previously `Viewer`) addresses a specific view tab — the dock owns
+/// layout, so focus is a view-level concept rather than a pane-level
+/// one. All view tabs share the `Pane:Viewer` context tag for keymap
+/// purposes; Stage 2.5d will diversify per `ViewKind`.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum FocusScope {
-    Viewer,
+    View(ViewId),
     #[default]
     Terminal,
     Browser,
@@ -32,7 +40,7 @@ impl FocusScope {
     /// The `KeyContext` tag pushed onto the stack when this scope is active.
     pub fn pane_tag(self) -> &'static str {
         match self {
-            FocusScope::Viewer => KeyContext::PANE_VIEWER,
+            FocusScope::View(_) => KeyContext::PANE_VIEWER,
             FocusScope::Terminal => KeyContext::PANE_TERMINAL,
             FocusScope::Browser => KeyContext::PANE_BROWSER,
         }

@@ -14,7 +14,6 @@ use crate::overlay::OverlayStack;
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
-use crate::viewer::SequenceView;
 use crate::workspace::Workspace;
 
 pub(crate) const MAX_RECENT: usize = 10;
@@ -66,8 +65,6 @@ pub struct AppState {
     /// Recently opened files (most-recent first, max 10).
     pub recent_files: Vec<PathBuf>,
     // ── Transient: not persisted ──────────────────────────────────────────
-    #[serde(skip)]
-    pub seq_view: SequenceView,
     /// Queue of commands waiting to be applied this frame. Every menu,
     /// hotkey, bar, socket, and pane-click handler pushes into this and
     /// `update()` drains it through `command::apply` exactly once per
@@ -90,6 +87,13 @@ pub struct AppState {
     /// Not persisted — startup always begins on `FocusScope::Terminal`.
     #[serde(skip)]
     pub focus: FocusState,
+    /// Snapshot of `focus.scope` taken when the overlay stack
+    /// transitioned from empty → non-empty (e.g. user pressed ⌘F).
+    /// Restored when the stack goes back to empty so closing the bar
+    /// returns the user to the pane they were on. `None` whenever no
+    /// overlay is active.
+    #[serde(skip)]
+    pub focus_before_overlay: Option<crate::focus::FocusScope>,
     /// Producer side of the event bus. `apply()` emits through here.
     #[serde(skip)]
     pub events: EventSink,
@@ -105,7 +109,10 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        let mut dock_state = DockState::new(vec![Tab::Viewer]);
+        // Central area starts with a Welcome placeholder; first OpenFile
+        // replaces it with a `Tab::View(_)`. The Welcome/View invariant
+        // is maintained by `ensure_welcome_invariant` in command.rs.
+        let mut dock_state = DockState::new(vec![Tab::Welcome]);
         let surface = dock_state.main_surface_mut();
         let [_right, _left] = surface.split_left(NodeIndex::root(), 0.20, vec![Tab::FileBrowser]);
         let [_viewer, _terminal] =
@@ -117,17 +124,72 @@ impl Default for AppState {
             browser: BrowserState::default(),
             workspace: Workspace::default(),
             recent_files: Vec::new(),
-            seq_view: SequenceView::default(),
             pending_commands: Vec::new(),
             terminal: None,
             socket_rx: None,
             toasts: egui_notify::Toasts::default(),
             overlays: OverlayStack::default(),
             focus: FocusState::new(),
+            focus_before_overlay: None,
             events,
             event_rx: Some(event_rx),
             event_log: EventLog::default(),
         }
+    }
+}
+
+/// Walk the persisted `dock_state`, remove any `Tab::View(_)` that
+/// the workspace doesn't have a matching `View` for, and re-establish
+/// the Welcome invariant. Called once at startup; never during steady-
+/// state operation.
+fn sanitize_dock_after_restore(state: &mut AppState) {
+    // Collect orphan tab locations first; mutating the tree while
+    // iterating it is fiddly.
+    let mut orphans: Vec<(
+        egui_dock::SurfaceIndex,
+        egui_dock::NodeIndex,
+        egui_dock::TabIndex,
+    )> = Vec::new();
+    for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
+        let si = egui_dock::SurfaceIndex(s_idx);
+        for (n_idx, node) in surface.iter_nodes().enumerate() {
+            let ni = egui_dock::NodeIndex(n_idx);
+            if let Some(tabs) = node.tabs() {
+                for (t_idx, tab) in tabs.iter().enumerate() {
+                    if let Tab::View(vid) = tab {
+                        if !state.workspace.views.contains_key(vid) {
+                            orphans.push((si, ni, egui_dock::TabIndex(t_idx)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Reverse order so earlier indices stay valid as we remove.
+    for loc in orphans.into_iter().rev() {
+        let _ = state.dock_state.remove_tab(loc);
+    }
+
+    // Restore Welcome / View invariant: if no Tab::View(_) survived,
+    // ensure exactly one Welcome tab exists. If Welcome is already
+    // present (e.g. fresh install), this is a no-op.
+    let mut view_count = 0usize;
+    let mut welcome_count = 0usize;
+    for surface in state.dock_state.iter_surfaces() {
+        for node in surface.iter_nodes() {
+            if let Some(tabs) = node.tabs() {
+                for tab in tabs {
+                    match tab {
+                        Tab::View(_) => view_count += 1,
+                        Tab::Welcome => welcome_count += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if view_count == 0 && welcome_count == 0 {
+        state.dock_state.push_to_focused_leaf(Tab::Welcome);
     }
 }
 
@@ -143,6 +205,16 @@ impl SeqForgeApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
+
+        // Sanitize the persisted dock against the (always-empty on
+        // restart) workspace. `dock_state` round-trips through eframe
+        // storage but `workspace` is `#[serde(skip)]`, so any
+        // `Tab::View(vid)` from a prior session points at a view the
+        // workspace doesn't know about. Strip those orphans and
+        // re-establish the Welcome invariant; otherwise the
+        // dock-focus reconciler would spam `ViewNotFound` toasts
+        // every frame trying to switch to a ghost tab.
+        sanitize_dock_after_restore(&mut state);
 
         // Event bus: if state came from storage, the `#[serde(skip)]`
         // defaults gave us a sink with a dropped receiver. Always
@@ -235,6 +307,11 @@ impl eframe::App for SeqForgeApp {
             // single applier.
             if matches!(cmd, AppCommand::OpenFile(_)) {
                 self.state.overlays.pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
+                // Dialog was accepted — discard the saved focus
+                // snapshot. The `OpenFile` apply will move focus to
+                // the newly-opened view; restoring the pre-dialog
+                // pane afterward would undo that.
+                self.state.focus_before_overlay = None;
             }
             enqueue(&mut self.state, cmd);
         }
@@ -286,6 +363,19 @@ impl eframe::App for SeqForgeApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if ui.button("Split Right  ⌘\\").clicked() {
+                        menu_cmds.push(AppCommand::SplitPane {
+                            direction: crate::command::SplitDirection::Horizontal,
+                        });
+                        ui.close_menu();
+                    }
+                    if ui.button("Split Below").clicked() {
+                        menu_cmds.push(AppCommand::SplitPane {
+                            direction: crate::command::SplitDirection::Vertical,
+                        });
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Reset Layout").clicked() {
                         menu_cmds.push(AppCommand::ResetLayout);
                         ui.close_menu();
@@ -375,7 +465,6 @@ impl eframe::App for SeqForgeApp {
             dock_state,
             browser,
             workspace,
-            seq_view,
             pending_commands,
             terminal,
             overlays,
@@ -393,7 +482,6 @@ impl eframe::App for SeqForgeApp {
                         &mut TabViewer {
                             browser,
                             workspace,
-                            seq_view,
                             pending_commands,
                             terminal,
                             overlays,
@@ -401,6 +489,29 @@ impl eframe::App for SeqForgeApp {
                         },
                     );
             });
+
+        // ── Reconcile dock-internal focus with workspace.active_view ──────────
+        // egui_dock activates tabs on its own (tab-strip clicks, drag).
+        // Detect divergence and enqueue a SwitchTab so the workspace +
+        // FocusScope catch up through the single-applier path.
+        //
+        // Only enqueue when the workspace actually knows the view —
+        // otherwise we'd issue SwitchTab for a ghost tab every frame
+        // and the applier would toast `ViewNotFound`. The startup
+        // sanitizer should make ghost tabs impossible, but this guard
+        // keeps the runtime resilient to drift from any future code
+        // path that mutates the dock without updating the workspace.
+        if let Some((_rect, Tab::View(vid))) = self.state.dock_state.find_active_focused()
+        {
+            let vid = *vid;
+            if self.state.workspace.active_view != Some(vid)
+                && self.state.workspace.views.contains_key(&vid)
+            {
+                self.state
+                    .pending_commands
+                    .push((AppCommand::SwitchTab { view: vid }, None));
+            }
+        }
 
         // ── Drain socket requests ─────────────────────────────────────────────
         // Socket-originated `Open` is converted to `AppCommand::OpenFile` so

@@ -8,18 +8,14 @@
 //! function that mutates [`AppState`] in response to a command. Nothing
 //! else in the crate may construct a `ViewerRequest` or directly touch
 //! the fields that `apply` writes.
-//!
-//! Why a closed enum: plugin extensibility (an `AppCommand::Custom`
-//! variant + handler registry) is deferred to future plugin work (§7
-//! of the refactor doc). Keeping the enum closed buys exhaustive-match
-//! safety in `apply()` and `is_enabled()`.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use egui_dock::{Node, Split, SurfaceIndex};
 use egui_file_dialog::FileDialog;
 use seqforge_core::{
-    dispatch, BioOps, DispatchError, Selection, ViewId, ViewerRequest, ViewerResponse,
+    dispatch, BioOps, DispatchError, Selection, ViewId, ViewKind, ViewerRequest, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -27,134 +23,131 @@ use crate::cli_install;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
 use crate::overlay::{FindBar, GoToBar, Overlay};
-use crate::workspace::PaneId;
+use crate::tabs::Tab;
+
+/// Direction for `AppCommand::SplitPane`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDirection {
+    Horizontal,
+    Vertical,
+}
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
-/// `Some(tx)` for socket-originated commands (the CLI client awaits
-/// the response over JSON-RPC).
+/// `Some(tx)` for socket-originated commands.
 pub type PendingCommand = (
     AppCommand,
     Option<mpsc::SyncSender<Result<ViewerResponse, DispatchError>>>,
 );
 
-/// Every user-, agent-, or code-initiated action. Closed enum.
-///
-/// `Viewer(ViewerRequest)` wraps the existing `seqforge-core` request
-/// type so the JSON-RPC wire format and `dispatch()` path are
-/// unchanged. GUI-only commands live alongside as explicit variants.
+/// Every user-, agent-, or code-initiated action.
 #[derive(Debug, Clone)]
 pub enum AppCommand {
     // ── File / document ──────────────────────────────────────────────
-    /// Open the native file-picker dialog.
     PromptOpenFile,
-    /// Open a specific file by path (recent files, drag-and-drop,
-    /// dialog completion all funnel through this).
     OpenFile(PathBuf),
-    /// Clear the recent-files list.
     ClearRecent,
-    /// Close the active view in the active pane. Cmd+W. When the
-    /// closed view was the last reference to its buffer, the buffer is
-    /// also dropped and a `DocClosed` event fires.
+    /// Close the active view. ⌘W. Routes through `CloseTab` for the
+    /// active view id.
     CloseDoc,
 
-    // ── Tabs (multi-view within a pane) ──────────────────────────────
-    /// Switch a pane's active view to the named one. No-op if already
-    /// active. Click on a tab strip entry, agent targeting, drag-reorder
-    /// commit all route through here.
-    SwitchTab { pane: PaneId, view: ViewId },
-    /// Close a specific view in a specific pane. Generalises `CloseDoc`
-    /// for the case where the user middle-clicks / X-clicks a non-active
-    /// tab or an agent targets one by id.
-    CloseTab { pane: PaneId, view: ViewId },
-    /// Cycle to the next tab in the active pane. Cmd+Shift+].
+    // ── Tabs ─────────────────────────────────────────────────────────
+    /// Make `view` the focused view (the dock activates its tab, the
+    /// workspace updates `active_view`, focus moves to `View(view)`).
+    SwitchTab { view: ViewId },
+    /// Close a specific view: remove it from the workspace, remove its
+    /// dock tab, drop the buffer if it was the last reference.
+    CloseTab { view: ViewId },
+    /// Cycle to the next view tab in the dock's traversal order. ⌘⇧].
     NextTab,
-    /// Cycle to the previous tab in the active pane. Cmd+Shift+[.
+    /// Cycle to the previous view tab. ⌘⇧[.
     PrevTab,
 
     // ── Overlays ─────────────────────────────────────────────────────
-    /// Open the inline Find bar.
     OpenFind,
-    /// Open the inline GoTo bar.
     OpenGoTo,
-    /// Pop the topmost overlay from [`AppState::overlays`].
     DismissOverlay,
-    /// Bar submission: run a search.
     SubmitFind { pattern: String, mismatches: u8 },
-    /// Bar submission: jump to a 1-based position.
     SubmitGoTo { position: usize },
-    /// Acknowledge the CLI-install result window.
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
-    /// Explicit focus move (Stage 4 keymap and programmatic focus
-    /// transfers route through this).
     FocusPane(FocusScope),
-    /// Reset the dock layout to defaults.
+    /// Focus the Nth viewer tab (1-based, dock traversal order).
+    /// `Cmd+1`..`Cmd+9`. No-op if out of range.
+    FocusPaneByIndex(usize),
+    /// Split the dock leaf hosting the active view; clone the active
+    /// view's buffer into a new view in the new leaf. Side-by-side
+    /// comparison in one keypress. ⌘\ (horizontal).
+    SplitPane { direction: SplitDirection },
     ResetLayout,
 
-    // ── Selection (user-driven, click/drag) ──────────────────────────
-    /// Set the cursor / range selection. `None` clears it. Issued by the
-    /// viewer widget for every click / drag / shift-extend so the
-    /// resulting mutation goes through the single `apply` site and
-    /// `AppEvent::SelectionChanged` fires from one place.
+    // ── Selection ────────────────────────────────────────────────────
     SetSelection(Option<Selection>),
-    /// Set (or clear with `None`) the feature-bar highlight. Independent
-    /// of `SetSelection`; clicks that select an annotation push both.
     SelectFeature(Option<usize>),
 
     // ── Tools ────────────────────────────────────────────────────────
-    /// Symlink the bundled CLI into PATH.
     InstallCli,
 
     // ── Pass-through ─────────────────────────────────────────────────
-    /// Wrap a raw `ViewerRequest` — used by the socket consumer and by
-    /// any future caller that wants to drive `dispatch()` directly.
     Viewer(ViewerRequest),
 }
 
 /// Predicate: is this command currently runnable?
-///
-/// Used by:
-/// - menu rendering to grey unavailable items,
-/// - the keymap dispatcher (Stage 4) to gate `consume_key`,
-/// - future agent reject paths to return a clear error.
 pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
     use AppCommand::*;
     match cmd {
-        OpenFind | OpenGoTo | SubmitFind { .. } | SubmitGoTo { .. } | CloseDoc => {
-            state.workspace.active_view().is_some()
-        }
-        // Tab cycling requires ≥2 tabs in the active pane.
-        NextTab | PrevTab => state
-            .workspace
-            .active_pane()
-            .map(|p| p.views.len() >= 2)
-            .unwrap_or(false),
-        // By-id variants: enablement decided by the resolver inside
-        // `apply` (returns ViewNotFound if the target's gone).
+        OpenFind | OpenGoTo | SubmitFind { .. } | SubmitGoTo { .. } | CloseDoc
+        | SplitPane { .. } => state.workspace.active_view().is_some(),
+        // Cycling requires ≥2 view tabs in the dock.
+        NextTab | PrevTab => count_view_tabs(state) >= 2,
         SwitchTab { .. } | CloseTab { .. } => true,
-        // Pass-through: the underlying dispatcher enforces preconditions.
         Viewer(_) => true,
-        // Selection commands only meaningful with a doc open, but harmless
-        // as no-ops otherwise — keep them enabled so the viewer doesn't
-        // need to ask before enqueuing.
         SetSelection(_) | SelectFeature(_) => true,
-        // Universally available.
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
-        | FocusPane(_) | ResetLayout | InstallCli => true,
+        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli => true,
     }
 }
 
-/// Read the active view's selection. Used by `emit_selection_diff` and
-/// by command arms that need a before-snapshot.
+fn count_view_tabs(state: &AppState) -> usize {
+    let mut n = 0;
+    for surface in state.dock_state.iter_surfaces() {
+        for node in surface.iter_nodes() {
+            if let Some(tabs) = node.tabs() {
+                for t in tabs {
+                    if matches!(t, Tab::View(_)) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Walk every view tab in the dock in traversal order. Used by
+/// `FocusPaneByIndex`, `NextTab`/`PrevTab`, and any code that needs a
+/// stable ordering over view tabs.
+fn view_tab_order(state: &AppState) -> Vec<ViewId> {
+    let mut out = Vec::new();
+    for surface in state.dock_state.iter_surfaces() {
+        for node in surface.iter_nodes() {
+            if let Some(tabs) = node.tabs() {
+                for t in tabs {
+                    if let Tab::View(vid) = t {
+                        out.push(*vid);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn active_selection(state: &AppState) -> Option<Selection> {
     state.workspace.active_view().and_then(|v| v.selection)
 }
 
-/// Snapshot helper: emits `SelectionChanged` iff the active view's
-/// selection differs from `before`. Pulled out so every dispatching
-/// variant has the same diffing contract.
 fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
     let after = active_selection(state);
     if after != before {
@@ -162,13 +155,133 @@ fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
     }
 }
 
-/// Shared apply path for both menu-driven `OpenFile` and socket-driven
-/// `Viewer(ViewerRequest::Open { path })` — they should be observably
-/// indistinguishable from event subscribers' perspective.
-///
-/// If a view for this path already exists somewhere in the workspace,
-/// switch to it instead of opening a duplicate. This matches the
-/// SnapGene / VSCode "switch to existing tab on re-open" convention.
+/// Snapshot focus on empty → non-empty overlay transitions. Call
+/// *before* pushing any overlay. Idempotent within a single non-empty
+/// run: while one overlay is open, pushing a second doesn't overwrite
+/// the original snapshot.
+fn snapshot_focus_for_overlay(state: &mut AppState) {
+    if state.overlays.is_empty() {
+        state.focus_before_overlay = Some(state.focus.scope);
+    }
+}
+
+/// Restore focus on non-empty → empty overlay transitions. Call
+/// *after* popping. Only restores when the stack is now empty, so
+/// stacked overlays don't snap focus around as each one pops.
+fn restore_focus_after_overlay(state: &mut AppState) {
+    if !state.overlays.is_empty() {
+        return;
+    }
+    if let Some(scope) = state.focus_before_overlay.take() {
+        if state.focus.scope != scope {
+            // Mirror viewer-scope restores into workspace.active_view
+            // so subsequent commands address the right view.
+            if let FocusScope::View(vid) = scope {
+                state.workspace.focus_view(vid);
+            }
+            state.focus.set_scope(scope);
+            state.events.emit(AppEvent::FocusChanged(scope));
+        }
+    }
+}
+
+/// Ensure exactly one `Tab::Welcome` exists iff zero `Tab::View(_)`
+/// exist. Called after every open/close so the central dock area
+/// never becomes an empty void.
+fn ensure_welcome_invariant(state: &mut AppState) {
+    let mut view_count = 0usize;
+    let mut welcome_locations: Vec<(SurfaceIndex, egui_dock::NodeIndex, egui_dock::TabIndex)> =
+        Vec::new();
+    for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
+        let si = SurfaceIndex(s_idx);
+        for (n_idx, node) in surface.iter_nodes().enumerate() {
+            let ni = egui_dock::NodeIndex(n_idx);
+            if let Some(tabs) = node.tabs() {
+                for (t_idx, tab) in tabs.iter().enumerate() {
+                    match tab {
+                        Tab::View(_) => view_count += 1,
+                        Tab::Welcome => welcome_locations.push((si, ni, egui_dock::TabIndex(t_idx))),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if view_count > 0 {
+        // Remove every Welcome tab. Process in reverse so indices stay valid.
+        for (si, ni, ti) in welcome_locations.into_iter().rev() {
+            let _ = state.dock_state.remove_tab((si, ni, ti));
+        }
+    } else if welcome_locations.is_empty() {
+        // No views, no Welcome → drop one in.
+        state.dock_state.push_to_focused_leaf(Tab::Welcome);
+    }
+}
+
+/// Push a new `Tab::View(view_id)` into the dock. Targeting rules
+/// (in order):
+///   1. Same leaf as the currently active view (so opens chain into
+///      the user's current pane).
+///   2. Any leaf already holding a `Tab::View(_)` or `Tab::Welcome`
+///      (never push into Browser / Terminal leaves).
+///   3. As a last resort, push to the focused leaf — only reached if
+///      the user has somehow eliminated every viewer leaf.
+fn place_view_tab(state: &mut AppState, view_id: ViewId) {
+    // (1) Active view's leaf.
+    if let Some(active_vid) = state.workspace.active_view {
+        if active_vid != view_id {
+            if let Some((si, ni, _)) =
+                state.dock_state.find_tab(&Tab::View(active_vid))
+            {
+                state.dock_state[si][ni].append_tab(Tab::View(view_id));
+                return;
+            }
+        }
+    }
+
+    // (2) Any viewer-bearing leaf.
+    let viewer_leaf = {
+        let mut found = None;
+        for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
+            for (n_idx, node) in surface.iter_nodes().enumerate() {
+                if let Some(tabs) = node.tabs() {
+                    if tabs
+                        .iter()
+                        .any(|t| matches!(t, Tab::View(_) | Tab::Welcome))
+                    {
+                        found = Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
+                        break;
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found
+    };
+
+    if let Some((si, ni)) = viewer_leaf {
+        state.dock_state[si][ni].append_tab(Tab::View(view_id));
+    } else {
+        // (3) Last resort — should not normally occur because the
+        // Welcome invariant keeps at least one viewer-bearing leaf
+        // alive whenever the workspace has zero views.
+        state.dock_state.push_to_focused_leaf(Tab::View(view_id));
+    }
+}
+
+/// Activate `view_id`'s tab in the dock: locate the tab and call
+/// `set_active_tab`. No-op if the tab isn't found.
+fn dock_activate_view(state: &mut AppState, view_id: ViewId) {
+    if let Some((si, ni, ti)) = state.dock_state.find_tab(&Tab::View(view_id)) {
+        state.dock_state.set_active_tab((si, ni, ti));
+    }
+}
+
+/// Shared apply path for menu-driven `OpenFile` and socket-driven
+/// `Viewer(ViewerRequest::Open { path })`.
 fn apply_open_file<B: BioOps>(
     state: &mut AppState,
     bio: &B,
@@ -179,30 +292,25 @@ fn apply_open_file<B: BioOps>(
     state.recent_files.truncate(crate::app::MAX_RECENT);
 
     // Already open? Switch to its tab.
-    if let Some((pane_id, view_id)) = find_open_view_for(state, &path) {
-        let pane = state
-            .workspace
-            .panes
-            .get_mut(&pane_id)
-            .expect("located");
-        if pane.switch_to(view_id) {
-            state.events.emit(AppEvent::TabSwitched { pane: pane_id, view: view_id });
-            state.seq_view.reset();
-        }
+    if let Some(view_id) = state.workspace.find_view_for_path(&path) {
+        state.workspace.focus_view(view_id);
+        dock_activate_view(state, view_id);
+        state.focus.set_scope(FocusScope::View(view_id));
+        state.events.emit(AppEvent::TabSwitched { view: view_id });
         return Ok(Some(ViewerResponse::Ok));
     }
 
-    state.seq_view.reset();
     let sel_before = active_selection(state);
-
-    // Workspace::open_path loads the buffer (via BioOps) and attaches a
-    // new View in the active pane. Errors bubble up as BioError.
     let view_id = state
         .workspace
         .open_path(&path, bio)
         .map_err(DispatchError::BioError)?;
 
-    // Emit DocOpened with the new view's buffer summary.
+    place_view_tab(state, view_id);
+    ensure_welcome_invariant(state);
+    dock_activate_view(state, view_id);
+    state.focus.set_scope(FocusScope::View(view_id));
+
     if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
         state
             .workspace
@@ -217,99 +325,113 @@ fn apply_open_file<B: BioOps>(
     Ok(Some(ViewerResponse::Ok))
 }
 
-/// Search every pane for an existing view whose buffer's source path
-/// matches `path`. Used to dedupe open-of-already-open.
-fn find_open_view_for(state: &AppState, path: &std::path::Path) -> Option<(PaneId, ViewId)> {
-    for (&pane_id, pane) in &state.workspace.panes {
-        for view in &pane.views {
-            let arc = state.workspace.buffers.get(view.buffer_id)?;
-            let buf = arc.read().ok()?;
-            if buf.source_path.as_deref() == Some(path) {
-                return Some((pane_id, view.id));
-            }
-        }
-    }
-    None
-}
-
-/// Shared apply path for `CloseDoc` (menu / hotkey, active tab) and
-/// `Viewer(ViewerRequest::Close)` (socket).
 fn apply_close_doc(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    // Resolve the (pane, view) the close will affect, before mutation.
-    let (pane_id, view_id) = {
-        let pane = state.workspace.active_pane().ok_or(DispatchError::NoActiveView)?;
-        let view = pane.active_view().ok_or(DispatchError::NoActiveView)?;
-        (pane.id, view.id)
-    };
-    apply_close_view(state, pane_id, view_id)
+    let view_id = state
+        .workspace
+        .active_view()
+        .ok_or(DispatchError::NoActiveView)?
+        .id;
+    apply_close_view(state, view_id)
 }
 
-/// Shared close-by-id path. Used by `CloseTab { pane, view }` and by
-/// `apply_close_doc` (which resolves the active tab first). Emits
-/// `TabClosed` always; emits `DocClosed` when the closed view held the
-/// last reference to its buffer.
 fn apply_close_view(
     state: &mut AppState,
-    pane_id: PaneId,
     view_id: ViewId,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let sel_before = active_selection(state);
 
-    // Determine in advance whether this is the last view of the buffer
-    // (we need this before close_view drops it).
     let buffer_id = state
         .workspace
         .view(view_id)
         .ok_or(DispatchError::ViewNotFound(view_id))?
         .buffer_id;
-    let last_ref = state.workspace.panes.values().flat_map(|p| p.views.iter())
+    let last_ref = state
+        .workspace
+        .views
+        .values()
         .filter(|v| v.buffer_id == buffer_id)
         .count()
         == 1;
 
+    // Remove the dock tab first (if present), then the workspace view.
+    if let Some((si, ni, ti)) = state.dock_state.find_tab(&Tab::View(view_id)) {
+        let _ = state.dock_state.remove_tab((si, ni, ti));
+    }
     state.workspace.close_view(view_id)?;
+    ensure_welcome_invariant(state);
 
-    state.events.emit(AppEvent::TabClosed { pane: pane_id, view: view_id });
+    state.events.emit(AppEvent::TabClosed { view: view_id });
     if last_ref {
         state.events.emit(AppEvent::DocClosed);
     }
     emit_selection_diff(state, sel_before);
-    state.seq_view.reset();
     Ok(Some(ViewerResponse::Ok))
 }
 
-/// Cycle the active pane's active tab by `delta`. Wraps around in both
-/// directions. No-op if there are fewer than two views.
+/// Split the dock leaf hosting the active view. The new leaf gets a
+/// fresh `View` onto the same buffer — side-by-side comparison in one
+/// keypress (Zed convention).
+fn apply_split_pane(
+    state: &mut AppState,
+    direction: SplitDirection,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let active_vid = state
+        .workspace
+        .active_view()
+        .ok_or(DispatchError::NoActiveView)?
+        .id;
+    let buffer_id = state.workspace.view(active_vid).expect("located").buffer_id;
+
+    let (surface, node, _) = state
+        .dock_state
+        .find_tab(&Tab::View(active_vid))
+        .ok_or(DispatchError::NoActiveView)?;
+
+    // Allocate a sibling view onto the same buffer, then split the
+    // leaf with the new view as its sole tab.
+    let new_vid = state.workspace.add_view(buffer_id, ViewKind::TextView);
+    let split = match direction {
+        SplitDirection::Horizontal => Split::Right,
+        SplitDirection::Vertical => Split::Below,
+    };
+    let _ = state.dock_state.split(
+        (surface, node),
+        split,
+        0.5,
+        Node::leaf(Tab::View(new_vid)),
+    );
+
+    state.workspace.focus_view(new_vid);
+    let scope = FocusScope::View(new_vid);
+    state.focus.set_scope(scope);
+    state.events.emit(AppEvent::FocusChanged(scope));
+    Ok(None)
+}
+
+/// Cycle the focused view by `delta` (wrapping) through the dock's
+/// traversal order over view tabs.
 fn apply_cycle_tab(
     state: &mut AppState,
     delta: isize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let pane_id = state
-        .workspace
-        .active_pane
-        .ok_or(DispatchError::NoActiveView)?;
-    let pane = state
-        .workspace
-        .panes
-        .get_mut(&pane_id)
-        .expect("active pane id always exists");
-    let n = pane.views.len();
-    if n < 2 {
+    let order = view_tab_order(state);
+    if order.len() < 2 {
         return Ok(None);
     }
-    let new_idx = ((pane.active as isize + delta).rem_euclid(n as isize)) as usize;
-    pane.active = new_idx;
-    let view_id = pane.views[new_idx].id;
-    state.events.emit(AppEvent::TabSwitched { pane: pane_id, view: view_id });
-    state.seq_view.reset();
+    let current_vid = state.workspace.active_view.unwrap_or(order[0]);
+    let cur_idx = order.iter().position(|v| *v == current_vid).unwrap_or(0);
+    let n = order.len();
+    let new_idx = ((cur_idx as isize + delta).rem_euclid(n as isize)) as usize;
+    let new_vid = order[new_idx];
+    state.workspace.focus_view(new_vid);
+    dock_activate_view(state, new_vid);
+    state.focus.set_scope(FocusScope::View(new_vid));
+    state.events.emit(AppEvent::TabSwitched { view: new_vid });
     Ok(None)
 }
 
-/// Dispatch a view-scoped `ViewerRequest` against the active view +
-/// its buffer. Flattens the `with_active_buffer` -> dispatch nesting so
-/// callers get a single `Result<ViewerResponse, DispatchError>`.
 fn dispatch_active<B: BioOps>(
     state: &mut AppState,
     bio: &B,
@@ -321,13 +443,6 @@ fn dispatch_active<B: BioOps>(
         .and_then(|inner| inner)
 }
 
-/// The single mutation site. Every command's effect on `AppState` is
-/// here; nowhere else in the app may construct a `ViewerRequest` or
-/// directly mutate the same fields.
-///
-/// Returns the `ViewerResponse` for commands that drive
-/// `seqforge_core::dispatch` (so the socket caller can be notified);
-/// `Ok(None)` for purely GUI-side commands.
 pub fn apply<B: BioOps>(
     cmd: AppCommand,
     state: &mut AppState,
@@ -338,6 +453,7 @@ pub fn apply<B: BioOps>(
         PromptOpenFile => {
             let mut dialog = FileDialog::new();
             dialog.pick_file();
+            snapshot_focus_for_overlay(state);
             if let Some(tag) = state
                 .overlays
                 .push_unique(Overlay::FileDialog(Box::new(dialog)))
@@ -356,32 +472,31 @@ pub fn apply<B: BioOps>(
 
         CloseDoc => apply_close_doc(state),
 
-        SwitchTab { pane, view } => {
-            let pane_ref = state
-                .workspace
-                .panes
-                .get_mut(&pane)
-                .ok_or(DispatchError::ViewNotFound(view))?;
-            if !pane_ref.switch_to(view) {
+        SwitchTab { view } => {
+            if state.workspace.view(view).is_none() {
                 return Err(DispatchError::ViewNotFound(view));
             }
-            state.events.emit(AppEvent::TabSwitched { pane, view });
-            // Switching to a different doc invalidates the viewer's
-            // per-buffer caches; reset proactively. (The viewer would
-            // also rebuild on its own via the version-keyed check, but
-            // resetting drops feature stacks for the previous doc
-            // immediately.)
-            state.seq_view.reset();
+            state.workspace.focus_view(view);
+            dock_activate_view(state, view);
+            state.focus.set_scope(FocusScope::View(view));
+            state.events.emit(AppEvent::TabSwitched { view });
             Ok(None)
         }
 
-        CloseTab { pane, view } => apply_close_view(state, pane, view),
+        CloseTab { view } => apply_close_view(state, view),
 
         NextTab => apply_cycle_tab(state, 1),
 
         PrevTab => apply_cycle_tab(state, -1),
 
         OpenFind => {
+            snapshot_focus_for_overlay(state);
+            // Opening Find pulls focus to the active viewer so the bar
+            // appears in the pane that will receive the search. If
+            // focus was already on a viewer pane, this is a no-op.
+            if let Some(vid) = state.workspace.active_view {
+                state.focus.set_scope(FocusScope::View(vid));
+            }
             if let Some(tag) = state
                 .overlays
                 .push_unique(Overlay::FindBar(FindBar::default()))
@@ -392,6 +507,10 @@ pub fn apply<B: BioOps>(
         }
 
         OpenGoTo => {
+            snapshot_focus_for_overlay(state);
+            if let Some(vid) = state.workspace.active_view {
+                state.focus.set_scope(FocusScope::View(vid));
+            }
             if let Some(tag) = state
                 .overlays
                 .push_unique(Overlay::GoToBar(GoToBar::default()))
@@ -405,6 +524,7 @@ pub fn apply<B: BioOps>(
             if let Some(tag) = state.overlays.pop() {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
+            restore_focus_after_overlay(state);
             Ok(None)
         }
 
@@ -418,6 +538,7 @@ pub fn apply<B: BioOps>(
                 state.events.emit(AppEvent::SearchCompleted { hits: *count });
             }
             emit_selection_diff(state, sel_before);
+            restore_focus_after_overlay(state);
             Ok(Some(resp))
         }
 
@@ -428,6 +549,7 @@ pub fn apply<B: BioOps>(
             let sel_before = active_selection(state);
             let resp = dispatch_active(state, bio, ViewerRequest::GoTo { position })?;
             emit_selection_diff(state, sel_before);
+            restore_focus_after_overlay(state);
             Ok(Some(resp))
         }
 
@@ -435,16 +557,36 @@ pub fn apply<B: BioOps>(
             if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_CLI_STATUS) {
                 state.events.emit(AppEvent::OverlayPopped(tag));
             }
+            restore_focus_after_overlay(state);
             Ok(None)
         }
 
         FocusPane(scope) => {
+            if let FocusScope::View(vid) = scope {
+                state.workspace.focus_view(vid);
+            }
             if state.focus.scope != scope {
                 state.focus.set_scope(scope);
                 state.events.emit(AppEvent::FocusChanged(scope));
             }
             Ok(None)
         }
+
+        FocusPaneByIndex(n) => {
+            let order = view_tab_order(state);
+            if let Some(vid) = order.get(n.saturating_sub(1)).copied() {
+                state.workspace.focus_view(vid);
+                dock_activate_view(state, vid);
+                let scope = FocusScope::View(vid);
+                if state.focus.scope != scope {
+                    state.focus.set_scope(scope);
+                    state.events.emit(AppEvent::FocusChanged(scope));
+                }
+            }
+            Ok(None)
+        }
+
+        SplitPane { direction } => apply_split_pane(state, direction),
 
         ResetLayout => {
             state.dock_state = AppState::default().dock_state;
@@ -476,33 +618,26 @@ pub fn apply<B: BioOps>(
                 ),
                 Err(e) => format!("✗ Install failed: {e}"),
             };
-            // Replace any prior CliStatus (a previous install attempt
-            // may still be showing) so the user sees the latest result.
             state.overlays.pop_kind(Overlay::TAG_CLI_STATUS);
+            snapshot_focus_for_overlay(state);
             if let Some(tag) = state.overlays.push_unique(Overlay::CliStatus(msg)) {
                 state.events.emit(AppEvent::OverlayPushed(tag));
             }
             Ok(None)
         }
 
-        Viewer(req) => {
-            // Pass-through path: socket-originated commands. Open/Close
-            // route through the same shared helpers as menu/hotkey so
-            // event emission is identical regardless of origin.
-            match req {
-                ViewerRequest::Open { path } => apply_open_file(state, bio, path),
-                ViewerRequest::Close => apply_close_doc(state),
-                other => {
-                    let sel_before = active_selection(state);
-                    let resp = dispatch_active(state, bio, other)?;
-                    if let ViewerResponse::SearchResults { count, .. } = &resp {
-                        state.events.emit(AppEvent::SearchCompleted { hits: *count });
-                    }
-                    emit_selection_diff(state, sel_before);
-                    Ok(Some(resp))
+        Viewer(req) => match req {
+            ViewerRequest::Open { path } => apply_open_file(state, bio, path),
+            ViewerRequest::Close => apply_close_doc(state),
+            other => {
+                let sel_before = active_selection(state);
+                let resp = dispatch_active(state, bio, other)?;
+                if let ViewerResponse::SearchResults { count, .. } = &resp {
+                    state.events.emit(AppEvent::SearchCompleted { hits: *count });
                 }
+                emit_selection_diff(state, sel_before);
+                Ok(Some(resp))
             }
-        }
+        },
     }
 }
-

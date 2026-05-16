@@ -26,7 +26,7 @@
 use egui::{Key, Modifiers};
 
 use crate::app::AppState;
-use crate::command::{self, AppCommand};
+use crate::command::{self, AppCommand, SplitDirection};
 use crate::focus::{FocusState, KeyContext};
 use crate::overlay::Overlay;
 
@@ -91,6 +91,61 @@ pub const KEYMAP: &[Binding] = &[
         chord: (Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::OpenBracket),
         when_context: &[KeyContext::WORKSPACE],
         command: || AppCommand::PrevTab,
+    },
+    // ── Pane split / nav (Stage 2.5c) ──────────────────────────────
+    // ⌘\ splits the active viewer pane horizontally (Zed convention).
+    // ⌘1..⌘9 focuses the Nth viewer pane in pane_order. Out-of-range
+    // indices are a no-op (the chord is still consumed so it doesn't
+    // leak into the terminal).
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Backslash),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::SplitPane { direction: SplitDirection::Horizontal },
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num1),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(1),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num2),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(2),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num3),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(3),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num4),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(4),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num5),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(5),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num6),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(6),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num7),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(7),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num8),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(8),
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Num9),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::FocusPaneByIndex(9),
     },
     // ── Overlay-scoped ──────────────────────────────────────────────
     // Escape dismisses the topmost overlay regardless of which widget

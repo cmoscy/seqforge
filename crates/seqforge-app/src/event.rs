@@ -18,7 +18,6 @@ use std::sync::mpsc;
 use seqforge_core::{Selection, ViewId};
 
 use crate::focus::FocusScope;
-use crate::workspace::PaneId;
 
 /// Soft cap on the in-memory event log. Older entries are dropped.
 pub const EVENT_LOG_CAP: usize = 100;
@@ -41,11 +40,11 @@ pub enum AppEvent {
     SelectionChanged { selection: Option<Selection> },
     SearchCompleted { hits: usize },
     FocusChanged(FocusScope),
-    /// Active tab changed in a pane (`SwitchTab` / `NextTab` / `PrevTab`).
-    TabSwitched { pane: PaneId, view: ViewId },
+    /// Active tab changed (`SwitchTab` / `NextTab` / `PrevTab`).
+    TabSwitched { view: ViewId },
     /// A tab was closed. When this is the last view referencing its
     /// buffer, `DocClosed` is also emitted (issued by `apply_close`).
-    TabClosed { pane: PaneId, view: ViewId },
+    TabClosed { view: ViewId },
     /// An overlay (Find bar, GoTo bar, CLI status, future modals)
     /// became active. Tag is a `&'static str` identifier; Stage 5
     /// formalises these as named constants on `OverlayStack`.
@@ -72,8 +71,8 @@ impl AppEvent {
             AppEvent::SelectionChanged { selection: None } => "selection cleared".to_owned(),
             AppEvent::SearchCompleted { hits } => format!("found {hits}"),
             AppEvent::FocusChanged(scope) => format!("focus → {scope:?}"),
-            AppEvent::TabSwitched { view, .. } => format!("switched → {view}"),
-            AppEvent::TabClosed { view, .. } => format!("closed tab {view}"),
+            AppEvent::TabSwitched { view } => format!("switched → {view}"),
+            AppEvent::TabClosed { view } => format!("closed tab {view}"),
             AppEvent::OverlayPushed(tag) => format!("overlay+ {tag}"),
             AppEvent::OverlayPopped(tag) => format!("overlay− {tag}"),
         }

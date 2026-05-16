@@ -1,24 +1,32 @@
 use serde::{Deserialize, Serialize};
+use seqforge_core::ViewId;
 
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
 use crate::focus::{FocusScope, FocusState};
 use crate::overlay::{self, OverlayStack};
 use crate::terminal::TerminalPane;
-use crate::viewer::SequenceView;
 use crate::workspace::Workspace;
 
+/// A leaf in the egui_dock tree.
+///
+/// After the Stage 2.5c follow-up flatten, viewer tabs are addressed
+/// by `ViewId` directly — egui_dock's native tab bar handles
+/// switching, drag-rearrange, and split-across-leaves. `Welcome` is a
+/// placeholder shown when no view is open; it gets replaced by the
+/// first `View(_)` tab and re-introduced when the last view closes,
+/// so the central dock area never becomes an empty void.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
     FileBrowser,
-    Viewer,
     Terminal,
+    Welcome,
+    View(ViewId),
 }
 
 pub struct TabViewer<'a> {
     pub browser: &'a mut BrowserState,
     pub workspace: &'a mut Workspace,
-    pub seq_view: &'a mut SequenceView,
     pub pending_commands: &'a mut Vec<PendingCommand>,
     pub terminal: &'a mut Option<TerminalPane>,
     pub overlays: &'a mut OverlayStack,
@@ -31,29 +39,45 @@ impl egui_dock::TabViewer for TabViewer<'_> {
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         match tab {
             Tab::FileBrowser => "Files".into(),
-            Tab::Viewer => {
-                let name = self.workspace.active_view().and_then(|v| {
+            Tab::Terminal => "Terminal".into(),
+            Tab::Welcome => "Welcome".into(),
+            Tab::View(vid) => {
+                let name = self.workspace.view(*vid).and_then(|v| {
                     let arc = self.workspace.buffers.get(v.buffer_id)?;
                     let buf = arc.read().ok()?;
                     Some(buf.name.clone())
                 });
-                match name {
-                    Some(n) => format!("Viewer — {n}").into(),
-                    None => "Sequence Viewer".into(),
-                }
+                name.unwrap_or_else(|| "Untitled".to_string()).into()
             }
-            Tab::Terminal => "Terminal".into(),
         }
     }
 
+    /// View tabs are user-closeable; everything else is structural.
+    fn closeable(&mut self, tab: &mut Tab) -> bool {
+        matches!(tab, Tab::View(_))
+    }
+
+    /// Route the dock's × button through our command system so close
+    /// behaviour stays identical to ⌘W (event emission, buffer
+    /// cleanup, focus refocus). Returning false tells egui_dock not
+    /// to remove the tab from the tree — `CloseTab` does it via
+    /// `dock_state.remove_tab` inside `apply()`.
+    fn on_close(&mut self, tab: &mut Tab) -> bool {
+        if let Tab::View(vid) = tab {
+            self.pending_commands
+                .push((AppCommand::CloseTab { view: *vid }, None));
+            return false;
+        }
+        true
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
-        // Snapshot the pane rect before rendering so click-detection covers
-        // the full pane area, not just whatever sub-rect content occupies.
         let pane_rect = ui.max_rect();
         let pane_scope = match tab {
             Tab::FileBrowser => FocusScope::Browser,
-            Tab::Viewer => FocusScope::Viewer,
             Tab::Terminal => FocusScope::Terminal,
+            Tab::Welcome => FocusScope::View(ViewId(0)),
+            Tab::View(vid) => FocusScope::View(*vid),
         };
 
         match tab {
@@ -62,42 +86,66 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     self.pending_commands.push((AppCommand::OpenFile(path), None));
                 }
             }
-            Tab::Viewer => {
-                // Tab strip — one row per open view in the active pane.
-                render_tab_strip(self.workspace, self.pending_commands, ui);
-
-                // Inline Find / GoTo bar at the top of the viewer pane.
+            Tab::Welcome => {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
                 }
-                // Resolve the active view + lock its buffer for the
-                // duration of the paint. No active view ⇒ placeholder.
-                //
-                // Split `self` into disjoint borrows so the closure can
-                // capture `seq_view` and `pending_commands` while
-                // `workspace` provides the locking helper.
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(20.0);
+                        ui.heading("SeqForge");
+                        ui.add_space(8.0);
+                        ui.label("No file open.");
+                        ui.label("Double-click a .gb or .fasta file in the browser,");
+                        ui.label("or press ⌘O to open one.");
+                    });
+                });
+            }
+            Tab::View(vid) => {
+                let view_id = *vid;
+                // The Find / GoTo bar anchors to the workspace's active
+                // view — render it only in that pane so it's
+                // unambiguous which view the bar will operate on. When
+                // focus is on Browser / Terminal the bar still shows
+                // in the active viewer pane (matches what the command
+                // will actually act on).
+                let bar_target = self.workspace.active_view == Some(view_id);
+                if bar_target {
+                    if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
+                        self.pending_commands.push((cmd, None));
+                    }
+                }
                 let TabViewer {
                     workspace,
-                    seq_view,
                     pending_commands,
                     ..
                 } = self;
-                let rendered = workspace.with_active_buffer(|view, buf, ann| {
+                let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
                     seq_view.show(ui, view, buf, ann, pending_commands);
                 });
                 if rendered.is_err() {
                     ui.centered_and_justified(|ui| {
-                        ui.label(
-                            "No file open.\nDouble-click a .gb or .fasta file in the browser.",
-                        );
+                        ui.label("(view closed)");
                     });
+                }
+
+                // Focused-pane indicator. Paint a thin accent stroke
+                // around this pane when it owns keyboard focus, so the
+                // user can tell at a glance which split is active in
+                // multi-pane layouts. Drawn last so it sits above the
+                // viewer content.
+                if self.focus.scope == FocusScope::View(view_id) {
+                    let accent = ui.visuals().selection.stroke.color;
+                    ui.painter().rect_stroke(
+                        pane_rect.shrink(1.0),
+                        egui::CornerRadius::ZERO,
+                        egui::Stroke::new(2.0, accent),
+                        egui::StrokeKind::Inside,
+                    );
                 }
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
-                    // Terminal yields keyboard whenever *any* overlay is
-                    // active — even a non-focus-capturing one — so Escape
-                    // and other dismiss bindings work uniformly.
                     let terminal_has_focus = self.focus.scope == FocusScope::Terminal
                         && self.overlays.is_empty();
                     term.show(ui, terminal_has_focus);
@@ -110,73 +158,15 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             },
         }
 
-        // Pane click → FocusScope. Geometry-only check; does not consume the
-        // click, so the actual clicked widget (button, text field, terminal
-        // grid) still handles it normally. Routed through AppCommand so the
-        // focus mutation goes through the same single applier as everything
-        // else.
-        if ui.rect_contains_pointer(pane_rect)
+        // Leaf click → FocusScope. Welcome doesn't enqueue a focus
+        // change (FocusScope::View(0) is a sentinel that wouldn't
+        // resolve in workspace.views); leaving focus alone is fine.
+        if !matches!(tab, Tab::Welcome)
+            && ui.rect_contains_pointer(pane_rect)
             && ui.ctx().input(|i| i.pointer.any_pressed())
             && self.focus.scope != pane_scope
         {
             self.pending_commands.push((AppCommand::FocusPane(pane_scope), None));
         }
     }
-}
-
-// ── Tab strip ───────────────────────────────────────────────────────────────
-//
-// One row of selectable labels above the viewer area. Each entry shows the
-// buffer's display name plus a small × close button. Clicks enqueue
-// `SwitchTab` / `CloseTab` commands; the applier handles them.
-//
-// Hidden when the active pane has no views (the empty-pane placeholder
-// renders below this anyway).
-
-fn render_tab_strip(
-    workspace: &Workspace,
-    pending_commands: &mut Vec<PendingCommand>,
-    ui: &mut egui::Ui,
-) {
-    let Some(pane) = workspace.active_pane() else { return };
-    if pane.views.is_empty() {
-        return;
-    }
-    let pane_id = pane.id;
-    let active_idx = pane.active;
-
-    egui::Frame::default()
-        .inner_margin(egui::Margin::symmetric(4, 2))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                for (idx, view) in pane.views.iter().enumerate() {
-                    // Cheap read lock per tab — display name only.
-                    let label = workspace
-                        .buffers
-                        .get(view.buffer_id)
-                        .and_then(|arc| arc.read().ok().map(|b| b.name.clone()))
-                        .unwrap_or_else(|| format!("{}", view.id));
-
-                    let is_active = idx == active_idx;
-                    // Label + close button as a tight pair. Active tab is
-                    // emphasised; clicking a non-active tab switches to
-                    // it; the × closes the tab regardless of active.
-                    let resp = ui.selectable_label(is_active, &label);
-                    if resp.clicked() && !is_active {
-                        pending_commands.push((
-                            AppCommand::SwitchTab { pane: pane_id, view: view.id },
-                            None,
-                        ));
-                    }
-                    if ui.small_button("×").on_hover_text("Close tab").clicked() {
-                        pending_commands.push((
-                            AppCommand::CloseTab { pane: pane_id, view: view.id },
-                            None,
-                        ));
-                    }
-                }
-            });
-        });
-    ui.separator();
 }
