@@ -892,8 +892,10 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 | Tier 2 #6–#10 — Code consolidation | 📋 | — |
 | **Stage 2.5a — Model split (Buffer / View / Workspace)** | ✅ | `3a6fd38`, `a0332bf`, `f40bd4d` |
 | **Stage 2.5b — Multi-tab within a pane** | ✅ | `5316cae` |
-| Stage 2.5c — Multi-pane split-view via egui_dock | ⏳ | — |
-| Stage 2.5d — `ViewKind` plumbing + socket protocol updates | 📋 | — |
+| **Stage 2.5c — Multi-pane split-view via egui_dock** | ✅ | (uncommitted) |
+| **Stage 2.5c follow-up — Flatten to `Tab::View(ViewId)`** | ✅ | (uncommitted) |
+| **Focus / overlay UX polish** | ✅ | (uncommitted) |
+| Stage 2.5d — `ViewKind` plumbing + socket protocol updates | 📋 | reshaped for post-flatten model |
 | Tier 3a — Buffer version counter (cache invalidation key) | 🟡 | landed as side effect of 2.5a; bump-on-edit waits for 3d |
 | Tier 3b — Rope-backed Buffer | 📋 | — |
 | Tier 3c — Anchors | 📋 | — |
@@ -901,9 +903,9 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 | Tier 4 — Nice-to-haves | 📋 | — |
 
 **At a glance:**
-- All structural prerequisites for editor work are landed except multi-pane (2.5c) and the `ViewKind` plumbing (2.5d).
-- `Buffer::version` exists and the viewer's caches key on it; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
-- 58 tests pass; clippy clean; full build green; macOS smoke-tested through Stage 2.5b.
+- All structural prerequisites for editor work are landed. The dock owns layout; the workspace is a flat `views: HashMap<ViewId, View>` + `BufferStore`. Split-view, drag-rearrange, and tab cycling are free from egui_dock.
+- `Buffer::version` exists and the viewer's per-view caches key on it; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
+- 59 tests pass; clippy clean; full build green; macOS smoke-tested through the focus/overlay polish.
 
 ---
 
@@ -1149,29 +1151,44 @@ Each stage compiles and runs; `main` stays shippable.
 - ✅ **Stage 2.5b — Multi-tab support within a pane** (`5316cae`).
   `SwitchTab { pane, view }`, `CloseTab { pane, view }`, `NextTab`, `PrevTab` commands. Tab strip widget (`tabs.rs::render_tab_strip`) above the viewer area: selectable labels + × close buttons. `Cmd+W` closes active tab; closing the last view of a buffer also drops the buffer (emits `DocClosed`). `Cmd+Shift+]` / `[` cycle tabs. Open-of-already-open dedupes via `find_open_view_for` — switches to the existing tab instead of duplicating. New events: `TabSwitched`, `TabClosed`. `AppState::workspace` marked `#[serde(skip)]` because `BufferStore` holds `Arc<RwLock<Buffer>>` that can't round-trip; `recent_files` restores the working set across restarts.
 
-- ⏳ **Stage 2.5c — Multi-pane support (split-view via egui_dock).**
-  The structural change that unlocks `linear view + circular view + text view` side-by-side, two-doc comparison, and any other multi-pane workflow. Concretely:
-  - **`DockTab::Pane(PaneId)` replaces `Tab::Viewer`** in `tabs.rs`. `egui_dock` continues to manage horizontal/vertical splits + tab drag-rearrange — we get split-view for free.
-  - **`FocusScope::Pane(PaneId)` replaces `FocusScope::Viewer`.** The geometry-only pane-click detector in `tabs.rs::ui` already emits `FocusPane`; that signature widens to carry a `PaneId`.
-  - **`SequenceView` moves from `AppState` onto `Pane`** so each pane has its own rendering cache (no thrash on focus switch).
-  - **`AppCommand::SplitPane { direction: SplitDirection }`** with a `Cmd+\` binding for horizontal split; vertical via menu. Same buffer in two panes works automatically via `BufferStore`'s existing Arc-clone behaviour.
-  - **`AppCommand::FocusPane(PaneId)`** replaces `FocusPane(FocusScope)`. The keymap's `Pane:Viewer` tag becomes `Pane:<ViewKind>` (filled in by 2.5d).
-  - **Cross-pane keyboard navigation:** `Cmd+1`..`Cmd+N` jumps to the Nth pane in `pane_order`; `Cmd+Alt+arrow` moves focus directionally. Defer the directional move to 2.5c if time-boxed.
-  - **The status bar** continues to read from `workspace.active_view()` — no change needed.
-  - **Tests** cover: open same file in split panes (shared buffer), close one pane (buffer survives), close last pane (workspace returns to single-pane default).
+- ✅ **Stage 2.5c — Multi-pane support (split-view via egui_dock).**
+  Landed in two passes. The first introduced a `Pane` workspace concept paired with `Tab::Pane(PaneId)` in the dock; the follow-up flattened it (see next bullet). Net features:
+  - `Cmd+\` splits the dock leaf hosting the active view; the split clones the active view's buffer into a new `View` in the new leaf so users get side-by-side comparison in one keystroke (Zed convention).
+  - View menu offers Split Right / Split Below.
+  - `Cmd+1`..`Cmd+9` focuses the Nth view tab in dock traversal order.
+  - egui_dock provides drag-to-rearrange and drag-to-split-edge natively.
+  - Closing the last view in a leaf no longer leaves an empty hole — a `Tab::Welcome` placeholder fills the central area whenever no `Tab::View(_)` exists.
+
+- ✅ **Stage 2.5c follow-up — Flatten to `Tab::View(ViewId)`.**
+  After 2.5c landed, the dock-level `Pane` tab and the in-pane custom tab strip were doing the same job (two tab strips per leaf). The follow-up dissolves `Pane` as a first-class workspace concept and addresses every viewer tab by `ViewId` directly. Concretely:
+  - `Pane` / `PaneId` / `pane_order` / `active_pane` removed from `Workspace`. `Workspace::views: HashMap<ViewId, View>` is now the flat source of truth for view identity.
+  - `SequenceView` render cache moved from `Pane` onto a `Workspace::seq_views: HashMap<ViewId, SequenceView>` keyed by view. Each view has an independent cache.
+  - `Tab::Pane(PaneId)` → `Tab::View(ViewId)`. `FocusScope::Pane(PaneId)` → `FocusScope::View(ViewId)`. Events lose their `pane:` field.
+  - egui_dock now owns *all* layout: which view is in which leaf, the tab order, the per-leaf active tab, drag-rearrange, split-via-drag. We render exactly one tab strip per leaf (the dock's native one).
+  - End-of-frame reconciler: `dock_state.find_active_focused()` syncs into `workspace.active_view` via a `SwitchTab` command so dock-internal tab clicks flow through the single-applier path.
+  - Dock × button routes through `TabViewer::on_close` → `AppCommand::CloseTab`, identical to ⌘W.
+  - `apply_open_file::place_view_tab` targets the active view's leaf first, falls back to any leaf with View/Welcome, then last-resort focused leaf — new opens never land in Browser/Terminal.
+  - **Persistence sanitizer**: on startup `dock_state` is loaded from disk but `workspace` is `#[serde(skip)]`, so persisted `Tab::View(_)` ids reference views that don't exist. `app.rs::sanitize_dock_after_restore` strips orphan view tabs and re-establishes the Welcome invariant before the first frame.
+
+- ✅ **Focus / overlay UX polish** (bundled with the flatten).
+  - **Find/GoTo bar anchored to the active view**: `show_inline_bar` is gated by `workspace.active_view == Some(this_view_id)` so the bar visually appears in the pane that will receive the search, regardless of which pane is rendering. `OpenFind`/`OpenGoTo` also pull focus into the active viewer before pushing the overlay.
+  - **Focused-pane outline**: a 2px accent stroke is painted around the focused view's content rect each frame. Unambiguous in split-view layouts.
+  - **Last-focused preservation**: `AppState::focus_before_overlay` snapshots `focus.scope` on empty→non-empty overlay push, restored on the corresponding pop. Wired through every overlay command. Dialog-accept (OpenFile) clears the snapshot so the new view's focus isn't overridden on completion.
 
 - 📋 **Stage 2.5d — `ViewKind` plumbing + socket protocol + background-task contract.**
-  - **`ViewKind` consumers wired in.** `View::kind` is read by `render_pane()`'s match — today only `TextView` exists, but the dispatch is in place for future `LinearView` / `CircularView` variants to land as `+1 enum variant + impl`.
-  - **Keymap `when_context` gains `Pane:TextView`** (and is ready to gain `Pane:LinearView` etc. later). Keymap bindings can target view kinds without naming specific panes.
-  - **Socket protocol gains optional `pane` and `view` params.** Default behaviour unchanged (operates on active view); explicit targeting available for agents:
+  Reshaped for the post-flatten model: only `view` targeting (no `pane` — the concept is gone).
+  - **`ViewKind` consumers wired in.** `View::kind` is read by the renderer dispatch — today only `TextView` exists, but the match is in place for future `LinearView` / `CircularView` variants to land as `+1 enum variant + impl`.
+  - **Keymap `when_context` gains `Pane:TextView`** (and is ready to gain `Pane:LinearView` etc. later). Keymap bindings can target view kinds; the current `Pane:Viewer` catch-all stays as the workspace-level tag for cmd-chord scoping.
+  - **Socket protocol gains an optional `view` param.** Default behaviour unchanged (operates on active view); explicit targeting available for agents:
     ```json
     {"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":100,"view":17}}
     ```
-    `docs/socket-protocol.md` written: method list, params shape, response variants, standard error codes, error semantics for `ViewNotFound`, threat model documented.
+    `docs/socket-protocol.md` written: method list, params shape, response variants, standard error codes, error semantics for `ViewNotFound`, threat model documented. **Pane targeting is intentionally omitted** — panes are a layout concept owned by `dock_state`, not addressable identity.
   - **Background-task contract documented** in `docs/architecture.md` (or appended here): write locks only inside `apply()` on the UI thread; background work read-locks or takes `BufferSnapshot` and posts results back as `AppCommand::TaskResult(...)`. No background tasks exist yet; documenting the contract now keeps the door open for Tier 4.
   - **`BioOps::load` widening** (optional). Today the `BufferStore::open_path` adapter calls `bio.load(path)` (returns `Document`) and shells it into `Buffer + Annotations`, duplicating `complement` computation. 2.5d either widens `BioOps::load` to return `(Buffer, Annotations)` directly or accepts the adapter as good-enough. Calls the question explicitly so the answer doesn't drift.
+  - **Session restore** (optional, deferred from MVP). With the sanitizer in place, persisted view tabs are always stripped on load. A complete fix would seed `Workspace::views` from `recent_files` before the sanitizer runs — i.e. re-open the previous session's open files. Falls naturally into 2.5d if scope allows, otherwise stays an explicit non-goal.
 
-Each stage is independently mergeable. Stage 2.5a was the load-bearing one; b/c/d each add a user-visible capability on top.
+Each stage is independently mergeable. Stage 2.5a was the load-bearing one; b/c/d each added (or will add) a user-visible capability on top.
 
 ---
 
@@ -1271,8 +1288,10 @@ Phase 9 verification (in progress)
   ├─→ 2.5a (2/3) migration         ✅ a0332bf
   ├─→ 2.5a (3/3) cleanup           ✅ f40bd4d
   ├─→ 2.5b multi-tab               ✅ 5316cae
-  ├─→ 2.5c multi-pane split-view   ⏳ NEXT
-  └─→ 2.5d ViewKind + socket proto 📋
+  ├─→ 2.5c multi-pane split-view   ✅ (uncommitted)
+  ├─→ 2.5c flatten Tab::View       ✅ (uncommitted)
+  ├─→ focus/overlay polish + fix   ✅ (uncommitted)
+  └─→ 2.5d ViewKind + socket proto ⏳ NEXT (view-only targeting)
 
   Tier 3 — editor prerequisites
   ├─→ 3a version-keyed caches      🟡 (caches done; edit-bump in 3d)
@@ -1287,6 +1306,6 @@ Phase 9 verification (in progress)
   Tier 4 — nice-to-haves (interval tree, background executor, etc.)
 ```
 
-Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 was staged into four PRs (a/b/c/d) — 2.5a was the load-bearing structural change; b/c/d each unlock a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
+Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 was staged into four PRs (a/b/c/d) — 2.5a was the load-bearing structural change; b/c/d each unlocked a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
 
-**Snapshot:** main is on `5316cae`. The structural foundation for the editor (Workspace / Pane / View / Buffer + Arc<RwLock> sharing + version-keyed caches + tab management) is landed. Next concrete piece of work is **Stage 2.5c — multi-pane split-view via egui_dock**.
+**Snapshot:** main is on `5316cae`; an uncommitted working tree carries Stage 2.5c (multi-pane split-view) + a follow-up flatten to `Tab::View(ViewId)` + focus/overlay UX polish + a persistence-sanitizer bug fix. The structural foundation for the editor (Workspace / View / Buffer + flat view map + `Arc<RwLock>` buffer sharing + version-keyed caches + egui_dock-owned layout) is landed. Pane is no longer a first-class workspace concept — the dock owns layout, the workspace owns identity. Next concrete piece of work is **Stage 2.5d — `ViewKind` plumbing + socket protocol view-targeting + background-task contract**.
