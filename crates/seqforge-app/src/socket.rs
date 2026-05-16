@@ -271,10 +271,10 @@ mod tests {
     #[test]
     fn jsonrpc_dispatch_error_returns_minus_32000() {
         let (tx, rx) = mpsc::channel::<SocketRequest>();
-        // App always returns NoDocument error
+        // App always returns NoActiveView error
         std::thread::spawn(move || {
             while let Ok((_, resp_tx)) = rx.recv() {
-                let _ = resp_tx.send(Err(DispatchError::NoDocument));
+                let _ = resp_tx.send(Err(DispatchError::NoActiveView));
             }
         });
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":1}}"#;

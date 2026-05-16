@@ -41,45 +41,6 @@ impl Selection {
     }
 }
 
-// ── Viewer state ──────────────────────────────────────────────────────────────
-
-/// Pure viewer/document state — no GUI deps.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct ViewerState {
-    /// Currently open document. Skipped in persistence; restored via recent files (Phase 8).
-    #[serde(skip)]
-    pub open_doc: Option<Document>,
-    /// Cursor position or selected range. `None` = nothing selected.
-    pub selection: Option<Selection>,
-    /// Index into `open_doc.features` for the feature-bar selection.
-    pub selected_feature: Option<usize>,
-    /// If set, the viewer should scroll to bring this position into view.
-    #[serde(skip)]
-    pub scroll_to: Option<usize>,
-    /// Active sequence search results. Cleared on new doc load.
-    #[serde(skip)]
-    pub search_hits: Vec<SearchHit>,
-    /// Active restriction site results. Cleared on new doc load.
-    #[serde(skip)]
-    pub cut_sites: Vec<CutSite>,
-    /// Which enzymes are currently shown (mirrors the last `Enzymes` command).
-    #[serde(skip)]
-    pub active_enzymes: Vec<String>,
-}
-
-impl ViewerState {
-    pub fn clear_selection(&mut self) {
-        self.selection = None;
-        self.selected_feature = None;
-    }
-
-    pub fn clear_results(&mut self) {
-        self.search_hits.clear();
-        self.cut_sites.clear();
-        self.active_enzymes.clear();
-    }
-}
-
 // ── File commands ─────────────────────────────────────────────────────────────
 
 /// Commands that operate on sequence files on disk. No running GUI required.
@@ -119,11 +80,6 @@ pub enum DispatchError {
     /// completeness once background tasks land.
     #[error("buffer lock was poisoned")]
     PoisonedLock,
-    /// Backward-compat alias retained while the migration is in flight.
-    /// Equivalent to [`Self::NoActiveView`]; new code should prefer the
-    /// explicit variant.
-    #[error("no document is open")]
-    NoDocument,
     #[error("position {position} is out of range (sequence length: {seq_len})")]
     OutOfRange { position: usize, seq_len: usize },
     #[error("`{0}` is not yet implemented")]
