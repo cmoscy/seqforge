@@ -63,6 +63,9 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 }
             }
             Tab::Viewer => {
+                // Tab strip — one row per open view in the active pane.
+                render_tab_strip(self.workspace, self.pending_commands, ui);
+
                 // Inline Find / GoTo bar at the top of the viewer pane.
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
@@ -119,4 +122,61 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             self.pending_commands.push((AppCommand::FocusPane(pane_scope), None));
         }
     }
+}
+
+// ── Tab strip ───────────────────────────────────────────────────────────────
+//
+// One row of selectable labels above the viewer area. Each entry shows the
+// buffer's display name plus a small × close button. Clicks enqueue
+// `SwitchTab` / `CloseTab` commands; the applier handles them.
+//
+// Hidden when the active pane has no views (the empty-pane placeholder
+// renders below this anyway).
+
+fn render_tab_strip(
+    workspace: &Workspace,
+    pending_commands: &mut Vec<PendingCommand>,
+    ui: &mut egui::Ui,
+) {
+    let Some(pane) = workspace.active_pane() else { return };
+    if pane.views.is_empty() {
+        return;
+    }
+    let pane_id = pane.id;
+    let active_idx = pane.active;
+
+    egui::Frame::default()
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (idx, view) in pane.views.iter().enumerate() {
+                    // Cheap read lock per tab — display name only.
+                    let label = workspace
+                        .buffers
+                        .get(view.buffer_id)
+                        .and_then(|arc| arc.read().ok().map(|b| b.name.clone()))
+                        .unwrap_or_else(|| format!("{}", view.id));
+
+                    let is_active = idx == active_idx;
+                    // Label + close button as a tight pair. Active tab is
+                    // emphasised; clicking a non-active tab switches to
+                    // it; the × closes the tab regardless of active.
+                    let resp = ui.selectable_label(is_active, &label);
+                    if resp.clicked() && !is_active {
+                        pending_commands.push((
+                            AppCommand::SwitchTab { pane: pane_id, view: view.id },
+                            None,
+                        ));
+                    }
+                    if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                        pending_commands.push((
+                            AppCommand::CloseTab { pane: pane_id, view: view.id },
+                            None,
+                        ));
+                    }
+                }
+            });
+        });
+    ui.separator();
 }

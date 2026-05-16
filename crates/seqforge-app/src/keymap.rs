@@ -77,6 +77,21 @@ pub const KEYMAP: &[Binding] = &[
         when_context: &[KeyContext::WORKSPACE],
         command: || AppCommand::OpenGoTo,
     },
+    // ── Tab cycling ────────────────────────────────────────────────
+    // Cmd+Shift+] / [ matches the macOS browser / VSCode convention.
+    // is_enabled returns false when the active pane has fewer than two
+    // tabs, so the chord becomes a no-op (but still consumed) in the
+    // single-tab case — same pattern as ⌘F when no doc is open.
+    Binding {
+        chord: (Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::CloseBracket),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::NextTab,
+    },
+    Binding {
+        chord: (Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::OpenBracket),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::PrevTab,
+    },
     // ── Overlay-scoped ──────────────────────────────────────────────
     // Escape dismisses the topmost overlay regardless of which widget
     // (terminal, viewer, bar text field) has egui focus. Gated on the

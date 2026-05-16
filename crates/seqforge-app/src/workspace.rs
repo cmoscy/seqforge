@@ -618,6 +618,60 @@ mod tests {
     }
 
     #[test]
+    fn close_view_drops_buffer_when_last_reference() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let vid = ws.alloc_view_id();
+        ws.active_pane_mut()
+            .unwrap()
+            .push_active(View::new(vid, bid, ViewKind::TextView));
+
+        assert!(ws.buffers.get(bid).is_some());
+        ws.close_view(vid).unwrap();
+        assert!(ws.buffers.get(bid).is_none(), "buffer should be dropped");
+    }
+
+    #[test]
+    fn close_view_keeps_buffer_when_another_view_holds_it() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let v1 = ws.alloc_view_id();
+        let v2 = ws.alloc_view_id();
+        let pane = ws.active_pane_mut().unwrap();
+        pane.push_active(View::new(v1, bid, ViewKind::TextView));
+        pane.push_active(View::new(v2, bid, ViewKind::TextView));
+
+        ws.close_view(v2).unwrap();
+        // v1 still references bid; buffer must survive.
+        assert!(ws.buffers.get(bid).is_some(), "buffer should remain");
+        // Pane has one remaining view, which is now active.
+        let pane = ws.active_pane().unwrap();
+        assert_eq!(pane.views.len(), 1);
+        assert_eq!(pane.active_view().unwrap().id, v1);
+    }
+
+    #[test]
+    fn pane_switch_to_unknown_returns_false() {
+        let mut p = Pane::new(PaneId(1));
+        p.push_active(View::new(ViewId(1), BufferId(1), ViewKind::TextView));
+        assert!(!p.switch_to(ViewId(999)));
+        assert_eq!(p.active, 0);
+    }
+
+    #[test]
+    fn locate_finds_view_across_panes() {
+        let mut ws = Workspace::default();
+        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let vid = ws.alloc_view_id();
+        ws.active_pane_mut()
+            .unwrap()
+            .push_active(View::new(vid, bid, ViewKind::TextView));
+        let (pane_id, idx) = ws.locate(vid).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(Some(pane_id), ws.active_pane);
+    }
+
+    #[test]
     fn buffer_store_remove_drops_arc() {
         let mut store = BufferStore::new();
         let id = store.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);

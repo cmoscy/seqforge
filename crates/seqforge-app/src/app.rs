@@ -52,6 +52,16 @@ pub struct AppState {
     /// Workspace = pane tree + buffer store + active-view bookkeeping.
     /// Replaces the old `viewer: ViewerState` flat field; see PLAN.md
     /// Tier 2.5 for the design.
+    ///
+    /// `#[serde(skip)]` because `BufferStore` holds `Arc<RwLock<Buffer>>`
+    /// values that can't round-trip through eframe persistence. Even if
+    /// we serialised the pane/view tree, the views would point at
+    /// `BufferId`s that don't resolve on the next launch, leaving ghost
+    /// tabs. Restoring the document set from `recent_files` (which is
+    /// persisted) is the intentional MVP behaviour; auto-reopen of last
+    /// session's tabs lands in a later stage alongside a
+    /// `Workspace::restore_from_paths` helper.
+    #[serde(skip)]
     pub workspace: Workspace,
     /// Recently opened files (most-recent first, max 10).
     pub recent_files: Vec<PathBuf>,

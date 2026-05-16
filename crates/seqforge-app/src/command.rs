@@ -19,7 +19,7 @@ use std::sync::mpsc;
 
 use egui_file_dialog::FileDialog;
 use seqforge_core::{
-    dispatch, BioOps, DispatchError, Selection, ViewerRequest, ViewerResponse,
+    dispatch, BioOps, DispatchError, Selection, ViewId, ViewerRequest, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -27,6 +27,7 @@ use crate::cli_install;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
 use crate::overlay::{FindBar, GoToBar, Overlay};
+use crate::workspace::PaneId;
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
@@ -52,8 +53,24 @@ pub enum AppCommand {
     OpenFile(PathBuf),
     /// Clear the recent-files list.
     ClearRecent,
-    /// Close the currently open document.
+    /// Close the active view in the active pane. Cmd+W. When the
+    /// closed view was the last reference to its buffer, the buffer is
+    /// also dropped and a `DocClosed` event fires.
     CloseDoc,
+
+    // ── Tabs (multi-view within a pane) ──────────────────────────────
+    /// Switch a pane's active view to the named one. No-op if already
+    /// active. Click on a tab strip entry, agent targeting, drag-reorder
+    /// commit all route through here.
+    SwitchTab { pane: PaneId, view: ViewId },
+    /// Close a specific view in a specific pane. Generalises `CloseDoc`
+    /// for the case where the user middle-clicks / X-clicks a non-active
+    /// tab or an agent targets one by id.
+    CloseTab { pane: PaneId, view: ViewId },
+    /// Cycle to the next tab in the active pane. Cmd+Shift+].
+    NextTab,
+    /// Cycle to the previous tab in the active pane. Cmd+Shift+[.
+    PrevTab,
 
     // ── Overlays ─────────────────────────────────────────────────────
     /// Open the inline Find bar.
@@ -108,6 +125,15 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         OpenFind | OpenGoTo | SubmitFind { .. } | SubmitGoTo { .. } | CloseDoc => {
             state.workspace.active_view().is_some()
         }
+        // Tab cycling requires ≥2 tabs in the active pane.
+        NextTab | PrevTab => state
+            .workspace
+            .active_pane()
+            .map(|p| p.views.len() >= 2)
+            .unwrap_or(false),
+        // By-id variants: enablement decided by the resolver inside
+        // `apply` (returns ViewNotFound if the target's gone).
+        SwitchTab { .. } | CloseTab { .. } => true,
         // Pass-through: the underlying dispatcher enforces preconditions.
         Viewer(_) => true,
         // Selection commands only meaningful with a doc open, but harmless
@@ -139,15 +165,34 @@ fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
 /// Shared apply path for both menu-driven `OpenFile` and socket-driven
 /// `Viewer(ViewerRequest::Open { path })` — they should be observably
 /// indistinguishable from event subscribers' perspective.
+///
+/// If a view for this path already exists somewhere in the workspace,
+/// switch to it instead of opening a duplicate. This matches the
+/// SnapGene / VSCode "switch to existing tab on re-open" convention.
 fn apply_open_file<B: BioOps>(
     state: &mut AppState,
     bio: &B,
     path: PathBuf,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    state.seq_view.reset();
     state.recent_files.retain(|p| p != &path);
     state.recent_files.insert(0, path.clone());
     state.recent_files.truncate(crate::app::MAX_RECENT);
+
+    // Already open? Switch to its tab.
+    if let Some((pane_id, view_id)) = find_open_view_for(state, &path) {
+        let pane = state
+            .workspace
+            .panes
+            .get_mut(&pane_id)
+            .expect("located");
+        if pane.switch_to(view_id) {
+            state.events.emit(AppEvent::TabSwitched { pane: pane_id, view: view_id });
+            state.seq_view.reset();
+        }
+        return Ok(Some(ViewerResponse::Ok));
+    }
+
+    state.seq_view.reset();
     let sel_before = active_selection(state);
 
     // Workspace::open_path loads the buffer (via BioOps) and attaches a
@@ -172,17 +217,94 @@ fn apply_open_file<B: BioOps>(
     Ok(Some(ViewerResponse::Ok))
 }
 
-/// Shared apply path for `CloseDoc` (menu / hotkey) and
+/// Search every pane for an existing view whose buffer's source path
+/// matches `path`. Used to dedupe open-of-already-open.
+fn find_open_view_for(state: &AppState, path: &std::path::Path) -> Option<(PaneId, ViewId)> {
+    for (&pane_id, pane) in &state.workspace.panes {
+        for view in &pane.views {
+            let arc = state.workspace.buffers.get(view.buffer_id)?;
+            let buf = arc.read().ok()?;
+            if buf.source_path.as_deref() == Some(path) {
+                return Some((pane_id, view.id));
+            }
+        }
+    }
+    None
+}
+
+/// Shared apply path for `CloseDoc` (menu / hotkey, active tab) and
 /// `Viewer(ViewerRequest::Close)` (socket).
 fn apply_close_doc(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Resolve the (pane, view) the close will affect, before mutation.
+    let (pane_id, view_id) = {
+        let pane = state.workspace.active_pane().ok_or(DispatchError::NoActiveView)?;
+        let view = pane.active_view().ok_or(DispatchError::NoActiveView)?;
+        (pane.id, view.id)
+    };
+    apply_close_view(state, pane_id, view_id)
+}
+
+/// Shared close-by-id path. Used by `CloseTab { pane, view }` and by
+/// `apply_close_doc` (which resolves the active tab first). Emits
+/// `TabClosed` always; emits `DocClosed` when the closed view held the
+/// last reference to its buffer.
+fn apply_close_view(
+    state: &mut AppState,
+    pane_id: PaneId,
+    view_id: ViewId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
     let sel_before = active_selection(state);
-    state.workspace.close_active_view()?;
-    state.events.emit(AppEvent::DocClosed);
+
+    // Determine in advance whether this is the last view of the buffer
+    // (we need this before close_view drops it).
+    let buffer_id = state
+        .workspace
+        .view(view_id)
+        .ok_or(DispatchError::ViewNotFound(view_id))?
+        .buffer_id;
+    let last_ref = state.workspace.panes.values().flat_map(|p| p.views.iter())
+        .filter(|v| v.buffer_id == buffer_id)
+        .count()
+        == 1;
+
+    state.workspace.close_view(view_id)?;
+
+    state.events.emit(AppEvent::TabClosed { pane: pane_id, view: view_id });
+    if last_ref {
+        state.events.emit(AppEvent::DocClosed);
+    }
     emit_selection_diff(state, sel_before);
     state.seq_view.reset();
     Ok(Some(ViewerResponse::Ok))
+}
+
+/// Cycle the active pane's active tab by `delta`. Wraps around in both
+/// directions. No-op if there are fewer than two views.
+fn apply_cycle_tab(
+    state: &mut AppState,
+    delta: isize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let pane_id = state
+        .workspace
+        .active_pane
+        .ok_or(DispatchError::NoActiveView)?;
+    let pane = state
+        .workspace
+        .panes
+        .get_mut(&pane_id)
+        .expect("active pane id always exists");
+    let n = pane.views.len();
+    if n < 2 {
+        return Ok(None);
+    }
+    let new_idx = ((pane.active as isize + delta).rem_euclid(n as isize)) as usize;
+    pane.active = new_idx;
+    let view_id = pane.views[new_idx].id;
+    state.events.emit(AppEvent::TabSwitched { pane: pane_id, view: view_id });
+    state.seq_view.reset();
+    Ok(None)
 }
 
 /// Dispatch a view-scoped `ViewerRequest` against the active view +
@@ -233,6 +355,31 @@ pub fn apply<B: BioOps>(
         }
 
         CloseDoc => apply_close_doc(state),
+
+        SwitchTab { pane, view } => {
+            let pane_ref = state
+                .workspace
+                .panes
+                .get_mut(&pane)
+                .ok_or(DispatchError::ViewNotFound(view))?;
+            if !pane_ref.switch_to(view) {
+                return Err(DispatchError::ViewNotFound(view));
+            }
+            state.events.emit(AppEvent::TabSwitched { pane, view });
+            // Switching to a different doc invalidates the viewer's
+            // per-buffer caches; reset proactively. (The viewer would
+            // also rebuild on its own via the version-keyed check, but
+            // resetting drops feature stacks for the previous doc
+            // immediately.)
+            state.seq_view.reset();
+            Ok(None)
+        }
+
+        CloseTab { pane, view } => apply_close_view(state, pane, view),
+
+        NextTab => apply_cycle_tab(state, 1),
+
+        PrevTab => apply_cycle_tab(state, -1),
 
         OpenFind => {
             if let Some(tag) = state
