@@ -125,7 +125,11 @@ struct AppState {
     viewer: ViewerState,               // passed to dispatch()
     dock_state: DockState<Tab>,        // egui_dock — GUI only
     browser: BrowserState,
-    pending_requests: Vec<PendingReq>, // (ViewerRequest, Option<oneshot_tx>); consumed each frame
+    pending_commands: Vec<PendingCommand>, // (AppCommand, Option<oneshot_tx>); consumed each frame
+    overlays: OverlayStack,
+    focus: FocusState,
+    events: EventSink,
+    // …
 }
 ```
 
@@ -134,18 +138,7 @@ struct AppState {
 - For MVP, `open_doc` is `Option<Document>` (one file at a time). Multi-doc (`Vec<Document>`) deferred to post-MVP.
 - **Reference: Rerun's `re_viewer` crate** for store-vs-UI-state separation in egui.
 
-**Keyboard focus, command dispatch, and event model:** see [`docs/focus-refactor.md`](docs/focus-refactor.md) — the binding architecture reference.
-
-Short summary (full detail in the linked doc):
-
-- `FocusScope { Viewer, Terminal, Browser }` — sticky, click-driven, in `AppState`.
-- `KeyContext` — stack of `&'static str` tags (`"Pane:Viewer"`, `"Overlay:FindBar"`, `"TextInput"`, …). Keymap `Binding`s match against it via `when_context` predicates.
-- `OverlayStack` — single stack for Find bar, GoTo bar, file dialogs, future modals. Top of stack owns input.
-- `AppCommand` — closed enum; every user-, menu-, hotkey-, agent-, and socket-initiated action becomes one. `apply()` is the single mutation site.
-- `AppEvent` — broadcast after `apply()`; consumed by status bar today, by panels/plugins later.
-- Frame lifecycle: drain socket → dispatch keymap → render → apply commands. No `consume_key` outside `keymap::dispatch`.
-
-The previous two-layer sketch (`FocusOwner` + `bar_field_has_focus`) is superseded; `bar_field_has_focus` is removed in Stage 5 of the refactor.
+Keyboard focus, command dispatch, and the event bus are fully covered in [Focus & Command Architecture](#focus--command-architecture) below — that section is the binding reference for adding hotkeys, panes, overlays, and agent actions.
 
 ---
 
@@ -527,9 +520,9 @@ Both Find and GoTo use an inline bar rendered at the top of the Viewer tab pane,
 └─────────────────────────────────────────────────┘
 ```
 
-Find / GoTo bars are `Overlay::FindBar` / `Overlay::GoToBar` variants on the shared `OverlayStack`; submission produces an `AppCommand::SubmitFind` / `AppCommand::SubmitGoTo` that `apply()` translates into a `ViewerRequest`. Escape pops the overlay; clicking the bar's text field is the only way it captures input. See [`docs/focus-refactor.md`](docs/focus-refactor.md) for the overlay model and §5 "How to add X" for adding a new overlay.
+Find / GoTo bars are `Overlay::FindBar` / `Overlay::GoToBar` variants on the shared `OverlayStack`; submission produces an `AppCommand::SubmitFind` / `AppCommand::SubmitGoTo` that `apply()` translates into a `ViewerRequest`. Escape pops the overlay; clicking the bar's text field is the only way it captures input. See [Focus & Command Architecture](#focus--command-architecture) for the overlay model and "How to add X" for adding a new overlay.
 
-**Key files (post-refactor):**
+**Key files:**
 
 - `crates/seqforge-app/src/overlay.rs` — `Overlay`, `OverlayStack`, `FindBar`, `GoToBar` (absorbs the old `bar.rs`)
 - `crates/seqforge-app/src/keymap.rs` — `⌘F` / `⌘G` bindings with `when_context = ["Pane:Viewer"]`
@@ -539,14 +532,16 @@ Find / GoTo bars are `Overlay::FindBar` / `Overlay::GoToBar` variants on the sha
 
 ---
 
-### Phase 9 — Verification + release prep *(½ day)*
+### Phase 9 — Verification + release prep
 
 - [ ] Walk the MVP verification checklist on macOS
-- [ ] CI runs Linux + Windows builds (manual smoke deferred)
 - [ ] `README.md` screenshots (README prose written in Phase 6; add screenshots here)
-- [ ] Socket hardening: prefer `$XDG_RUNTIME_DIR/seqforge-{pid}.sock` over `/tmp`; `chmod 0600` immediately after `bind`; update `SEQFORGE_SOCKET` propagation to PTY
-- [ ] Write `docs/socket-protocol.md` — one-page JSON-RPC 2.0 wire format reference (method names, params shape, response variants, standard error codes)
+- [ ] Socket hardening: prefer `$XDG_RUNTIME_DIR/seqforge-{pid}.sock` over `/tmp`; `chmod 0600` immediately after `bind`; update `SEQFORGE_SOCKET` propagation to PTY; set env vars **before** spawning the socket thread (fixes Rust-2024 `set_var`-after-thread-spawn UB)
+- [ ] Write `docs/socket-protocol.md` — one-page JSON-RPC 2.0 wire format reference (method names, params shape, response variants, standard error codes); state the threat model (single-user workstation; per-user runtime dir is the boundary; no auth token)
+- [ ] Apply the [Pre-editor Refactor Punch List](#pre-editor-refactor-punch-list) below
 - [ ] Tag `v0.1.0`
+
+CI is not in scope for v0.1.
 
 ---
 
@@ -569,7 +564,7 @@ Phase 4 (viewer) and Phase 5 (dispatch) can be developed in parallel after Phase
 - **Errors:** `thiserror` in libs, `anyhow` at app boundary. No `unwrap()` in non-test code.
 - **State:** `AppState` is the single source of truth; widgets receive `&mut` references, never own data.
 - **Commands:** every user-visible action goes through `dispatch`. No menu handler does work directly.
-- **Bio types:** `Vec<u8>` for sequences (ASCII bytes), not `String`. Half-open `Range<usize>` for ranges.
+- **Bio types:** `Vec<u8>` for sequences (ASCII bytes), not `String`. Half-open `Range<usize>` for ranges. *(See the [Pre-editor Refactor Punch List](#pre-editor-refactor-punch-list) — `Vec<u8>` is slated for replacement by a rope before editing lands.)*
 - **Files:** sequence files via `seqforge-bio::load`; never have GUI code touch `gb-io` or `na_seq` directly.
 - **Tests:** every pure function in `seqforge-bio` and `seqforge-core` gets unit tests; widgets get manual smoke tests documented in the phase's "done when" line.
 - **Fixtures:** check in 3 small reference files under `crates/seqforge-bio/tests/fixtures/` (small linear, plasmid, multi-feature). Avoid >100 kb test files.
@@ -586,3 +581,642 @@ Phase 4 (viewer) and Phase 5 (dispatch) can be developed in parallel after Phase
 | `Harzu/egui_term` | terminal widget integration examples |
 | `dlesl/gb-io` | GenBank parsing examples in `examples/` |
 | `rust-bio/rust-bio` | pattern matching, alphabets |
+| `zed-industries/zed` | rope + anchors + transactional edits + action/keymap model (reference for the editor transition) |
+
+---
+
+# Focus & Command Architecture
+
+> Status: **active** — landed across six staged PRs (commits `42efc2f`, `3361170`, `62d83a2`, `4d73110`, `3bac5a2`, `6d69580`). This section is the durable architecture reference; the staged history is preserved in git.
+
+This is the binding reference for SeqForge's keyboard-focus, command-dispatch, and event architecture. If you're adding a feature — a new hotkey, a new pane, a new modal, a new agent action — start at [How to add X](#how-to-add-x). The earlier subsections explain *why* the architecture looks the way it does so you can judge edge cases instead of guessing.
+
+## Target architecture
+
+Three layers, strictly separated:
+
+```mermaid
+flowchart TD
+  subgraph Input
+    KB[Keyboard / mouse] --> Keymap
+    Menu[Menu clicks] --> Cmds
+    Bar[Bar submit] --> Cmds
+    Socket[CLI / agent over socket] --> Cmds
+  end
+  Keymap[Keymap dispatcher<br/>matches KeyContext + when] --> Cmds[AppCommand queue]
+  Cmds --> Apply[apply: AppCommand → state mutation]
+  Apply --> State[(AppState)]
+  Apply --> Events[AppEvent bus]
+  State --> Render[egui render pass]
+  Events --> Subscribers[Status bar, future panels, future plugins]
+  Render --> KB
+```
+
+**Frame lifecycle, in order, every frame:**
+
+1. **Drain external inputs.** Socket requests, OS events. Convert each to one or more `AppCommand` values, append to `pending_commands`.
+2. **Dispatch keys.** Single call to `keymap::dispatch(&focus, &state, ctx) -> Vec<AppCommand>`. Each binding's `when` predicate is checked against the current `KeyContext` stack and `AppState`; only matching bindings call `consume_key`. Results appended to `pending_commands`.
+3. **Render.** Menus, dock area, panes, overlays. Click handlers and widget submits enqueue more `AppCommand`s. **Render never mutates `AppState` directly.** *(See the [Pre-editor Refactor Punch List](#pre-editor-refactor-punch-list) — the viewer widget currently violates this for click/drag selection and needs to be routed through `AppCommand`.)*
+4. **Apply commands.** Drain `pending_commands`, call `apply(cmd, &mut state, &bio)` for each. `apply` is the single place where state mutates and `AppEvent`s are emitted.
+
+This ordering is load-bearing. Mixing render-time mutation with command application is what produces the "ghost frame" bugs (a click fires this frame but the visual reflects last frame's state).
+
+### Focus state
+
+```rust
+// crates/seqforge-app/src/focus.rs
+
+/// Which pane "owns" the keyboard when no overlay is active.
+/// Set by clicks and by explicit `AppCommand::FocusPane`. Sticky across frames.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub enum FocusScope { Viewer, Terminal, Browser }
+
+/// Stack of context tags. Top of stack is the innermost active context.
+/// Keymap `when` predicates match against this stack.
+///
+/// Example stack while Find bar is open over the Viewer:
+///   ["Workspace", "Pane:Viewer", "Overlay:FindBar", "TextInput"]
+pub struct KeyContext { stack: Vec<&'static str> }
+
+pub struct FocusState {
+    pub scope: FocusScope,
+    pub context: KeyContext,
+}
+```
+
+Rules:
+- **Pane click** → `AppCommand::FocusPane(scope)` → updates `scope`, rebuilds context base.
+- **Overlay open** → push `"Overlay:<Name>"` and (if it captures text) `"TextInput"`.
+- **Overlay close** → pop the overlay tags. `scope` is unchanged; the pane that owned input regains it automatically.
+- **Widgets never read `scope` directly.** They read `is_focused: bool` derived from state by the dispatcher and passed down. Source of truth stays single.
+
+### Commands
+
+```rust
+// crates/seqforge-app/src/command.rs
+
+/// Every user-visible or agent-visible action. Closed enum (for now — see "Out of scope" below).
+///
+/// `Viewer(ViewerRequest)` wraps the existing seqforge-core request type so the
+/// socket / CLI surface remains unchanged. GUI-only commands live alongside.
+#[derive(Debug, Clone)]
+pub enum AppCommand {
+    // File / document
+    PromptOpenFile,
+    OpenFile(PathBuf),
+    ClearRecent,
+    CloseDoc,
+
+    // Overlays
+    OpenFind,
+    OpenGoTo,
+    DismissOverlay,
+    SubmitFind { pattern: String, mismatches: u8 },
+    SubmitGoTo { position: usize },
+    DismissCliStatus,
+
+    // Focus / layout
+    FocusPane(FocusScope),
+    ResetLayout,
+
+    // Tools
+    InstallCli,
+
+    // Wrapped viewer request (from menu, hotkey, bar, socket, or agent)
+    Viewer(ViewerRequest),
+}
+
+/// The single place where state mutates. Emits zero or more AppEvents.
+pub fn apply<B: BioOps>(
+    cmd: AppCommand,
+    state: &mut AppState,
+    bio: &B,
+) -> Result<Option<ViewerResponse>, DispatchError>;
+
+/// Is this command currently allowed? Used to grey menu items, gate keymap,
+/// and reject agent requests with a clear error.
+pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool;
+```
+
+`is_enabled` replaces every ad-hoc `if open_doc.is_some()` check at hotkey + menu + bar call sites.
+
+### Events
+
+```rust
+// crates/seqforge-app/src/event.rs
+
+/// Broadcast after `apply()` finishes for any state change downstream surfaces
+/// might care about.
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    DocOpened { name: String, len: usize },
+    DocClosed,
+    SelectionChanged { selection: Option<Selection> },
+    SearchCompleted { hits: usize },
+    FocusChanged(FocusScope),
+    OverlayPushed(&'static str),
+    OverlayPopped(&'static str),
+}
+
+pub struct EventSink { /* stdlib mpsc — emit + consume both on UI thread */ }
+```
+
+Subscribers in scope today: the status bar reads `AppState` directly each frame, but the event bus is the path forward for the metadata panel, the future agent activity log, and any plugin surface. The socket-facing event stream is explicitly future work.
+
+### Keymap
+
+```rust
+// crates/seqforge-app/src/keymap.rs
+
+pub struct Binding {
+    pub chord: (Modifiers, Key),
+    /// Required context tags. All must be present on the KeyContext stack.
+    pub when_context: &'static [&'static str],
+    /// Additional state predicate (e.g. requires open doc).
+    pub when_state: fn(&AppState) -> bool,
+    pub command: fn() -> AppCommand,
+}
+
+pub const KEYMAP: &[Binding] = &[
+    Binding { chord: (CMD, Key::O), when_context: &["Workspace"],   when_state: |_| true,    command: || AppCommand::PromptOpenFile },
+    Binding { chord: (CMD, Key::F), when_context: &["Pane:Viewer"], when_state: has_open_doc, command: || AppCommand::OpenFind },
+    Binding { chord: (NONE, Key::Escape), when_context: &["Overlay"], when_state: |_| true, command: || AppCommand::DismissOverlay },
+    // …
+];
+
+pub fn dispatch(focus: &FocusState, state: &AppState, ctx: &egui::Context) -> Vec<AppCommand>;
+```
+
+Why a const table and not a registry: the binding set is closed for the MVP (plugin registration is future work). A const table compiles, the exhaustive-match in `apply` catches missing branches, and the entire keymap fits on one screen for review.
+
+### Overlays
+
+```rust
+// crates/seqforge-app/src/overlay.rs
+
+/// All transient UI that captures input. Stacked; top renders on top and
+/// receives Esc first.
+pub enum Overlay {
+    FindBar(FindBar),
+    GoToBar(GoToBar),
+    FileDialog(Box<FileDialog>),
+    CliStatus(String),
+    // Future: CommandPalette, ConfirmDialog, AgentPrompt, …
+}
+
+pub struct OverlayStack(Vec<Overlay>);
+
+impl OverlayStack {
+    pub fn push_unique(&mut self, o: Overlay) -> Option<&'static str>;
+    pub fn pop(&mut self) -> Option<&'static str>;
+    pub fn pop_kind(&mut self, tag: &'static str) -> Option<&'static str>;
+    pub fn context_tags(&self) -> impl Iterator<Item = &'static str>;
+}
+```
+
+The stack is the reason metadata panels, modals, and bars compose cleanly: open a confirm dialog over an open Find bar; Esc pops the dialog, the bar remains, keyboard returns to the bar's text field. Today this would require bespoke logic.
+
+## Module layout
+
+```
+crates/seqforge-app/src/
+├── main.rs
+├── app.rs              // SeqForgeApp, AppState; frame lifecycle only
+├── focus.rs            // FocusScope, KeyContext, FocusState
+├── command.rs          // AppCommand, apply(), is_enabled(), PendingCommand
+├── event.rs            // AppEvent, EventSink, EventLog
+├── keymap.rs           // Binding, KEYMAP, dispatch()
+├── overlay.rs          // Overlay enum, OverlayStack, FindBar, GoToBar
+├── tabs.rs             // Tab, TabViewer; pane click → AppCommand::FocusPane
+├── viewer.rs           // SequenceView (sequence rendering + interaction)
+├── terminal.rs         // TerminalPane; reads `is_focused` from FocusState
+├── browser.rs          // BrowserState
+├── socket.rs           // JSON-RPC listener; produces AppCommand::Viewer(...)
+└── cli_install.rs
+```
+
+## How to add X
+
+### A new hotkey
+1. Add an `AppCommand` variant if no existing command fits.
+2. Handle it in `apply`. Add to `is_enabled` if availability is conditional.
+3. Append a `Binding` to `KEYMAP` with the right `when_context` and `when_state`.
+
+Do **not** add `ctx.input_mut().consume_key(...)` anywhere else.
+
+### A new menu item
+Same as a hotkey, minus the `KEYMAP` entry. Menu code calls `pending_commands.push((AppCommand::X, None))` and uses `is_enabled` to grey itself.
+
+### A new overlay (modal, dialog, popup bar)
+1. Add an `Overlay::X(...)` variant in `overlay.rs` and a matching `Overlay::TAG_X: &'static str` constant; extend the `Overlay::tag()` match.
+2. Add a typed accessor on `OverlayStack` (`x_mut(&mut self) -> Option<&mut X>`) if callers need to read the inner state.
+3. Choose a render site:
+   - **Inline-in-pane** (Find/GoTo style): render inside `overlay::show_inline_bar` (or a sibling fn) called from the relevant `tabs.rs` arm.
+   - **Top-level window/dialog**: render directly in `app.rs::update()` after fetching state via the typed accessor, the same way `cli_status()` and `file_dialog_mut()` do.
+4. Push from `command::apply` via `state.overlays.push_unique(Overlay::X(...))`; on push emit `AppEvent::OverlayPushed(tag)`. Dismiss via `pop_kind(Overlay::TAG_X)` or generic `DismissOverlay` (top-of-stack).
+5. `OverlayStack::context_tags` already emits the tag and the generic `"Overlay"` — no change needed there.
+6. If the overlay should be Escape-dismissable from any widget focus, no work needed: the keymap's existing Escape binding handles it via `TAG_ACTIVE`.
+
+### A new pane (e.g. live metadata panel)
+1. Add a `Tab::X` variant; render in `tabs.rs::TabViewer`.
+2. Decide: focusable (gets a `FocusScope`) or non-focusable (read-only / click-into-field-only)?
+   - **Focusable** (claims keyboard exclusively when active): add to `FocusScope`, handle click → `FocusPane`.
+   - **Non-focusable** (default for panels): no `FocusScope` change. Individual fields can `request_focus` for inline edits, push `"TextInput"` while editing.
+3. Subscribe to `AppEvent` if the panel needs to react to state changes (preferred over per-frame state polling for derived data).
+
+### A new agent action
+Agents do not exist as a first-class concept yet; they appear via the existing socket. To make a viewer-side operation reachable by an agent today:
+
+1. Add a `ViewerRequest` variant in `seqforge-core` (existing pattern).
+2. Handle in `seqforge-core::dispatch`.
+
+To make a *GUI-side* operation reachable (open the Find bar, focus a pane, scroll the metadata panel) before plugin work lands:
+
+1. Add an `AppCommand` variant.
+2. Surface it via a new `ViewerRequest::Gui` wrapper or a small extension to the JSON-RPC method set.
+
+### A new keymap context
+1. Identify the scope: pane (`Pane:X`), overlay (`Overlay:X`), or modal mode (`Mode:Y`).
+2. Push the tag in the right place: `FocusState::set_scope` for panes, `OverlayStack` for overlays.
+3. Reference the tag in `when_context` on relevant `Binding`s.
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| `AppCommand` | A typed, queueable action. Single channel for all user-, agent-, and code-initiated mutations. |
+| `apply` | The one function that mutates `AppState` and emits `AppEvent`s. Pure w.r.t. inputs; deterministic. |
+| `AppEvent` | A broadcast notification of something that happened. Subscribers react to changes without polling state. |
+| `FocusScope` | Which pane "owns" the keyboard when no overlay is active. Set by click. |
+| `KeyContext` | Stack of `&'static str` tags describing the current input situation. Keymap `when` clauses match against it. |
+| `Overlay` | A transient UI surface (bar, dialog, modal). Stacked; top owns input first. |
+| `Binding` | A row in the keymap table: chord + context predicate + state predicate + command. |
+| `is_enabled` | Predicate that says whether a command is currently runnable. Used by menus, keymap gating, and agent rejection. |
+
+## Out of scope (deferred to future plan)
+
+Documented so the design stays open without expanding the current architecture.
+
+**Plugin ABI (future):**
+- `AppCommand::Custom(String, serde_json::Value)` opens the closed enum.
+- `AppEvent` becomes subscribable over the JSON-RPC socket (server-sent events or a poll method).
+- Plugins register `KEYMAP` bindings at runtime via a separate registry that the dispatcher checks after the const table.
+- `KeyContext` plugin tags use a `"plugin:<id>:<tag>"` namespace.
+
+**In-process plugin runtime (future):**
+- WASM via `wasmtime` + `wit-bindgen`, or dynamic libraries. Only justified when ≥2 concrete plugins exist that cannot ship over the socket.
+
+**Declarative panel API:** plugins describe panels as a tree of `{label, value, action}` nodes; host renders in egui. The internal metadata panel will be built on top of this same API once it exists.
+
+The current architecture is chosen so all three slot in **without** changing existing call sites.
+
+---
+
+# Pre-editor Refactor Punch List
+
+The MVP architecture is well-shaped for the editor transition — single `apply` site, typed commands, event bus, overlay stack, core/app split. But the **data model** (`Vec<u8>` sequences, absolute-offset features and selections, no version counter, no undo log) will be the bottleneck once edits start landing.
+
+This section is the gate between read-only MVP and the editor transition. **Apply these refactors before planning the editor path** so the editor work changes one layer at a time instead of all of them at once.
+
+## Tier 1 — Bug fixes and security hardening (do first)
+
+These are real defects in the current code, independent of editor work. Land them as standalone PRs.
+
+1. **Socket hardening** (Phase 9 above). `$XDG_RUNTIME_DIR` preference; `chmod 0600` after `bind`; document threat model in `docs/socket-protocol.md`.
+2. **Fix `set_var`-after-thread-spawn ordering.** In `SeqForgeApp::new` (`app.rs:142-156`) `start_socket_listener` spawns a thread *before* `TerminalPane::new` does `unsafe { std::env::set_var("SEQFORGE_SOCKET", ...) }`. Rust 2024 considers this UB-adjacent (env mutation while another thread exists). Move all `set_var` calls to before any thread spawn — set env vars in `SeqForgeApp::new` *before* `start_socket_listener`, then pass the socket path through as an arg.
+3. **Selection events from clicks.** The viewer widget mutates `vstate.selection` directly during click/drag (`viewer.rs:323-385`) and never emits `AppEvent::SelectionChanged`. `command::apply` carefully emits it on every other path. Either:
+   - **(preferred)** Route click/drag through `AppCommand::SetSelection(Selection)` / `AppCommand::DragSelection(...)` — keeps the "render never mutates state" invariant from the focus refactor.
+   - **(quicker)** Snapshot `viewer.selection` before render, diff after, emit from the frame loop.
+4. **Stale socket file cleanup.** `accept_loop` only removes the socket on listener error; normal exit leaks the file. Either register a `Drop` guard on a wrapper held in `AppState`, or rely on per-PID uniqueness (which you do — fine to document and move on).
+5. **Windows build.** `socket.rs` uses `std::os::unix::net` unconditionally. If Windows is in scope for v0.1, switch to the `interprocess` crate (cross-platform local sockets). If not, gate `socket` and the viewer-IPC half of `seqforge-cli` behind `#[cfg(unix)]`.
+
+## Tier 2 — Code consolidation (cleanup pass)
+
+Small, low-risk refactors that pay back as the editor lands.
+
+6. **`Document::is_circular()` helper.** `matches!(doc.topology, Topology::Circular)` appears in `commands.rs:227, :245` and the bio crate. One method, three call sites cleaned up.
+7. **`InteractiveLayer` enum for viewer hit-testing.** Three parallel hit-test passes (annot / search / cut, `viewer.rs:255-312`) are structurally identical. One enum + one generic collector trims ~50 lines and keeps z-order explicit. Becomes essential when the linear/circular graphical views land (they'll share interaction logic).
+8. **`BlockLayout` value type.** Block geometry (`block_h`, `n_blocks`, `block_y`, `seq_x0`, `line_width`) is recomputed in three places in `viewer.rs` (pass 1, pass 2, `screen_to_seq`). Compute once into a `BlockLayout`, pass everywhere. Eliminates a class of off-by-one bugs and is a pre-req for #7.
+9. **`screen_to_seq` end-of-doc cursor.** Currently rejects `p >= seq_len` (`viewer.rs:633-634`). For editing the valid cursor range is `0..=seq_len` (cursor *after* last base = "insert at end"). Easier to fix now, while there's only one consumer.
+10. **`Find` should clear `selection` on empty pattern** (currently only clears `search_hits`). Inconsistent with `Open` / `Close`. Minor.
+
+## Tier 2.5 — Model object split + Workspace/Pane/View hierarchy
+
+This is **the** architectural change that gates everything else. Each downstream tier (version counter, rope, anchors, transactions, undo) becomes a local PR inside a single type instead of a sweep across the codebase. Tabs and split-view become incremental rather than a rewrite. Linear/circular graphical views (post-MVP) land as `+1 enum variant`.
+
+**Why now:** the current `AppState::viewer: ViewerState { open_doc, selection, scroll_to, search_hits, … }` shape conflates **buffer data** (bytes, features), **per-view UI state** (selection, scroll, search results), and **app-wide state** (which doc is active) into one struct. Multi-tab, multi-view, split-view, and shared buffer ownership are all blocked by this. Doing them piecemeal means three painful retrofits; doing them in one model-object split is one structural PR with no behavior change.
+
+### 2.5.0 Locked-down decisions
+
+These choices are cheap to commit to today and expensive to reverse later. Lock them in:
+
+1. **Pane is the dock-tab unit.** `egui_dock::Tab::Pane(PaneId)` replaces `Tab::Viewer`. Free horizontal/vertical splits + tab drag-rearrange from egui_dock. The file browser and terminal stay as their own dock-tab kinds — they aren't split-able panes, they're sidebar/utility panes.
+2. **Same buffer may appear in multiple panes (and in multiple views within one pane).** `Buffer` is owned via `Arc<RwLock<Buffer>>` and stored in a `BufferStore` keyed by `BufferId`. View state is independent per-view.
+3. **`View` is the unit of selection + scroll + search results.** Not `Tab`, not `Pane`, not `Buffer`. A view references a buffer via `Arc<RwLock<Buffer>>` and holds everything that's specific to *this rendering* of *this buffer*.
+4. **Active pane + active view = the "current" target for `AppCommand`s.** Most commands operate on `workspace.active_view_mut()`. Optional `pane`/`view` params on socket protocol for explicit targeting; default is active. Documented in `docs/socket-protocol.md`.
+5. **`FocusScope::Pane(PaneId)`** replaces `FocusScope::Viewer`. KeyContext gets `Pane:<ViewKind>` tags so keymaps can target view kinds (`Pane:TextView`, `Pane:LinearView` later) without naming specific panes.
+6. **Find bar is app-level, operates on active view, contents reflect `active_view.find_query`.** Tab switch swaps the bar contents. (Per-pane find bars are a v0.3+ concern.)
+7. **`ViewKind` enum exists from day one with `TextView` as the only variant.** Adding linear/circular views post-MVP becomes a new variant + a new render impl, no dispatch refactor.
+8. **Background-task contract:** background work read-locks `Buffer` or takes a cheap `BufferSnapshot` (rope clone). Writes happen **only** inside `apply()` on the UI thread, under a brief write lock. Background results post back as `AppCommand::TaskResult(...)`. Documented as an architectural invariant from day one even though no background tasks exist yet.
+9. **Complement cache moves to `Buffer`** (pure function of the sequence, view-independent). All other per-view caches stay on `View` because they depend on view width / params (feature stacking, cut label stacking, etc.).
+10. **Cache invalidation keys on `buffer.version()`.** Per-view caches store `cached_version: u64` and recompute when it diverges. Sets up Tier 3a directly.
+
+### 2.5.1 Target type structure
+
+```rust
+// ── seqforge-core ────────────────────────────────────────────────────────────
+
+pub type BufferId = u64;
+
+/// The editable data. Shareable via Arc<RwLock<Buffer>>.
+/// In Tier 2.5 this is essentially today's Document fields minus identity.
+/// Tier 3 turns `text` into a rope, adds anchors + history + transactions.
+pub struct Buffer {
+    pub text: Vec<u8>,              // → Rope in Tier 3b
+    pub complement: Vec<u8>,        // cached; recomputed on edit
+    pub topology: Topology,
+    pub version: u64,               // Tier 3a wires this in for cache invalidation
+    // Tier 3c adds: anchors: AnchorMap
+    // Tier 3d adds: history: History
+}
+
+/// Features and any view-independent derived data. Lives alongside a Buffer.
+pub struct Annotations {
+    pub features: Vec<Feature>,     // Tier 3c: ranges become anchors
+}
+
+/// Per-render state. Each open view in the UI gets one of these.
+/// Selection, scroll, search results, find query state.
+pub struct View {
+    pub id: ViewId,
+    pub buffer_id: BufferId,
+    pub kind: ViewKind,
+    pub selection: Option<Selection>,
+    pub selected_feature: Option<usize>,
+    pub scroll_to: Option<usize>,           // one-shot
+    pub scroll_pos: Option<f32>,            // remembered on tab switch
+    pub search_hits: Vec<SearchHit>,
+    pub cut_sites: Vec<CutSite>,
+    pub active_enzymes: Vec<String>,
+    pub find_query: Option<FindQuery>,
+}
+
+pub type ViewId = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ViewKind {
+    TextView,
+    // Future: LinearView, CircularView, FeatureTableView, …
+}
+
+// ── seqforge-app ─────────────────────────────────────────────────────────────
+
+pub type PaneId = u64;
+
+/// A pane in the dock area. Holds a tab strip of Views; one is active.
+pub struct Pane {
+    pub id: PaneId,
+    pub views: Vec<View>,
+    pub active: usize,              // index into `views`
+    pub seq_view: SequenceView,     // rendering cache; tied to active view
+                                    // (moved to View in 2.5.5 if cache-thrash on switch is felt)
+}
+
+/// Buffer-handle store, keyed by id. Dedupes when the same file opens twice.
+pub struct BufferStore {
+    buffers: HashMap<BufferId, Arc<RwLock<Buffer>>>,
+    annotations: HashMap<BufferId, Annotations>,
+    by_path: HashMap<PathBuf, BufferId>,
+    next_id: BufferId,
+}
+
+pub struct Workspace {
+    pub panes: HashMap<PaneId, Pane>,
+    pub pane_order: Vec<PaneId>,    // for tab-cycle hotkeys
+    pub active_pane: Option<PaneId>,
+    pub buffers: BufferStore,
+    next_view_id: ViewId,
+    next_pane_id: PaneId,
+}
+
+impl Workspace {
+    pub fn active_view(&self) -> Option<&View>;
+    pub fn active_view_mut(&mut self) -> Option<&mut View>;
+    pub fn active_pane(&self) -> Option<&Pane>;
+    pub fn active_pane_mut(&mut self) -> Option<&mut Pane>;
+    pub fn buffer(&self, id: BufferId) -> Option<Arc<RwLock<Buffer>>>;
+    pub fn open_path(&mut self, path: &Path, bio: &dyn BioOps) -> Result<ViewId, …>;
+    pub fn close_view(&mut self, pane: PaneId, view: ViewId);
+    pub fn switch_to(&mut self, pane: PaneId, view: ViewId);
+}
+
+pub struct AppState {
+    pub workspace: Workspace,       // replaces `viewer: ViewerState`
+    pub dock_state: DockState<DockTab>,
+    pub browser: BrowserState,
+    pub recent_files: Vec<PathBuf>,
+    pub overlays: OverlayStack,
+    pub focus: FocusState,
+    // events, terminal, socket_rx, toasts as today
+}
+
+pub enum DockTab {
+    Pane(PaneId),                   // replaces `Viewer`
+    FileBrowser,
+    Terminal,
+}
+```
+
+### 2.5.2 Dispatch reshape
+
+`seqforge_core::dispatch` operates on a single view + its buffer:
+
+```rust
+pub fn dispatch<B: BioOps>(
+    view: &mut View,
+    buffer: &mut Buffer,            // write-locked by the caller (apply)
+    annotations: &mut Annotations,
+    bio: &B,
+    req: ViewerRequest,
+) -> Result<ViewerResponse, DispatchError>;
+```
+
+Active-view resolution happens once in `apply()`:
+
+```rust
+// command::apply (seqforge-app)
+fn dispatch_to_active<B: BioOps>(state: &mut AppState, bio: &B, req: ViewerRequest)
+    -> Result<ViewerResponse, DispatchError>
+{
+    let view = state.workspace.active_view_mut().ok_or(DispatchError::NoView)?;
+    let buf_arc = state.workspace.buffers.get(view.buffer_id)?;
+    let mut buf = buf_arc.write().unwrap();
+    let ann = state.workspace.buffers.annotations_mut(view.buffer_id)?;
+    dispatch(view, &mut buf, ann, bio, req)
+}
+```
+
+`Open` is the special case — it goes through `Workspace::open_path` (which creates a buffer if new, finds the active pane, opens a new view in it) and does not flow through the per-view dispatch path.
+
+### 2.5.3 Events become id-tagged
+
+Every event that's view- or pane-specific carries the ids:
+
+```rust
+pub enum AppEvent {
+    DocOpened { pane: PaneId, view: ViewId, buffer: BufferId, name: String, len: usize },
+    DocClosed { pane: PaneId, view: ViewId, buffer: BufferId },
+    SelectionChanged { pane: PaneId, view: ViewId, selection: Option<Selection> },
+    SearchCompleted { pane: PaneId, view: ViewId, hits: usize },
+    BufferEdited { buffer: BufferId, version: u64 },   // Tier 3d
+    FocusChanged(FocusScope),
+    PaneActivated(PaneId),
+    TabSwitched { pane: PaneId, view: ViewId },
+    OverlayPushed(&'static str),
+    OverlayPopped(&'static str),
+}
+```
+
+Status bar reads from active view; future panels can filter on `pane`/`view`/`buffer` ids.
+
+### 2.5.4 New `AppCommand` variants
+
+```rust
+pub enum AppCommand {
+    // existing variants…
+    SwitchTab { pane: PaneId, view: ViewId },
+    CloseTab { pane: PaneId, view: ViewId },
+    NextTab,                        // active pane, next view
+    PrevTab,
+    SplitPane { direction: SplitDirection },    // post-MVP-friendly stub
+    FocusPane(PaneId),              // FocusPane(FocusScope) → FocusPane(PaneId)
+    // Tier 3d:
+    // Undo, Redo,
+}
+```
+
+### 2.5.5 Tab strip widget
+
+Each `Pane` renders a tab strip at the top of its dock area before delegating to `SequenceView`. Clicks emit `SwitchTab`. Middle-click / × button emits `CloseTab`. Drag-reorder within a pane is a stretch goal; cross-pane drag (move a tab to another pane) is post-MVP.
+
+### 2.5.6 Socket protocol additions
+
+Add optional `pane` and `view` params to viewer methods (default: active). Document in `docs/socket-protocol.md` from day one so the schema is forward-compatible. Example wire:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":100,"view":17}}
+```
+
+Agents can target any open view; humans get the default-to-active behavior via the embedded terminal.
+
+### 2.5.7 Staged rollout (four PRs)
+
+Each stage compiles and runs; `main` stays shippable.
+
+- **Stage 2.5a — Types + single-pane/single-view migration.**
+  Introduce `Buffer`, `Annotations`, `View`, `ViewKind`, `Pane`, `BufferStore`, `Workspace`. `AppState::viewer: ViewerState` → `AppState::workspace: Workspace` with exactly one pane, one view, one buffer. **No behavior change** — everything still works, just renamed and re-homed. Dispatch reshaped to take `(view, buffer, annotations)`. Events get `pane_id`/`view_id` always set to the single defaults. The viewer widget's click/drag mutations stay where they are (Tier 1 #3 still applies).
+
+- **Stage 2.5b — Multi-tab support within a pane.**
+  `SwitchTab`, `CloseTab`, `NextTab`, `PrevTab` commands. Tab strip widget. `Cmd+W` closes active tab; closing the last tab leaves an empty pane. `Cmd+Shift+]` / `[` cycle tabs. Find bar contents bound to active view's `find_query`. Recent files behavior unchanged. Persistence: tab list + active view per pane.
+
+- **Stage 2.5c — Multi-pane support.**
+  `DockTab::Pane(PaneId)` replaces `Tab::Viewer`. `FocusScope::Pane(PaneId)`. Splits via egui_dock's existing split capabilities. `Cmd+\` (or similar) splits the active pane. Same buffer in two panes works (`BufferStore` already supports it). Cross-pane focus transitions through `FocusPane(PaneId)`.
+
+- **Stage 2.5d — `ViewKind` plumbing + socket protocol updates.**
+  `ViewKind::TextView` is the only variant but `View::kind` is read by render dispatch. Keymap `when_context` gains `Pane:TextView`. Socket protocol gains optional `pane`/`view` params; `docs/socket-protocol.md` written. Background-task contract documented in `docs/architecture.md` (or appended to this PLAN).
+
+Each stage is independently mergeable. Stage 2.5a is the load-bearing one; b/c/d each add a user-visible capability on top.
+
+---
+
+## Tier 3 — Editor-transition prerequisites (the big rocks)
+
+With Tier 2.5 in place, each item below is a **local PR inside `Buffer`** (or `Annotations` for 3c features). Order matters: each builds on the previous one. Do them as four separate PRs, in this order, **before** writing any edit-feature code.
+
+### 3a. Buffer version counter
+
+`Buffer::version: u64` already exists from Tier 2.5; wire it through cache invalidation. Replace the `cached_seq_len != seq_len` invalidation key in `SequenceView` (`viewer.rs:174`) with `cached_version != buffer.version()`. Same for the cut-label cache (`cached_cut_site_key`) and any future per-view cache. Cheap, isolated.
+
+A point mutation (same length, one base changed) would silently render with a stale complement cache today. This fixes it preemptively.
+
+### 3b. Rope-backed Buffer
+
+Replace `Buffer::text: Vec<u8>` with a rope. `ropey` is the obvious pick (~2k LOC, no deps, byte-indexed). Behind the scenes:
+
+- `Buffer::text: Rope` with `len()`, `slice(range)`, `byte_at(i)` accessors.
+- `seqforge-bio` operations that scan the sequence iterate chunks instead of taking `&[u8]`. The search code in `seqforge-bio/src/search.rs` is the main consumer — switch to chunk-aware scanning (or, for the MVP read-only feature set, `rope.bytes().collect::<Vec<_>>()` and call existing code; convert later).
+- The viewer's `build_strand_galley` already takes a slice; pass `rope.slice(block_start..block_end).bytes()` or materialize per-block.
+- `Buffer::clone()` becomes cheap (rope clone is O(log n) structural share) — enables `BufferSnapshot` for background tasks (Tier 4).
+
+Why now and not later: every editor mutation is O(n) on `Vec<u8>`. Even at 10 kb plasmids you'll feel it on a held-down delete key; at BAC scale (~150 kb) or whole-genome (Mb) it's unusable.
+
+### 3c. Anchors
+
+`Feature.range: Range<usize>` and `Selection { anchor: usize, focus: usize }` both store **absolute byte offsets**. The moment you insert 100 bp at position 50, every feature after that has stale indices and every view's selection (potentially across multiple views of the same buffer) points at the wrong base.
+
+Introduce an `Anchor` type whose offset is resolved against the current `Buffer`. References:
+
+- Zed's `text::Anchor` — sum-tree-backed, auto-shifts through edits. Overkill for SeqForge but the canonical model.
+- Helix's `Range` + `Selection` — simpler, offset-based with explicit `map_through_changes(transaction)` step. Probably the right level for us.
+
+Features (in `Annotations`) and selections (in `View`) stop storing raw offsets; they store anchors resolved at read time. The viewer queries `feature.range.resolve(&buffer)` each frame. **Do this before #3d** — undo/redo without anchors means undo-an-insert leaves selection in the wrong place, and split-view-of-same-buffer makes that bug doubly visible.
+
+### 3d. Transactional edits + undo stack
+
+Once anchors are in, add an operation model on `Buffer`:
+
+```rust
+pub enum EditOp {
+    Insert { pos: Anchor, bytes: Vec<u8> },
+    Delete { range: AnchorRange },
+}
+
+pub struct Transaction {
+    ops: Vec<EditOp>,
+    inverse: Vec<EditOp>,
+    selection_before: Option<Selection>,
+    selection_after: Option<Selection>,
+}
+
+impl Buffer {
+    pub fn apply_transaction(&mut self, tx: Transaction);
+    pub fn undo(&mut self) -> Option<Transaction>;
+    pub fn redo(&mut self) -> Option<Transaction>;
+}
+```
+
+`Buffer::apply_transaction` bumps `version`, applies the ops to the rope, and records the inverse on the buffer's history stack. **History lives on `Buffer`, not on `View`** — undo is per-buffer (which means two views of the same buffer share an undo stack, the correct behavior). `AppCommand::Undo` / `Redo` resolve the active view's buffer and call the corresponding method.
+
+Hook this into the existing `command::apply` site — the focus refactor already made it single-threaded and centralized. Emit `AppEvent::BufferEdited { buffer, version }` so caches and any future panels invalidate without polling.
+
+## Tier 4 — Nice-to-haves (after editor lands)
+
+Defer until you actually feel the pain.
+
+11. **Feature interval tree.** Pass 1 iterates all features per block (`viewer.rs:272, :513`). Fine at hundreds of features, painful at thousands. `rust-bio::data_structures::interval_tree::IntervalTree` keyed by anchor — O(log n + k visible).
+12. **Background executor.** Restriction site / search are fast enough today; alignment, Golden Gate enumeration, PCR primer scoring will block the UI thread. Zed's pattern: a task executor with cancellation tokens, results posted back into `pending_commands` as `AppCommand::ViewerResult(...)`.
+13. **Per-subscriber event channels.** Today `EventLog` is a global ring buffer everyone polls. Once there's >1 subscriber, give each its own `mpsc::Receiver` filtered to event kinds it cares about (Zed's `cx.subscribe` pattern).
+14. **Multi-cursor selections.** Generalize `Selection` to `Vec<Selection>`. Helix's selection API is the reference; one-line struct change unlocks a major editing UX.
+15. **`BufferSnapshot` / `Buffer` split.** Immutable snapshot type for rendering / search / annotations vs. mutable buffer for edits. Lets the viewer borrow a snapshot for a frame while a background task edits the live buffer. Pairs naturally with the rope.
+
+---
+
+## Sequencing summary
+
+```
+Phase 9 verification
+  ↓
+Tier 1 (bug fixes, socket hardening)
+  ↓
+Tier 2 (consolidation cleanup)
+  ↓
+Tier 2.5 (Workspace / Pane / View / Buffer split — staged a → b → c → d)
+  ↓
+Tier 3a (version-keyed caches) → 3b (rope) → 3c (anchors) → 3d (transactions / undo)
+  ↓
+[Editor transition plan starts here — separate document]
+  ↓
+Tier 4 as needed
+```
+
+Tier 1 and Tier 2 can land in parallel with Phase 9 verification. Tier 2.5 is one focused effort, staged into four PRs (a/b/c/d) — 2.5a is the load-bearing structural change; b/c/d each unlock a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
