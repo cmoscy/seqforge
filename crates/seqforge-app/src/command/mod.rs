@@ -179,12 +179,29 @@ pub(super) fn restore_focus_after_overlay(state: &mut AppState) {
     }
 }
 
-/// Dispatch a view-scoped `ViewerRequest` against the active view.
+/// Dispatch a view-scoped `ViewerRequest`. Routing rules:
+///   - If `req.target_view()` is `Some(vid)`, the request operates on
+///     that view explicitly (Stage 2.5d socket-protocol targeting).
+///     `ViewNotFound` if the view has been closed.
+///   - Otherwise it operates on `workspace.active_view`. `NoActiveView`
+///     if no view is open.
+///
+/// View-scoped requests that target a non-active view still mutate
+/// that view's state (selection, scroll, search results); callers
+/// downstream of the response (status bar, agent reply) should treat
+/// the response as authoritative for the *target* view, not the
+/// current active view.
 pub(super) fn dispatch_active<B: BioOps>(
     state: &mut AppState,
     bio: &B,
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
+    if let Some(target) = req.target_view() {
+        return state
+            .workspace
+            .with_buffer(target, |view, buf, ann| dispatch(view, buf, ann, bio, req))
+            .and_then(|inner| inner);
+    }
     state
         .workspace
         .with_active_buffer(|view, buf, ann| dispatch(view, buf, ann, bio, req))

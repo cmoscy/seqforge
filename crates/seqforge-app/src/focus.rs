@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use seqforge_core::ViewId;
+use seqforge_core::{ViewId, ViewKind};
 
 /// Which leaf "owns" the keyboard when no overlay is active.
 ///
@@ -150,16 +150,29 @@ impl FocusState {
         self.context.push(self.scope.pane_tag());
     }
 
-    /// Rebuild the full context stack: workspace + pane + overlay
+    /// Rebuild the full context stack: workspace + generic pane tag +
+    /// `ViewKind`-specific tag (if focused on a viewer pane) + overlay
     /// tags. Called once per frame from `app.rs::update()` before
-    /// keymap dispatch. Overlay tags come from
-    /// [`crate::overlay::OverlayStack::context_tags`].
+    /// keymap dispatch.
+    ///
+    /// The `ViewKind` tag (`Pane:TextView`, future `Pane:LinearView`,
+    /// etc.) lets keymap bindings target a specific view kind without
+    /// naming a pane id. Stage 2.5d.
     ///
     /// Pull-based: the source of truth is the overlay stack, the
-    /// scope field, and this function. Drift is impossible because we
-    /// rebuild from scratch every frame.
-    pub fn rebuild_context(&mut self, overlay_tags: impl Iterator<Item = &'static str>) {
+    /// scope field, the active view's kind, and this function. Drift
+    /// is impossible because we rebuild from scratch every frame.
+    pub fn rebuild_context(
+        &mut self,
+        active_view_kind: Option<ViewKind>,
+        overlay_tags: impl Iterator<Item = &'static str>,
+    ) {
         self.rebuild_base_context();
+        if matches!(self.scope, FocusScope::View(_)) {
+            if let Some(kind) = active_view_kind {
+                self.context.push(kind.context_tag());
+            }
+        }
         for tag in overlay_tags {
             self.context.push(tag);
         }

@@ -203,7 +203,7 @@ mod tests {
         std::thread::spawn(move || {
             while let Ok((req, resp_tx)) = rx.recv() {
                 let resp: Result<ViewerResponse, DispatchError> = match req {
-                    ViewerRequest::GoTo { position } => {
+                    ViewerRequest::GoTo { position, .. } => {
                         Ok(ViewerResponse::Navigated { position })
                     }
                     ViewerRequest::Close => Ok(ViewerResponse::Ok),

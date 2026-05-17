@@ -272,12 +272,16 @@ impl eframe::App for SeqForgeApp {
         }
 
         // ── Rebuild key context ───────────────────────────────────────────────
-        // Pull the fresh overlay tags onto the context stack each frame
-        // before keymap dispatch reads it. Drift-proof: the overlay
-        // stack is the source of truth.
+        // Workspace base + generic pane tag + ViewKind-specific tag
+        // (Stage 2.5d) + overlay tags. Drift-proof: the overlay stack
+        // and the active view's kind are the sources of truth.
+        let active_view_kind =
+            self.state.workspace.active_view().map(|v| v.kind);
         let overlay_tags: Vec<&'static str> =
             self.state.overlays.context_tags().collect();
-        self.state.focus.rebuild_context(overlay_tags.into_iter());
+        self.state
+            .focus
+            .rebuild_context(active_view_kind, overlay_tags.into_iter());
 
         // ── Keymap dispatch ───────────────────────────────────────────────────
         // Single source of truth for keyboard shortcuts. Bindings live in

@@ -4,7 +4,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Annotations, Buffer, CutSite, Document, SearchHit, View};
+use crate::{Annotations, Buffer, CutSite, Document, SearchHit, View, ViewId};
 
 // ── Selection model ───────────────────────────────────────────────────────────
 
@@ -93,6 +93,15 @@ pub enum DispatchError {
 /// Typed request variants. Serde tag = `"method"` so the JSON wire shape is
 /// `{"method":"goto","position":100}` — compatible with JSON-RPC 2.0 framing
 /// where method + params are merged into this envelope.
+///
+/// **View targeting** (Stage 2.5d). View-scoped variants (`GoTo`,
+/// `Find`, `Enzymes`) accept an optional `view: ViewId` field. When
+/// `None`, the request operates on the active view (default
+/// behaviour). When `Some(vid)`, the request is dispatched against
+/// that specific view, returning `DispatchError::ViewNotFound` if the
+/// view has been closed since the agent enumerated it. There is
+/// intentionally no pane targeting — panes are a layout concept
+/// owned by the dock, not addressable identity.
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum ViewerRequest {
@@ -103,16 +112,43 @@ pub enum ViewerRequest {
     /// Navigate to a sequence position (1-based).
     #[serde(rename = "goto")]
     #[command(name = "goto")]
-    GoTo { position: usize },
+    GoTo {
+        position: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Search for a sequence pattern (IUPAC; forward + reverse complement).
     Find {
         pattern: String,
         #[arg(short, long, default_value = "0")]
         #[serde(default)]
         mismatches: u8,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
     },
     /// Show restriction cut sites for the given enzymes.
-    Enzymes { enzymes: Vec<String> },
+    Enzymes {
+        enzymes: Vec<String>,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+}
+
+impl ViewerRequest {
+    /// Returns the explicit `view` target if the request carries one;
+    /// `None` for `Open` / `Close` (workspace-scoped) and for view-
+    /// scoped variants where the field was omitted.
+    pub fn target_view(&self) -> Option<ViewId> {
+        match self {
+            ViewerRequest::GoTo { view, .. } => *view,
+            ViewerRequest::Find { view, .. } => *view,
+            ViewerRequest::Enzymes { view, .. } => *view,
+            ViewerRequest::Open { .. } | ViewerRequest::Close => None,
+        }
+    }
 }
 
 /// Response returned from `dispatch`. Each variant carries the data relevant
@@ -174,7 +210,10 @@ pub fn dispatch<B: BioOps>(
             )
         }
 
-        ViewerRequest::GoTo { position } => {
+        // Note: `view` targeting is handled by the caller before this
+        // function is invoked. `dispatch` always operates on whatever
+        // (View, Buffer) was passed in.
+        ViewerRequest::GoTo { position, view: _ } => {
             let seq_len = buffer.len();
             if position == 0 || position > seq_len {
                 return Err(DispatchError::OutOfRange { position, seq_len });
@@ -186,7 +225,7 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::Navigated { position })
         }
 
-        ViewerRequest::Find { pattern, mismatches } => {
+        ViewerRequest::Find { pattern, mismatches, view: _ } => {
             if pattern.is_empty() {
                 view.search_hits.clear();
                 return Ok(ViewerResponse::SearchResults { count: 0, hits: vec![] });
@@ -202,7 +241,7 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::SearchResults { count, hits })
         }
 
-        ViewerRequest::Enzymes { enzymes } => {
+        ViewerRequest::Enzymes { enzymes, view: _ } => {
             if enzymes.is_empty() {
                 view.cut_sites.clear();
                 view.active_enzymes.clear();
@@ -302,19 +341,19 @@ mod tests {
 
     #[test]
     fn viewer_request_serde_round_trip_goto() {
-        let req = ViewerRequest::GoTo { position: 100 };
+        let req = ViewerRequest::GoTo { position: 100, view: None };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"method":"goto","position":100}"#);
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ViewerRequest::GoTo { position: 100 }));
+        assert!(matches!(back, ViewerRequest::GoTo { position: 100, view: None }));
     }
 
     #[test]
     fn viewer_request_serde_round_trip_find() {
-        let req = ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 2 };
+        let req = ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 2, view: None };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ViewerRequest::Find { ref pattern, mismatches: 2 } if pattern == "ATGC"));
+        assert!(matches!(back, ViewerRequest::Find { ref pattern, mismatches: 2, .. } if pattern == "ATGC"));
     }
 
     #[test]
@@ -322,6 +361,48 @@ mod tests {
         let json = r#"{"method":"find","pattern":"ATGC"}"#;
         let req: ViewerRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(req, ViewerRequest::Find { mismatches: 0, .. }));
+    }
+
+    #[test]
+    fn viewer_request_view_field_default_omitted() {
+        // Stage 2.5d: `view` is optional and skip-serialized when None,
+        // so the wire format stays clean for the common case (operate
+        // on active view). Backwards compatible with pre-2.5d clients.
+        let req = ViewerRequest::GoTo { position: 5, view: None };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"view\""), "view should be omitted when None: {json}");
+    }
+
+    #[test]
+    fn viewer_request_view_field_round_trip() {
+        let req = ViewerRequest::GoTo {
+            position: 5,
+            view: Some(crate::ViewId(17)),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"view\":17"));
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.target_view(), Some(crate::ViewId(17)));
+    }
+
+    #[test]
+    fn target_view_extracts_explicit_id() {
+        let r = ViewerRequest::Find {
+            pattern: "AT".into(),
+            mismatches: 0,
+            view: Some(crate::ViewId(42)),
+        };
+        assert_eq!(r.target_view(), Some(crate::ViewId(42)));
+    }
+
+    #[test]
+    fn target_view_workspace_scoped_variants_return_none() {
+        let close = ViewerRequest::Close;
+        assert_eq!(close.target_view(), None);
+        let open = ViewerRequest::Open {
+            path: std::path::PathBuf::from("/x"),
+        };
+        assert_eq!(open.target_view(), None);
     }
 
     #[test]
@@ -343,11 +424,11 @@ mod tests {
 
     #[test]
     fn viewer_request_serde_round_trip_enzymes() {
-        let req = ViewerRequest::Enzymes { enzymes: vec!["EcoRI".into(), "BamHI".into()] };
+        let req = ViewerRequest::Enzymes { enzymes: vec!["EcoRI".into(), "BamHI".into()], view: None };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(back, ViewerRequest::Enzymes { ref enzymes } if enzymes == &["EcoRI", "BamHI"])
+            matches!(back, ViewerRequest::Enzymes { ref enzymes, .. } if enzymes == &["EcoRI", "BamHI"])
         );
     }
 
@@ -361,7 +442,7 @@ mod tests {
     fn dispatch_goto_mutates_view() {
         let (mut view, buf, mut ann) = fixture();
         let resp =
-            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 3 })
+            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 3, view: None })
                 .unwrap();
         assert_eq!(view.scroll_to, Some(2));
         assert!(matches!(view.selection, Some(sel) if sel.anchor == 2 && sel.is_cursor()));
@@ -372,7 +453,7 @@ mod tests {
     fn dispatch_goto_out_of_range_returns_error() {
         let (mut view, buf, mut ann) = fixture(); // seq len = 8
         let err =
-            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 9 })
+            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 9, view: None })
                 .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { position: 9, seq_len: 8 }));
     }
@@ -381,7 +462,7 @@ mod tests {
     fn dispatch_goto_position_zero_returns_error() {
         let (mut view, buf, mut ann) = fixture();
         let err =
-            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 0 })
+            dispatch(&mut view, &buf, &mut ann, &FakeBio::new(), ViewerRequest::GoTo { position: 0, view: None })
                 .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { position: 0, .. }));
     }
@@ -395,7 +476,7 @@ mod tests {
             &buf,
             &mut ann,
             &bio,
-            ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 1 },
+            ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 1, view: None },
         )
         .unwrap();
         let calls = bio.find_calls.borrow();
@@ -421,7 +502,7 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::Enzymes { enzymes: vec![] },
+            ViewerRequest::Enzymes { enzymes: vec![], view: None },
         )
         .unwrap();
         assert!(view.cut_sites.is_empty());
@@ -437,7 +518,7 @@ mod tests {
             &buf,
             &mut ann,
             &bio,
-            ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 0 },
+            ViewerRequest::Find { pattern: "ATGC".into(), mismatches: 0, view: None },
         )
         .unwrap();
         assert!(matches!(resp, ViewerResponse::SearchResults { count: 1, .. }));
@@ -455,7 +536,7 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::Find { pattern: "".into(), mismatches: 0 },
+            ViewerRequest::Find { pattern: "".into(), mismatches: 0, view: None },
         )
         .unwrap();
         assert!(view.search_hits.is_empty());

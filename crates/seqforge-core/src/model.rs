@@ -45,6 +45,17 @@ macro_rules! id_newtype {
                 write!(f, "{}({})", stringify!($name), self.0)
             }
         }
+
+        /// Parse a bare numeric id (`"42"`) into the newtype. Needed by
+        /// clap's auto-derived value parsers for CLI flags like
+        /// `--view 5` and by socket-protocol clients that pass the id
+        /// as a JSON number.
+        impl std::str::FromStr for $name {
+            type Err = std::num::ParseIntError;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                s.parse::<u64>().map($name)
+            }
+        }
     };
 }
 

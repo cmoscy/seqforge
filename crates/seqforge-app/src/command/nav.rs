@@ -65,7 +65,11 @@ pub(super) fn apply_submit_find<B: BioOps>(
         state.events.emit(AppEvent::OverlayPopped(tag));
     }
     let sel_before = active_selection(state);
-    let resp = dispatch_active(state, bio, ViewerRequest::Find { pattern, mismatches })?;
+    let resp = dispatch_active(
+        state,
+        bio,
+        ViewerRequest::Find { pattern, mismatches, view: None },
+    )?;
     if let ViewerResponse::SearchResults { count, .. } = &resp {
         state.events.emit(AppEvent::SearchCompleted { hits: *count });
     }
@@ -83,7 +87,11 @@ pub(super) fn apply_submit_goto<B: BioOps>(
         state.events.emit(AppEvent::OverlayPopped(tag));
     }
     let sel_before = active_selection(state);
-    let resp = dispatch_active(state, bio, ViewerRequest::GoTo { position })?;
+    let resp = dispatch_active(
+        state,
+        bio,
+        ViewerRequest::GoTo { position, view: None },
+    )?;
     emit_selection_diff(state, sel_before);
     restore_focus_after_overlay(state);
     Ok(Some(resp))

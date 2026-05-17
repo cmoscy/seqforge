@@ -120,9 +120,20 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     pending_commands,
                     ..
                 } = self;
-                let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
-                    seq_view.show(ui, view, buf, ann, pending_commands);
-                });
+                // ViewKind dispatch (Stage 2.5d). Today only `TextView`
+                // exists; adding `LinearView` / `CircularView` later is
+                // a new arm + a new renderer module — no changes
+                // elsewhere. The pattern matches Helix's view-kind
+                // dispatch and keeps the renderer module per-kind
+                // closed.
+                let rendered =
+                    workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
+                        match view.kind {
+                            seqforge_core::ViewKind::TextView => {
+                                seq_view.show(ui, view, buf, ann, pending_commands);
+                            }
+                        }
+                    });
                 if rendered.is_err() {
                     ui.centered_and_justified(|ui| {
                         ui.label("(view closed)");

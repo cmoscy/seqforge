@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use seqforge_core::ViewerRequest;
+use seqforge_core::{ViewId, ViewerRequest};
 
 #[derive(Parser)]
 #[command(name = "seqforge", about = "SeqForge sequence tool")]
@@ -38,21 +38,38 @@ enum Cmd {
     },
 
     // ── Viewer commands (forwarded as JSON-RPC to the running GUI) ────────────
+    //
+    // View-scoped commands (goto/find/enzymes) accept `--view <ID>` for
+    // explicit targeting. Omitted, they operate on the active view.
+    // Stage 2.5d.
     /// Open a sequence file in the viewer
     Open { path: PathBuf },
     /// Close the current document
     Close,
     /// Navigate to a sequence position (1-based)
     #[command(name = "goto")]
-    GoTo { position: usize },
+    GoTo {
+        position: usize,
+        /// Target view id (omit to operate on the active view)
+        #[arg(long)]
+        view: Option<ViewId>,
+    },
     /// Search for a sequence pattern (IUPAC)
     Find {
         pattern: String,
         #[arg(short, long, default_value = "0")]
         mismatches: u8,
+        /// Target view id (omit to operate on the active view)
+        #[arg(long)]
+        view: Option<ViewId>,
     },
     /// Show restriction sites for given enzymes
-    Enzymes { enzymes: Vec<String> },
+    Enzymes {
+        enzymes: Vec<String>,
+        /// Target view id (omit to operate on the active view)
+        #[arg(long)]
+        view: Option<ViewId>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,14 +84,14 @@ fn main() -> anyhow::Result<()> {
         // ── Viewer commands (via JSON-RPC socket) ─────────────────────────────
         Cmd::Open { path } => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Open { path }),
         Cmd::Close => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Close),
-        Cmd::GoTo { position } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::GoTo { position })
+        Cmd::GoTo { position, view } => {
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::GoTo { position, view })
         }
-        Cmd::Find { pattern, mismatches } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Find { pattern, mismatches })
-        }
-        Cmd::Enzymes { enzymes } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { enzymes })
+        Cmd::Find { pattern, mismatches, view } => seqforge_cli::dispatch_viewer_cmd(
+            ViewerRequest::Find { pattern, mismatches, view },
+        ),
+        Cmd::Enzymes { enzymes, view } => {
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { enzymes, view })
         }
     }
 }
