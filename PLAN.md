@@ -892,9 +892,10 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 | Tier 2 #6–#10 — Code consolidation | 📋 | — |
 | **Stage 2.5a — Model split (Buffer / View / Workspace)** | ✅ | `3a6fd38`, `a0332bf`, `f40bd4d` |
 | **Stage 2.5b — Multi-tab within a pane** | ✅ | `5316cae` |
-| **Stage 2.5c — Multi-pane split-view via egui_dock** | ✅ | (uncommitted) |
-| **Stage 2.5c follow-up — Flatten to `Tab::View(ViewId)`** | ✅ | (uncommitted) |
-| **Focus / overlay UX polish** | ✅ | (uncommitted) |
+| **Stage 2.5c — Multi-pane split-view via egui_dock** | ✅ | `19c2a77` |
+| **Stage 2.5c follow-up — Flatten to `Tab::View(ViewId)`** | ✅ | `19c2a77` |
+| **Focus / overlay UX polish** | ✅ | `19c2a77` |
+| **Stage 2.5e — PersistedSession + Cache helper + command split** | ✅ | (uncommitted) |
 | Stage 2.5d — `ViewKind` plumbing + socket protocol updates | 📋 | reshaped for post-flatten model |
 | Tier 3a — Buffer version counter (cache invalidation key) | 🟡 | landed as side effect of 2.5a; bump-on-edit waits for 3d |
 | Tier 3b — Rope-backed Buffer | 📋 | — |
@@ -903,9 +904,10 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 | Tier 4 — Nice-to-haves | 📋 | — |
 
 **At a glance:**
-- All structural prerequisites for editor work are landed. The dock owns layout; the workspace is a flat `views: HashMap<ViewId, View>` + `BufferStore`. Split-view, drag-rearrange, and tab cycling are free from egui_dock.
-- `Buffer::version` exists and the viewer's per-view caches key on it; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
-- 59 tests pass; clippy clean; full build green; macOS smoke-tested through the focus/overlay polish.
+- All structural prerequisites for editor work are landed. The dock owns layout during a session; the workspace is a flat `views: HashMap<ViewId, View>` + `BufferStore`; persistence is path-keyed via `PersistedSession`.
+- `Buffer::version` exists and the viewer's per-view caches key on it via the generic `Cache<K, V>` helper; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
+- Command pipeline split into `command/{mod, file, nav, layout}.rs` — each file ≤253 LOC, room to grow as edit/multi-cursor/plugin variants land.
+- 62 tests pass; clippy clean; full build green; macOS smoke-tested through Stage 2.5e.
 
 ---
 
@@ -1175,6 +1177,54 @@ Each stage compiles and runs; `main` stays shippable.
   - **Focused-pane outline**: a 2px accent stroke is painted around the focused view's content rect each frame. Unambiguous in split-view layouts.
   - **Last-focused preservation**: `AppState::focus_before_overlay` snapshots `focus.scope` on empty→non-empty overlay push, restored on the corresponding pop. Wired through every overlay command. Dialog-accept (OpenFile) clears the snapshot so the new view's focus isn't overridden on completion.
 
+- ✅ **Stage 2.5e — PersistedSession (path-keyed) + `Cache<K, V>` helper + command split.**
+  Architectural deep-clean prompted by the NodeIndex-shift panic and the dual-source-of-truth bug class that produced it. Aligns the persistence model with Zed / VSCode: layout is owned by egui_dock during a session, but the save/load boundary speaks paths, not ids.
+
+  **Persistence model (final shape for the project).** `AppState` is no longer `Serialize` — runtime state is purely transient. Persistence is a separate `PersistedSession` blob:
+  ```rust
+  // In-session: never persisted.
+  struct Workspace {
+      buffers: BufferStore,
+      views: HashMap<ViewId, View>,        // ViewIds are session-scoped
+      active_view: Option<ViewId>,
+      seq_views: HashMap<ViewId, SequenceView>,
+  }
+  DockState<Tab>  // egui_dock owns layout during the session
+
+  // The only thing that round-trips to disk.
+  struct PersistedSession {
+      recent_files: Vec<PathBuf>,
+      layout: Option<LayoutSnapshot>,         // path-keyed tree of splits + leaves
+      file_state: HashMap<PathBuf, FileState>, // selection + scroll per file
+  }
+
+  enum LayoutSnapshot {
+      Leaf(LeafSnapshot),
+      HSplit { ratio: f32, a: Box<_>, b: Box<_> },
+      VSplit { ratio: f32, a: Box<_>, b: Box<_> },
+  }
+  enum LeafSnapshot {
+      Browser, Terminal,
+      Viewer { paths: Vec<PathBuf>, active: usize },
+  }
+  ```
+  **Save flow** (in `eframe::App::save`): walk `dock_state` → emit `LayoutSnapshot` (resolving `Tab::View(vid)` → buffer's `source_path`); snapshot per-view state into `file_state`. **Load flow** (in `SeqForgeApp::new`): build `dock_state` skeleton from snapshot (placeholder leaves), replay `OpenFile` for each persisted path targeting the correct leaf, restore `selection`/`scroll_pos` from `file_state`. **Orphan view tabs are now impossible by construction** — `ViewId` and `BufferId` are never persisted.
+
+  **Side effects of the persistence move:**
+  - `sanitize_dock_after_restore` deleted (the bug it fixed is gone by construction).
+  - The end-of-frame reconciler's defensive `views.contains_key` guard retained as belt-and-braces.
+  - `apply_close_view` now stashes per-file state into `pending_file_state` so close + reopen restores selection/scroll inside a single session, not just across restarts.
+
+  **`Cache<K, V>` helper** (`cache.rs`). Generic single-entry version-keyed cache; `get_or_compute(key, || ...)` runs the producer iff the key differs. Refactored `SequenceView`'s ad-hoc caches (`cached_feat_row`, `cached_cut_label_row`, etc.) into two `Cache` instances — feature stacking keyed by `(BufferId, version)`, cut-label stacking keyed by `(sorted_cut_positions, quantized_char_width)`. Pattern for every derived-data cache that lands in Tier 3+/4.
+
+  **Command pipeline split** (`command/` directory). `command.rs` (was 643 lines, growing as edits land) replaced by four cohesive modules:
+  - `command/mod.rs` (253 LOC) — `AppCommand` enum, `SplitDirection`, public `apply` dispatcher + `is_enabled`, shared helpers (`active_selection`, `emit_selection_diff`, `dispatch_active`, `snapshot/restore_focus_for_overlay`, `view_tab_order`, `count_view_tabs`).
+  - `command/file.rs` (188 LOC) — Open / Close / recents / CLI install.
+  - `command/nav.rs` (112 LOC) — Find / GoTo / Selection / Feature highlight.
+  - `command/layout.rs` (218 LOC) — Split / Focus / tab cycling / dock-tree invariants (`ensure_welcome_invariant`, `place_view_tab`, `dock_activate_view`).
+
+  Shared helpers are `pub(super)` on `mod.rs`; submodules import via `use super::...`. Adding a new command domain (e.g. `command/edit.rs` for Tier 3d) is now a localized change.
+
 - 📋 **Stage 2.5d — `ViewKind` plumbing + socket protocol + background-task contract.**
   Reshaped for the post-flatten model: only `view` targeting (no `pane` — the concept is gone).
   - **`ViewKind` consumers wired in.** `View::kind` is read by the renderer dispatch — today only `TextView` exists, but the match is in place for future `LinearView` / `CircularView` variants to land as `+1 enum variant + impl`.
@@ -1185,10 +1235,10 @@ Each stage compiles and runs; `main` stays shippable.
     ```
     `docs/socket-protocol.md` written: method list, params shape, response variants, standard error codes, error semantics for `ViewNotFound`, threat model documented. **Pane targeting is intentionally omitted** — panes are a layout concept owned by `dock_state`, not addressable identity.
   - **Background-task contract documented** in `docs/architecture.md` (or appended here): write locks only inside `apply()` on the UI thread; background work read-locks or takes `BufferSnapshot` and posts results back as `AppCommand::TaskResult(...)`. No background tasks exist yet; documenting the contract now keeps the door open for Tier 4.
-  - **`BioOps::load` widening** (optional). Today the `BufferStore::open_path` adapter calls `bio.load(path)` (returns `Document`) and shells it into `Buffer + Annotations`, duplicating `complement` computation. 2.5d either widens `BioOps::load` to return `(Buffer, Annotations)` directly or accepts the adapter as good-enough. Calls the question explicitly so the answer doesn't drift.
-  - **Session restore** (optional, deferred from MVP). With the sanitizer in place, persisted view tabs are always stripped on load. A complete fix would seed `Workspace::views` from `recent_files` before the sanitizer runs — i.e. re-open the previous session's open files. Falls naturally into 2.5d if scope allows, otherwise stays an explicit non-goal.
+  - **`BioOps::load` widening** (optional). Today the `BufferStore::open_path` adapter calls `bio.load(path)` (returns `Document`) and shells it into `Buffer + Annotations`, duplicating `complement` computation. 2.5d either widens `BioOps::load` to return `(Buffer, Annotations)` directly or accepts the adapter as good-enough.
+  - ~~**Session restore**~~ — done as part of 2.5e via `LayoutSnapshot` + `file_state`.
 
-Each stage is independently mergeable. Stage 2.5a was the load-bearing one; b/c/d each added (or will add) a user-visible capability on top.
+Each stage is independently mergeable. Stage 2.5a was the load-bearing structural change; b/c/e each added a user-visible capability; 2.5d adds the remaining agent-protocol polish and locks in the async contract before Tier 4.
 
 ---
 
@@ -1288,9 +1338,10 @@ Phase 9 verification (in progress)
   ├─→ 2.5a (2/3) migration         ✅ a0332bf
   ├─→ 2.5a (3/3) cleanup           ✅ f40bd4d
   ├─→ 2.5b multi-tab               ✅ 5316cae
-  ├─→ 2.5c multi-pane split-view   ✅ (uncommitted)
-  ├─→ 2.5c flatten Tab::View       ✅ (uncommitted)
-  ├─→ focus/overlay polish + fix   ✅ (uncommitted)
+  ├─→ 2.5c multi-pane split-view   ✅ 19c2a77
+  ├─→ 2.5c flatten Tab::View       ✅ 19c2a77
+  ├─→ focus/overlay polish + fix   ✅ 19c2a77
+  ├─→ 2.5e PersistedSession etc.   ✅ (uncommitted)
   └─→ 2.5d ViewKind + socket proto ⏳ NEXT (view-only targeting)
 
   Tier 3 — editor prerequisites
@@ -1306,6 +1357,6 @@ Phase 9 verification (in progress)
   Tier 4 — nice-to-haves (interval tree, background executor, etc.)
 ```
 
-Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 was staged into four PRs (a/b/c/d) — 2.5a was the load-bearing structural change; b/c/d each unlocked a user-visible capability on top. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
+Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 ended up as five landings — a/b/c were the original staged plan; **2.5e** was a follow-up architectural deep-clean prompted by realizing the dock_state-as-`#[serde]` pattern was the structural cause of every layout-sync bug we'd hit; **2.5d** is the remaining agent-protocol polish ahead of Tier 3. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
 
-**Snapshot:** main is on `5316cae`; an uncommitted working tree carries Stage 2.5c (multi-pane split-view) + a follow-up flatten to `Tab::View(ViewId)` + focus/overlay UX polish + a persistence-sanitizer bug fix. The structural foundation for the editor (Workspace / View / Buffer + flat view map + `Arc<RwLock>` buffer sharing + version-keyed caches + egui_dock-owned layout) is landed. Pane is no longer a first-class workspace concept — the dock owns layout, the workspace owns identity. Next concrete piece of work is **Stage 2.5d — `ViewKind` plumbing + socket protocol view-targeting + background-task contract**.
+**Snapshot:** main is on `19c2a77` (Stage 2.5c) → `d712fc2` (PLAN housekeeping). Uncommitted working tree carries **Stage 2.5e** (`PersistedSession` + `LayoutSnapshot` + `FileState`; `dock_state` no longer `#[serde]`-persisted; `Cache<K, V>` helper; `command.rs` split into `command/{mod, file, nav, layout}.rs`). The structural foundation for the editor is complete: Workspace owns identity; egui_dock owns session layout; persistence is path-keyed; orphan-id bugs are impossible by construction; per-file selection/scroll restores across close+reopen and across process restart. Next concrete work is **Stage 2.5d** (`ViewKind` plumbing + socket protocol view-targeting + background-task contract doc), followed by **Tier 3b** (rope-backed Buffer) which begins the editor track.
