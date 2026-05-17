@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
-use serde::{Deserialize, Serialize};
 use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse};
 
 use crate::browser::BrowserState;
@@ -11,12 +10,17 @@ use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::keymap;
 use crate::overlay::OverlayStack;
+use crate::persistence::{self, PersistedSession};
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
 use crate::workspace::Workspace;
 
 pub(crate) const MAX_RECENT: usize = 10;
+/// eframe storage key for the [`PersistedSession`] blob. Stage 2.5e
+/// replaces the full-`AppState` round-trip; everything else is
+/// rebuilt fresh each launch.
+const SESSION_KEY: &str = "seqforge_session_v1";
 
 // ── AppBio ────────────────────────────────────────────────────────────────────
 
@@ -44,67 +48,57 @@ impl BioOps for AppBio {
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize)]
+/// Runtime app state. **Not serializable** — Stage 2.5e moved
+/// persistence out to [`PersistedSession`] (path-keyed), which is
+/// captured at save and replayed at load. See `persistence.rs` for
+/// the design rationale.
 pub struct AppState {
     pub dock_state: DockState<Tab>,
     pub browser: BrowserState,
-    /// Workspace = pane tree + buffer store + active-view bookkeeping.
-    /// Replaces the old `viewer: ViewerState` flat field; see PLAN.md
-    /// Tier 2.5 for the design.
-    ///
-    /// `#[serde(skip)]` because `BufferStore` holds `Arc<RwLock<Buffer>>`
-    /// values that can't round-trip through eframe persistence. Even if
-    /// we serialised the pane/view tree, the views would point at
-    /// `BufferId`s that don't resolve on the next launch, leaving ghost
-    /// tabs. Restoring the document set from `recent_files` (which is
-    /// persisted) is the intentional MVP behaviour; auto-reopen of last
-    /// session's tabs lands in a later stage alongside a
-    /// `Workspace::restore_from_paths` helper.
-    #[serde(skip)]
+    /// Workspace = view storage + buffer store + active-view bookkeeping.
     pub workspace: Workspace,
-    /// Recently opened files (most-recent first, max 10).
+    /// Recently opened files (most-recent first, max 10). Restored from
+    /// [`PersistedSession::recent_files`] on launch; saved back on exit.
     pub recent_files: Vec<PathBuf>,
-    // ── Transient: not persisted ──────────────────────────────────────────
     /// Queue of commands waiting to be applied this frame. Every menu,
     /// hotkey, bar, socket, and pane-click handler pushes into this and
     /// `update()` drains it through `command::apply` exactly once per
     /// frame. See `docs/focus-refactor.md` §2 for the lifecycle.
-    #[serde(skip)]
     pub pending_commands: Vec<PendingCommand>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
-    #[serde(skip)]
     pub terminal: Option<TerminalPane>,
     /// Receiver for requests arriving via the Unix domain socket.
-    #[serde(skip)]
     pub socket_rx: Option<mpsc::Receiver<SocketRequest>>,
-    #[serde(skip)]
     pub(crate) toasts: egui_notify::Toasts,
     /// All transient UI (Find/GoTo bars, file dialog, CLI status).
     /// See `docs/focus-refactor.md` §2.5.
-    #[serde(skip)]
     pub overlays: OverlayStack,
     /// Active pane + key-context stack. See `docs/focus-refactor.md` §2.1.
     /// Not persisted — startup always begins on `FocusScope::Terminal`.
-    #[serde(skip)]
     pub focus: FocusState,
     /// Snapshot of `focus.scope` taken when the overlay stack
     /// transitioned from empty → non-empty (e.g. user pressed ⌘F).
     /// Restored when the stack goes back to empty so closing the bar
     /// returns the user to the pane they were on. `None` whenever no
     /// overlay is active.
-    #[serde(skip)]
     pub focus_before_overlay: Option<crate::focus::FocusScope>,
     /// Producer side of the event bus. `apply()` emits through here.
-    #[serde(skip)]
     pub events: EventSink,
     /// Consumer side of the event bus. Drained into [`event_log`]
     /// once per frame.
-    #[serde(skip)]
     pub event_rx: Option<mpsc::Receiver<AppEvent>>,
     /// Bounded ring of recent events. Read by the status bar today;
     /// future panels/plugins will subscribe via their own receivers.
-    #[serde(skip)]
     pub event_log: EventLog,
+    /// Per-file UI state (selection, scroll) keyed by source path.
+    /// Loaded from [`PersistedSession::file_state`] at launch and
+    /// consumed when a file's `View` is first created (then dropped
+    /// from the map). New saves capture the *current* view state, not
+    /// this restore buffer.
+    pub pending_file_state: std::collections::HashMap<
+        PathBuf,
+        crate::persistence::FileState,
+    >,
 }
 
 impl Default for AppState {
@@ -134,62 +128,74 @@ impl Default for AppState {
             events,
             event_rx: Some(event_rx),
             event_log: EventLog::default(),
+            pending_file_state: std::collections::HashMap::new(),
         }
     }
 }
 
-/// Walk the persisted `dock_state`, remove any `Tab::View(_)` that
-/// the workspace doesn't have a matching `View` for, and re-establish
-/// the Welcome invariant. Called once at startup; never during steady-
-/// state operation.
-fn sanitize_dock_after_restore(state: &mut AppState) {
-    // Collect orphan tab locations first; mutating the tree while
-    // iterating it is fiddly.
-    let mut orphans: Vec<(
-        egui_dock::SurfaceIndex,
-        egui_dock::NodeIndex,
-        egui_dock::TabIndex,
-    )> = Vec::new();
-    for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
-        let si = egui_dock::SurfaceIndex(s_idx);
-        for (n_idx, node) in surface.iter_nodes().enumerate() {
-            let ni = egui_dock::NodeIndex(n_idx);
-            if let Some(tabs) = node.tabs() {
-                for (t_idx, tab) in tabs.iter().enumerate() {
-                    if let Tab::View(vid) = tab {
-                        if !state.workspace.views.contains_key(vid) {
-                            orphans.push((si, ni, egui_dock::TabIndex(t_idx)));
+/// Restore a previously-saved session into `state`: rebuild dock
+/// layout from the snapshot, eagerly open each persisted file path
+/// into the corresponding leaf, and stash per-file UI state so each
+/// new `View` picks it up.
+///
+/// Errors at any step degrade gracefully: a malformed snapshot falls
+/// back to the default layout; an OpenFile failure (file moved /
+/// deleted) drops just that file. No panics; no orphan tabs possible
+/// because `Tab::View(_)` ids are minted fresh during this replay,
+/// never persisted.
+fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn BioOps) {
+    state.recent_files = session.recent_files;
+    state.pending_file_state = session.file_state;
+
+    let Some(snapshot) = session.layout else { return };
+
+    // Build the dock skeleton (splits + Browser/Terminal/Welcome
+    // placeholders for viewer leaves) and collect the per-leaf opens
+    // that need replaying.
+    let (dock, pending) = persistence::rebuild_dock(&snapshot);
+    state.dock_state = dock;
+
+    // Replay opens, targeting each persisted leaf directly. Bypasses
+    // the command pipeline because we're inside startup — no events,
+    // no recent_files churn, no focus moves.
+    for (surface, node, paths, active) in pending.leaves {
+        let mut view_tabs: Vec<seqforge_core::ViewId> = Vec::new();
+        for path in paths {
+            match state.workspace.open_path(&path, bio) {
+                Ok(vid) => {
+                    // Restore selection / scroll if we have any.
+                    if let Some(fs) = state.pending_file_state.remove(&path) {
+                        if let Some(view) = state.workspace.view_mut(vid) {
+                            view.selection = fs.selection;
+                            view.scroll_pos = fs.scroll_pos;
                         }
                     }
+                    view_tabs.push(vid);
+                }
+                Err(e) => {
+                    eprintln!("[seqforge] restore: failed to reopen {path:?}: {e}");
                 }
             }
         }
-    }
-    // Reverse order so earlier indices stay valid as we remove.
-    for loc in orphans.into_iter().rev() {
-        let _ = state.dock_state.remove_tab(loc);
+        if view_tabs.is_empty() {
+            continue;
+        }
+        // Replace the Welcome placeholder in this leaf with the
+        // freshly minted View tabs.
+        if let egui_dock::Node::Leaf { tabs, active: tab_active, .. } =
+            &mut state.dock_state[surface][node]
+        {
+            *tabs = view_tabs.iter().copied().map(Tab::View).collect();
+            *tab_active = egui_dock::TabIndex(active.min(tabs.len().saturating_sub(1)));
+        }
     }
 
-    // Restore Welcome / View invariant: if no Tab::View(_) survived,
-    // ensure exactly one Welcome tab exists. If Welcome is already
-    // present (e.g. fresh install), this is a no-op.
-    let mut view_count = 0usize;
-    let mut welcome_count = 0usize;
-    for surface in state.dock_state.iter_surfaces() {
-        for node in surface.iter_nodes() {
-            if let Some(tabs) = node.tabs() {
-                for tab in tabs {
-                    match tab {
-                        Tab::View(_) => view_count += 1,
-                        Tab::Welcome => welcome_count += 1,
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    if view_count == 0 && welcome_count == 0 {
-        state.dock_state.push_to_focused_leaf(Tab::Welcome);
+    // Set workspace.active_view to whichever view the dock currently
+    // shows as focused (egui_dock keeps a focused_node hint).
+    if let Some((_, Tab::View(vid))) = state.dock_state.find_active_focused() {
+        let vid = *vid;
+        state.workspace.focus_view(vid);
+        state.focus.set_scope(crate::focus::FocusScope::View(vid));
     }
 }
 
@@ -201,27 +207,18 @@ pub struct SeqForgeApp {
 
 impl SeqForgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut state: AppState = cc
+        let mut state = AppState::default();
+
+        // Stage 2.5e: dock_state is no longer persisted as raw egui_dock
+        // state; we save/load a path-keyed `PersistedSession` blob and
+        // rebuild the dock fresh each launch. This eliminates the
+        // ViewId-orphan class of bugs by construction.
+        if let Some(session) = cc
             .storage
-            .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
-            .unwrap_or_default();
-
-        // Sanitize the persisted dock against the (always-empty on
-        // restart) workspace. `dock_state` round-trips through eframe
-        // storage but `workspace` is `#[serde(skip)]`, so any
-        // `Tab::View(vid)` from a prior session points at a view the
-        // workspace doesn't know about. Strip those orphans and
-        // re-establish the Welcome invariant; otherwise the
-        // dock-focus reconciler would spam `ViewNotFound` toasts
-        // every frame trying to switch to a ghost tab.
-        sanitize_dock_after_restore(&mut state);
-
-        // Event bus: if state came from storage, the `#[serde(skip)]`
-        // defaults gave us a sink with a dropped receiver. Always
-        // install a fresh channel so emits have somewhere to land.
-        let (events, event_rx) = EventSink::channel();
-        state.events = events;
-        state.event_rx = Some(event_rx);
+            .and_then(|s| eframe::get_value::<PersistedSession>(s, SESSION_KEY))
+        {
+            restore_session(&mut state, session, &AppBio);
+        }
 
         // ── PTY environment + socket listener ─────────────────────────────────
         // Sequencing is load-bearing: in Rust 2024 `std::env::set_var` is
@@ -256,7 +253,14 @@ fn enqueue(state: &mut AppState, cmd: AppCommand) {
 
 impl eframe::App for SeqForgeApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &self.state);
+        // Capture the current session as a path-keyed snapshot. ViewIds
+        // and BufferIds are not persisted — they're session-scoped.
+        let session = PersistedSession {
+            recent_files: self.state.recent_files.clone(),
+            layout: persistence::capture_layout(&self.state.dock_state, &self.state.workspace),
+            file_state: persistence::capture_file_state(&self.state.workspace),
+        };
+        eframe::set_value(storage, SESSION_KEY, &session);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

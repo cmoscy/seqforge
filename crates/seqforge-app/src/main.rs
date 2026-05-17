@@ -1,11 +1,13 @@
 mod app;
 mod browser;
+mod cache;
 mod cli_install;
 mod command;
 mod event;
 mod focus;
 mod keymap;
 mod overlay;
+mod persistence;
 mod socket;
 mod tabs;
 mod terminal;

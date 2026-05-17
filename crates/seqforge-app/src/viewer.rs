@@ -3,6 +3,7 @@ use seqforge_core::{
     Annotations, Buffer, BufferId, Feature, FeatureKind, Selection, Strand, View,
 };
 
+use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
 
 const FONT_SIZE: f32 = 13.0;
@@ -120,26 +121,32 @@ fn annot_bar_rect(
 
 // ── Widget state ──────────────────────────────────────────────────────────────
 
+/// Stacked-row assignment for a set of intervals (features or cut
+/// labels). Both viewer caches share the same shape.
+#[derive(Debug, Default, Clone)]
+struct StackLayout {
+    row: Vec<usize>,
+    n_rows: usize,
+}
+
 /// Rendering caches and interaction state for the sequence viewer widget.
 /// Document data lives on [`Buffer`]; selection / scroll / search live
-/// on [`View`]. Caches invalidate on `(buffer_id, buffer.version)` —
-/// version-keyed invalidation is the Tier 3a contract, available for
-/// free now even though edits don't bump the version yet.
+/// on [`View`]. Caches use the generic [`Cache`] helper and key on the
+/// version-stable inputs each one depends on — this is the contract
+/// the rest of the codebase follows for derived data (Stage 2.5e).
 #[derive(Debug, Default)]
 pub struct SequenceView {
     drag_start: Option<usize>,
-    /// Buffer this widget was last rendered against; differs from
-    /// current → tear down all caches.
-    cached_buffer_id: Option<BufferId>,
-    /// Buffer version at last cache fill. Bumped on every future edit.
-    cached_version: u64,
-    cached_feat_row: Vec<usize>, // feat_idx → stacked row index
-    cached_n_annot_rows: usize,
-    // Cut-label cache invalidates on cut-site positions + char_width.
-    cached_cut_site_key: Vec<usize>, // sorted cut positions
-    cached_char_width: f32,
-    cached_cut_label_row: Vec<usize>, // site_idx → stacked row index
-    cached_n_cut_label_rows: usize,
+    /// Feature stacking: keyed by `(buffer_id, buffer.version)`. Two
+    /// views of the same buffer at the same version share the layout
+    /// conceptually; sharing the cache itself is a future Tier 4 win
+    /// (today each `SequenceView` has its own).
+    feature_cache: Cache<(BufferId, u64), StackLayout>,
+    /// Cut-label stacking: keyed by `(sorted_cut_positions, char_width_q)`
+    /// where `char_width_q` is `char_width × 4` rounded to integer so
+    /// sub-quarter-pixel font changes don't thrash the cache. Pane
+    /// resize is the only realistic trigger for re-stacking.
+    cut_label_cache: Cache<(Vec<usize>, u32), StackLayout>,
 }
 
 impl SequenceView {
@@ -148,14 +155,8 @@ impl SequenceView {
     /// data doesn't leak across document boundaries.
     pub fn reset(&mut self) {
         self.drag_start = None;
-        self.cached_buffer_id = None;
-        self.cached_version = 0;
-        self.cached_feat_row.clear();
-        self.cached_n_annot_rows = 0;
-        self.cached_cut_site_key = Vec::new();
-        self.cached_char_width = 0.0;
-        self.cached_cut_label_row.clear();
-        self.cached_n_cut_label_rows = 0;
+        self.feature_cache.invalidate();
+        self.cut_label_cache.invalidate();
     }
 
     /// Render the sequence viewer. Caller must have already resolved an
@@ -184,25 +185,22 @@ impl SequenceView {
             return;
         }
 
-        // Version-keyed cache invalidation. Mismatch on `buffer_id` ⇒
-        // we're rendering a different buffer (e.g. after tab switch
-        // in Stage 2.5b). Mismatch on `version` ⇒ buffer was edited
-        // (Tier 3d). Both rebuild from scratch.
-        let cache_stale = self.cached_buffer_id != Some(view.buffer_id)
-            || self.cached_version != buffer.version;
-        if cache_stale {
-            let (feat_rows, n_rows) = stack_features(&annotations.features);
-            self.cached_feat_row = feat_rows;
-            self.cached_n_annot_rows = n_rows;
-            self.cached_buffer_id = Some(view.buffer_id);
-            self.cached_version = buffer.version;
-        }
+        // Feature stacking keyed by (buffer_id, buffer.version). The
+        // `Cache` helper handles version-driven invalidation; producer
+        // runs at most once per distinct key.
+        let feature_layout = self
+            .feature_cache
+            .get_or_compute((view.buffer_id, buffer.version), || {
+                let (row, n_rows) = stack_features(&annotations.features);
+                StackLayout { row, n_rows }
+            })
+            .clone();
 
         // Complement lives on Buffer (computed at load time, recomputed
         // on edit by Buffer's mutator). View-side caching no longer needed.
         let comp = &buffer.complement;
-        let feat_row = &self.cached_feat_row;
-        let n_annot_rows = self.cached_n_annot_rows;
+        let feat_row = &feature_layout.row;
+        let n_annot_rows = feature_layout.n_rows;
 
         let font_id = FontId::monospace(FONT_SIZE);
         let small_font = FontId::proportional(FONT_SIZE - 2.0);
@@ -221,26 +219,26 @@ impl SequenceView {
 
         let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
 
-        // Recompute cut-label stacking when the set of cut positions or char_width changes.
-        // Using sorted positions as the key catches same-count enzyme swaps (e.g. EcoRI→BamHI).
-        // char_width is pane-width-dependent, so a resize also invalidates the cache.
+        // Cut-label stacking. Key on sorted cut positions (catches
+        // enzyme swaps that don't change count) and quantized char
+        // width (pane resize invalidates).
         let cut_site_key: Vec<usize> = {
             let mut positions: Vec<usize> =
                 view.cut_sites.iter().map(|s| s.cut_pos).collect();
             positions.sort_unstable();
             positions
         };
-        if cut_site_key != self.cached_cut_site_key
-            || (char_width - self.cached_char_width).abs() > 0.5
-        {
-            let (rows, n_rows) = stack_cut_labels(&view.cut_sites, char_width);
-            self.cached_cut_label_row = rows;
-            self.cached_n_cut_label_rows = n_rows;
-            self.cached_cut_site_key = cut_site_key;
-            self.cached_char_width = char_width;
-        }
-        let cut_label_row = &self.cached_cut_label_row;
-        let n_cut_label_rows = self.cached_n_cut_label_rows;
+        let char_width_q = (char_width * 4.0).round() as u32;
+        let sites = view.cut_sites.clone(); // small, used inside closure
+        let cut_layout = self
+            .cut_label_cache
+            .get_or_compute((cut_site_key, char_width_q), || {
+                let (row, n_rows) = stack_cut_labels(&sites, char_width);
+                StackLayout { row, n_rows }
+            })
+            .clone();
+        let cut_label_row = &cut_layout.row;
+        let n_cut_label_rows = cut_layout.n_rows;
         let cut_label_h = n_cut_label_rows as f32 * CUT_LABEL_ROW_H;
 
         let block_h = cut_label_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + annot_section_h + BLOCK_GAP;
