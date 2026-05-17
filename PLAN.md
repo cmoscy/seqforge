@@ -886,10 +886,13 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 |---|---|---|
 | Tier 1 #2 — `set_var` ordering | ✅ | `cadd087` |
 | Tier 1 #3 — Selection events from clicks | ✅ | `395eb2d` |
-| Tier 1 #1 — Socket hardening | 📋 | — |
-| Tier 1 #4 — Stale socket cleanup | 📋 | — |
-| Tier 1 #5 — Windows build (`#[cfg(unix)]` or `interprocess`) | 📋 | — |
-| Tier 2 #6–#10 — Code consolidation | 📋 | — |
+| **Tier 1 #1 — Socket hardening (`$XDG_RUNTIME_DIR` + chmod 0600)** | ✅ | (uncommitted) |
+| **Tier 1 #4 — Stale socket cleanup (SocketGuard Drop)** | ✅ | (uncommitted) |
+| **Tier 1 #5 — Windows build (`#[cfg(unix)]` gating)** | ✅ | (uncommitted) |
+| Tier 2 #6 — `is_circular()` audit | ✅ | no replacements needed; already clean |
+| **Tier 2 #9 — `screen_to_seq` end-of-doc cursor** | ✅ | (uncommitted) |
+| **Tier 2 #10 — `Find` empty pattern clears selection** | ✅ | (uncommitted) |
+| Tier 2 #7, #8 — viewer.rs structural refactors | 📋 | deferred (collides with editor rendering) |
 | **Stage 2.5a — Model split (Buffer / View / Workspace)** | ✅ | `3a6fd38`, `a0332bf`, `f40bd4d` |
 | **Stage 2.5b — Multi-tab within a pane** | ✅ | `5316cae` |
 | **Stage 2.5c — Multi-pane split-view via egui_dock** | ✅ | `19c2a77` |
@@ -916,21 +919,21 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 
 These are real defects in the current code, independent of editor work. Land them as standalone PRs.
 
-1. 📋 **Socket hardening** (Phase 9 above). `$XDG_RUNTIME_DIR` preference; `chmod 0600` after `bind`; document threat model in `docs/socket-protocol.md`.
-2. ✅ **Fix `set_var`-after-thread-spawn ordering** (`cadd087`). All `unsafe { set_var(...) }` calls moved to `terminal::install_pty_env`, which `SeqForgeApp::new` invokes **before** `start_socket_listener` spawns the listener thread. `socket_path()` exposed so the caller can sequence env mutation between the two.
-3. ✅ **Selection events from clicks** (`395eb2d`). Added `AppCommand::SetSelection(Option<Selection>)` and `AppCommand::SelectFeature(Option<usize>)`. The viewer pushes commands instead of mutating `vstate.selection` directly; `command::apply`'s existing `emit_selection_diff` helper now fires `AppEvent::SelectionChanged` from a single path for every click / drag / shift-extend / menu / hotkey / socket origin.
-4. 📋 **Stale socket file cleanup.** `accept_loop` only removes the socket on listener error; normal exit leaks the file. Either register a `Drop` guard on a wrapper held in `AppState`, or rely on per-PID uniqueness (which we do — fine to document and move on).
-5. 📋 **Windows build.** `socket.rs` uses `std::os::unix::net` unconditionally. If Windows is in scope for v0.1, switch to the `interprocess` crate (cross-platform local sockets). If not, gate `socket` and the viewer-IPC half of `seqforge-cli` behind `#[cfg(unix)]`.
+1. ✅ **Socket hardening.** `socket_path()` now prefers `$XDG_RUNTIME_DIR/seqforge-<pid>.sock` (per-user, mode-0700 directory) before falling back to `/tmp/seqforge-<pid>.sock`. After `bind`, the socket file is explicitly `chmod 0600`'d so only the owning user can connect. Threat model documented in `docs/socket-protocol.md` (Stage 2.5d).
+2. ✅ **Fix `set_var`-after-thread-spawn ordering** (`cadd087`). All `unsafe { set_var(...) }` calls moved to `terminal::install_pty_env`, which `SeqForgeApp::new` invokes **before** `start_socket_listener` spawns the listener thread.
+3. ✅ **Selection events from clicks** (`395eb2d`). `AppCommand::SetSelection` / `SelectFeature` route clicks through `command::apply` so `AppEvent::SelectionChanged` fires from a single path.
+4. ✅ **Stale socket file cleanup.** `socket::SocketGuard` is a `Drop` wrapper held in `AppState`. Window close (normal exit) drops it and unlinks the file; the listener thread's existing on-error cleanup covers abnormal exit. Per-pid socket paths prevent collisions when both cleanups miss.
+5. ✅ **Windows build.** `mod socket;` and every consumer in `app.rs` are `#[cfg(unix)]`-gated. The `seqforge-cli` viewer-IPC half (`dispatch_viewer_cmd`) is `#[cfg(unix)]` too, with a `#[cfg(not(unix))]` stub that returns a clear error. File commands (`info` / `digest` / `annotate`) work everywhere. Adopting `interprocess` for cross-platform sockets is deferred until Windows becomes a real target.
 
 ## Tier 2 — Code consolidation (cleanup pass)
 
 Small, low-risk refactors that pay back as the editor lands.
 
-6. 📋 **`Buffer::is_circular()` helper.** Already exists on `Buffer` after 2.5a. Audit remaining `matches!(_, Topology::Circular)` call sites and replace.
-7. 📋 **`InteractiveLayer` enum for viewer hit-testing.** Three parallel hit-test passes (annot / search / cut, `viewer.rs:255-312`) are structurally identical. One enum + one generic collector trims ~50 lines and keeps z-order explicit. Becomes essential when the linear/circular graphical views land (they'll share interaction logic).
-8. 📋 **`BlockLayout` value type.** Block geometry (`block_h`, `n_blocks`, `block_y`, `seq_x0`, `line_width`) is recomputed in three places in `viewer.rs` (pass 1, pass 2, `screen_to_seq`). Compute once into a `BlockLayout`, pass everywhere. Eliminates a class of off-by-one bugs and is a pre-req for #7.
-9. 📋 **`screen_to_seq` end-of-doc cursor.** Currently rejects `p >= seq_len`. For editing the valid cursor range is `0..=seq_len` (cursor *after* last base = "insert at end"). Easier to fix now, while there's only one consumer.
-10. 📋 **`Find` should clear `selection` on empty pattern** (currently only clears `search_hits`). Inconsistent with `Open` / `Close`. Minor.
+6. ✅ **`Buffer::is_circular()` helper.** Audit complete — no `matches!(_, Topology::Circular)` predicate sites remained to replace. The only `Topology::Circular` references in the workspace are construction/parsing of the variant (genbank parser, raw constructors), which is correct.
+7. 📋 **`InteractiveLayer` enum for viewer hit-testing.** Three parallel hit-test passes (annot / search / cut, `viewer.rs:255-312`) are structurally identical. One enum + one generic collector trims ~50 lines and keeps z-order explicit. Becomes essential when the linear/circular graphical views land (they'll share interaction logic). **Deferred** — collides with editor rendering changes (cursor / paste indicator); easier to land after Tier 3d.
+8. 📋 **`BlockLayout` value type.** Block geometry (`block_h`, `n_blocks`, `block_y`, `seq_x0`, `line_width`) is recomputed in three places in `viewer.rs` (pass 1, pass 2, `screen_to_seq`). Compute once into a `BlockLayout`, pass everywhere. Eliminates a class of off-by-one bugs and is a pre-req for #7. **Deferred alongside #7.**
+9. ✅ **`screen_to_seq` end-of-doc cursor.** Changed `p >= seq_len` to `p > seq_len`. The valid cursor range is now the closed `0..=seq_len`, with the upper bound being the "insert-at-end" position. Editor table stakes; lands here so Tier 3d edits have the affordance immediately.
+10. ✅ **`Find` clears `selection` on empty pattern.** Empty `pattern` previously cleared `search_hits` only, leaving a stale selection (typically pointing at the first hit). Now also clears `selection` for consistency with the rest of the "drop derived data" surface (`Open` / `Close`). Test extended to assert both cleared.
 
 ## Tier 2.5 — Model object split + Workspace/Pane/View hierarchy
 
@@ -1326,12 +1329,15 @@ Phase 9 verification (in progress)
   │   Tier 1 — bug fixes
   ├─→ #2 set_var ordering         ✅ cadd087
   ├─→ #3 selection events         ✅ 395eb2d
-  ├─→ #1 socket hardening         📋
-  ├─→ #4 stale socket cleanup     📋
-  └─→ #5 Windows build            📋
+  ├─→ #1 socket hardening         ✅ (uncommitted)
+  ├─→ #4 stale socket cleanup     ✅ (uncommitted)
+  └─→ #5 Windows build            ✅ (uncommitted)
 
   Tier 2 — consolidation
-  └─→ #6–#10                       📋  (opportunistic; not blocking)
+  ├─→ #6 is_circular audit        ✅ (already clean)
+  ├─→ #9 end-of-doc cursor        ✅ (uncommitted)
+  ├─→ #10 empty Find clear        ✅ (uncommitted)
+  └─→ #7, #8 viewer.rs refactor   📋 (deferred post-Tier 3d)
 
   Tier 2.5 — model object split
   ├─→ 2.5a (1/3) types unused      ✅ 3a6fd38
@@ -1359,4 +1365,4 @@ Phase 9 verification (in progress)
 
 Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 ended up as five landings — a/b/c were the original staged plan; **2.5e** was a follow-up architectural deep-clean prompted by realizing the dock_state-as-`#[serde]` pattern was the structural cause of every layout-sync bug we'd hit; **2.5d** is the remaining agent-protocol polish ahead of Tier 3. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
 
-**Snapshot:** main is on `3e5deb9` (Stage 2.5e) → `9725b4c` (PLAN). Uncommitted working tree carries **Stage 2.5d**: `ViewKind` dispatch in the renderer, `Pane:TextView` keymap context tag, socket protocol view-targeting (`ViewerRequest::{GoTo,Find,Enzymes}` gain optional `view: ViewId`), `seqforge` CLI `--view` flag, `ViewId: FromStr`, plus two new docs (`docs/socket-protocol.md` + `docs/architecture.md`) covering the wire format, error codes, threat model, and background-task contract. **Tier 2.5 is now complete.** All structural prerequisites for the editor are in place; next concrete work is **Tier 3b — rope-backed `Buffer`**, which begins the editor track.
+**Snapshot:** main is on `c053058` (Stage 2.5d docs). Uncommitted working tree carries the **Tier 1 hardening + Tier 2 editor-prep** bundle: socket path prefers `$XDG_RUNTIME_DIR`; bind is followed by `chmod 0600`; `SocketGuard` (Drop) cleans the socket file on normal exit; all socket/IPC code is `#[cfg(unix)]`-gated so Windows builds; `screen_to_seq` accepts the closed range `0..=seq_len` (insert-at-end cursor); empty `Find` now clears `selection` as well as `search_hits`. **Tier 2.5 + Tier 1 + the lighter Tier 2 items are all done.** The remaining Tier 2 work (`InteractiveLayer` enum, `BlockLayout` value type) is intentionally deferred because it will collide with editor rendering changes. Next concrete work is **Tier 3b — rope-backed `Buffer`**, which begins the editor track.
