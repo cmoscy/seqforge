@@ -1,9 +1,12 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use anyhow::Context;
 use seqforge_core::ViewerRequest;
+
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
 // ── File commands ─────────────────────────────────────────────────────────────
 
@@ -29,6 +32,20 @@ pub fn run_info(path: &Path) -> anyhow::Result<()> {
 ///
 /// Reads `SEQFORGE_SOCKET` from the environment. If unset, the command cannot
 /// be delivered and an error is returned.
+///
+/// On non-Unix platforms (Windows), returns an error explaining that the
+/// agent-IPC transport isn't supported in v0.1 (Tier 1 #5). File commands
+/// (`info`, `digest`, `annotate`) work everywhere; viewer commands are
+/// Unix-only until/unless we adopt `interprocess` for cross-platform sockets.
+#[cfg(not(unix))]
+pub fn dispatch_viewer_cmd(_req: ViewerRequest) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "viewer commands (open/close/goto/find/enzymes) require a Unix \
+         domain socket; not supported on this platform"
+    )
+}
+
+#[cfg(unix)]
 pub fn dispatch_viewer_cmd(req: ViewerRequest) -> anyhow::Result<()> {
     let socket_path = std::env::var("SEQFORGE_SOCKET").map_err(|_| {
         anyhow::anyhow!("no SeqForge instance running (SEQFORGE_SOCKET is not set)")
@@ -87,7 +104,7 @@ pub fn dispatch_viewer_cmd(req: ViewerRequest) -> anyhow::Result<()> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use seqforge_core::ViewerRequest;
 

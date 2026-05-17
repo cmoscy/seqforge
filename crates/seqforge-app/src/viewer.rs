@@ -645,6 +645,14 @@ impl SequenceView {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
+/// Screen → 0-based sequence offset. Returns positions in the closed
+/// range `0..=seq_len` — the upper bound is the "insert-at-end"
+/// cursor (one past the last base), an editor-grade affordance that
+/// view-only code doesn't strictly need but the edit path (Tier 3d)
+/// does. Tier 2 #9.
+///
+/// Callers that want a strictly-on-base position (selection range
+/// endpoints) should bound-check `< seq_len` themselves.
 fn screen_to_seq(
     pos: Pos2,
     rect: Rect,
@@ -664,7 +672,7 @@ fn screen_to_seq(
         return None;
     }
     let p = block_idx * line_width + col;
-    if p >= seq_len { None } else { Some(p) }
+    if p > seq_len { None } else { Some(p) }
 }
 
 fn search_hit_color(strand: Strand) -> Color32 {

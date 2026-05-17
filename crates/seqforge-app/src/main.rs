@@ -8,6 +8,7 @@ mod focus;
 mod keymap;
 mod overlay;
 mod persistence;
+#[cfg(unix)]
 mod socket;
 mod tabs;
 mod terminal;

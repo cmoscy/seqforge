@@ -227,7 +227,13 @@ pub fn dispatch<B: BioOps>(
 
         ViewerRequest::Find { pattern, mismatches, view: _ } => {
             if pattern.is_empty() {
+                // Empty pattern is a "clear search" affordance. Drop
+                // search hits AND the selection (which was likely
+                // pointing at the first hit) so the user lands on a
+                // clean state — consistent with `Open` / `Close`.
+                // Tier 2 #10.
                 view.search_hits.clear();
+                view.selection = None;
                 return Ok(ViewerResponse::SearchResults { count: 0, hits: vec![] });
             }
             let circular = buffer.is_circular();
@@ -531,6 +537,8 @@ mod tests {
     fn dispatch_find_empty_pattern_clears() {
         let (mut view, buf, mut ann) = fixture();
         view.search_hits.push(SearchHit { start: 0, end: 4, strand: crate::Strand::Forward });
+        // Pre-populate a selection so we can verify clear-on-empty behavior.
+        view.selection = Some(Selection::range(0, 4));
         let resp = dispatch(
             &mut view,
             &buf,
@@ -540,6 +548,8 @@ mod tests {
         )
         .unwrap();
         assert!(view.search_hits.is_empty());
+        // Tier 2 #10: empty pattern also drops the selection.
+        assert!(view.selection.is_none(), "selection should be cleared on empty Find");
         assert!(matches!(resp, ViewerResponse::SearchResults { count: 0, .. }));
     }
 }

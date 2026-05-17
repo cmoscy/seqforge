@@ -11,6 +11,7 @@ use crate::focus::FocusState;
 use crate::keymap;
 use crate::overlay::OverlayStack;
 use crate::persistence::{self, PersistedSession};
+#[cfg(unix)]
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
@@ -68,7 +69,15 @@ pub struct AppState {
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
     pub terminal: Option<TerminalPane>,
     /// Receiver for requests arriving via the Unix domain socket.
+    /// Unix-only; agent IPC on Windows is out of scope for v0.1.
+    #[cfg(unix)]
     pub socket_rx: Option<mpsc::Receiver<SocketRequest>>,
+    /// RAII guard that removes the socket file when `AppState` is
+    /// dropped. The listener thread also cleans up on accept error,
+    /// but it doesn't run on normal window-close exit — this guard
+    /// covers that path. Tier 1 #4.
+    #[cfg(unix)]
+    pub socket_guard: Option<crate::socket::SocketGuard>,
     pub(crate) toasts: egui_notify::Toasts,
     /// All transient UI (Find/GoTo bars, file dialog, CLI status).
     /// See `docs/focus-refactor.md` §2.5.
@@ -120,7 +129,10 @@ impl Default for AppState {
             recent_files: Vec::new(),
             pending_commands: Vec::new(),
             terminal: None,
+            #[cfg(unix)]
             socket_rx: None,
+            #[cfg(unix)]
+            socket_guard: None,
             toasts: egui_notify::Toasts::default(),
             overlays: OverlayStack::default(),
             focus: FocusState::new(),
@@ -220,23 +232,34 @@ impl SeqForgeApp {
             restore_session(&mut state, session, &AppBio);
         }
 
-        // ── PTY environment + socket listener ─────────────────────────────────
+        // ── PTY environment + socket listener (Unix only) ─────────────────────
         // Sequencing is load-bearing: in Rust 2024 `std::env::set_var` is
         // unsafe because env mutation while another thread exists is UB. So
         // we (1) decide the socket path, (2) install all env vars on the
         // main thread, (3) THEN spawn the listener thread. See
         // `terminal::install_pty_env`.
-        let socket_path = socket::socket_path();
-        crate::terminal::install_pty_env(Some(&socket_path));
+        //
+        // Windows: agent IPC is out of scope for v0.1. The terminal pane
+        // still installs PATH for the bundled CLI; the CLI's viewer-IPC
+        // half is also `#[cfg(unix)]` and surfaces an error if invoked.
+        #[cfg(unix)]
+        {
+            let socket_path = socket::socket_path();
+            crate::terminal::install_pty_env(Some(&socket_path));
 
-        match socket::start_socket_listener(socket_path, cc.egui_ctx.clone()) {
-            Ok(rx) => {
-                state.socket_rx = Some(rx);
-            }
-            Err(e) => {
-                eprintln!("[seqforge] socket init failed: {e}");
+            match socket::start_socket_listener(socket_path.clone(), cc.egui_ctx.clone())
+            {
+                Ok(rx) => {
+                    state.socket_rx = Some(rx);
+                    state.socket_guard = Some(socket::SocketGuard::new(socket_path));
+                }
+                Err(e) => {
+                    eprintln!("[seqforge] socket init failed: {e}");
+                }
             }
         }
+        #[cfg(not(unix))]
+        crate::terminal::install_pty_env(None);
 
         state.terminal = TerminalPane::new(cc.egui_ctx.clone())
             .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
@@ -521,10 +544,11 @@ impl eframe::App for SeqForgeApp {
             }
         }
 
-        // ── Drain socket requests ─────────────────────────────────────────────
+        // ── Drain socket requests (Unix only) ─────────────────────────────────
         // Socket-originated `Open` is converted to `AppCommand::OpenFile` so
         // recents and `seq_view` stay in sync — `Viewer(req)` is the
         // generic pass-through for everything else.
+        #[cfg(unix)]
         if let Some(rx) = &self.state.socket_rx {
             while let Ok((req, resp_tx)) = rx.try_recv() {
                 let cmd = match req {

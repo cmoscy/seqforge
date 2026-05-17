@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -7,6 +8,33 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
+
+// ── Socket path lifecycle (Tier 1 hardening) ─────────────────────────────────
+
+/// RAII guard that removes the socket file on drop. Held in
+/// `AppState` so a normal process exit (window close) cleans up the
+/// socket, not just the abnormal-exit path that the listener thread's
+/// own cleanup covered before.
+///
+/// On a panic or `process::exit`, drop ordering may skip this guard —
+/// per-pid socket paths (`/tmp/seqforge-<pid>.sock` /
+/// `$XDG_RUNTIME_DIR/seqforge-<pid>.sock`) protect us from collisions
+/// even when a stale file is left behind. Cleanup is best-effort.
+pub struct SocketGuard {
+    path: PathBuf,
+}
+
+impl SocketGuard {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 // ── Channel type ──────────────────────────────────────────────────────────────
 
@@ -80,6 +108,19 @@ pub fn start_socket_listener(
     let _ = std::fs::remove_file(&path);
 
     let listener = UnixListener::bind(&path)?;
+
+    // Hardening: explicitly chmod 0600 so only the owner can connect.
+    // The default umask usually achieves this on macOS / Linux but
+    // not always (e.g. umask 022 yields 0644 on some setups). Without
+    // this, any local user on a multi-user host could connect and
+    // drive `open` / `find` / `enzymes` against our GUI.
+    let perms = std::fs::Permissions::from_mode(0o600);
+    if let Err(e) = std::fs::set_permissions(&path, perms) {
+        // Non-fatal — log and continue. On the typical single-user
+        // dev host this never fires.
+        eprintln!("[seqforge] could not set socket permissions: {e}");
+    }
+
     let (tx, rx) = mpsc::channel::<SocketRequest>();
 
     let path_clone = path.clone();
@@ -90,8 +131,25 @@ pub fn start_socket_listener(
     Ok(rx)
 }
 
+/// Pick a socket path. Hardening preference order:
+///   1. `$XDG_RUNTIME_DIR/seqforge-<pid>.sock` — per-user, mode-0700
+///      directory, the standard Linux runtime spot.
+///   2. `/tmp/seqforge-<pid>.sock` — fallback for macOS (no
+///      XDG_RUNTIME_DIR by default) and other systems.
+///
+/// The `<pid>` suffix gives per-process uniqueness — multiple GUI
+/// instances won't collide, and a stale file from a crashed prior
+/// process can be `unlink`ed by the new owner without confusion.
 pub fn socket_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/seqforge-{}.sock", std::process::id()))
+    let name = format!("seqforge-{}.sock", std::process::id());
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            let mut p = PathBuf::from(dir);
+            p.push(&name);
+            return p;
+        }
+    }
+    PathBuf::from("/tmp").join(name)
 }
 
 // ── Listener thread ───────────────────────────────────────────────────────────
