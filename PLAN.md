@@ -895,8 +895,8 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 | **Stage 2.5c — Multi-pane split-view via egui_dock** | ✅ | `19c2a77` |
 | **Stage 2.5c follow-up — Flatten to `Tab::View(ViewId)`** | ✅ | `19c2a77` |
 | **Focus / overlay UX polish** | ✅ | `19c2a77` |
-| **Stage 2.5e — PersistedSession + Cache helper + command split** | ✅ | (uncommitted) |
-| Stage 2.5d — `ViewKind` plumbing + socket protocol updates | 📋 | reshaped for post-flatten model |
+| **Stage 2.5e — PersistedSession + Cache helper + command split** | ✅ | `3e5deb9` |
+| **Stage 2.5d — `ViewKind` plumbing + socket protocol view-targeting + docs** | ✅ | (uncommitted) |
 | Tier 3a — Buffer version counter (cache invalidation key) | 🟡 | landed as side effect of 2.5a; bump-on-edit waits for 3d |
 | Tier 3b — Rope-backed Buffer | 📋 | — |
 | Tier 3c — Anchors | 📋 | — |
@@ -907,7 +907,8 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued
 - All structural prerequisites for editor work are landed. The dock owns layout during a session; the workspace is a flat `views: HashMap<ViewId, View>` + `BufferStore`; persistence is path-keyed via `PersistedSession`.
 - `Buffer::version` exists and the viewer's per-view caches key on it via the generic `Cache<K, V>` helper; once `Buffer` actually mutates (Tier 3d), invalidation Just Works.
 - Command pipeline split into `command/{mod, file, nav, layout}.rs` — each file ≤253 LOC, room to grow as edit/multi-cursor/plugin variants land.
-- 62 tests pass; clippy clean; full build green; macOS smoke-tested through Stage 2.5e.
+- Socket protocol accepts optional `view: ViewId` targeting; `docs/socket-protocol.md` documents the wire format, errors, and threat model; `docs/architecture.md` captures the background-task contract.
+- 66 tests pass; clippy clean; full build green; macOS smoke-tested through Stage 2.5d.
 
 ---
 
@@ -1225,18 +1226,17 @@ Each stage compiles and runs; `main` stays shippable.
 
   Shared helpers are `pub(super)` on `mod.rs`; submodules import via `use super::...`. Adding a new command domain (e.g. `command/edit.rs` for Tier 3d) is now a localized change.
 
-- 📋 **Stage 2.5d — `ViewKind` plumbing + socket protocol + background-task contract.**
-  Reshaped for the post-flatten model: only `view` targeting (no `pane` — the concept is gone).
-  - **`ViewKind` consumers wired in.** `View::kind` is read by the renderer dispatch — today only `TextView` exists, but the match is in place for future `LinearView` / `CircularView` variants to land as `+1 enum variant + impl`.
-  - **Keymap `when_context` gains `Pane:TextView`** (and is ready to gain `Pane:LinearView` etc. later). Keymap bindings can target view kinds; the current `Pane:Viewer` catch-all stays as the workspace-level tag for cmd-chord scoping.
-  - **Socket protocol gains an optional `view` param.** Default behaviour unchanged (operates on active view); explicit targeting available for agents:
-    ```json
-    {"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":100,"view":17}}
-    ```
-    `docs/socket-protocol.md` written: method list, params shape, response variants, standard error codes, error semantics for `ViewNotFound`, threat model documented. **Pane targeting is intentionally omitted** — panes are a layout concept owned by `dock_state`, not addressable identity.
-  - **Background-task contract documented** in `docs/architecture.md` (or appended here): write locks only inside `apply()` on the UI thread; background work read-locks or takes `BufferSnapshot` and posts results back as `AppCommand::TaskResult(...)`. No background tasks exist yet; documenting the contract now keeps the door open for Tier 4.
-  - **`BioOps::load` widening** (optional). Today the `BufferStore::open_path` adapter calls `bio.load(path)` (returns `Document`) and shells it into `Buffer + Annotations`, duplicating `complement` computation. 2.5d either widens `BioOps::load` to return `(Buffer, Annotations)` directly or accepts the adapter as good-enough.
-  - ~~**Session restore**~~ — done as part of 2.5e via `LayoutSnapshot` + `file_state`.
+- ✅ **Stage 2.5d — `ViewKind` plumbing + socket protocol view-targeting + docs.**
+  Closes out the structural Tier 2.5 work; remaining items are editor-track (Tier 3).
+  - **`ViewKind` consumers wired in.** `view.kind` matched in `tabs.rs::Tab::View(_)` render path; `SequenceView::show` is the `TextView` arm. Adding `LinearView` / `CircularView` is now `+1 enum variant + +1 widget module + +1 match arm` — no dispatch refactor.
+  - **`FocusState::rebuild_context` pushes `ViewKind::context_tag()`** (`Pane:TextView`) onto the keymap context stack when focus is on a viewer pane. Bindings can target a view kind without naming a pane id. `Pane:Viewer` stays as the generic workspace-level tag for cmd-chord scoping; the kind tag layers on top.
+  - **Socket protocol view targeting.** `ViewerRequest::{GoTo, Find, Enzymes}` gain an optional `view: Option<ViewId>` field, serialized with `#[serde(skip_serializing_if = "Option::is_none")]` so default behaviour (omitted) operates on active view and the wire format stays clean for the common case. `ViewerRequest::target_view()` extracts the explicit id; `dispatch_active` routes via `with_buffer(vid, ...)` when set, `with_active_buffer(...)` when not. `ViewNotFound` if the view was closed mid-conversation.
+  - **`seqforge` CLI gains `--view <ID>`** on `goto` / `find` / `enzymes`. Backwards compatible (flag is optional).
+  - **`docs/socket-protocol.md`** written: transport, wire format, methods, view-targeting semantics, error codes (parse / invalid-request / method / params / dispatch — including ViewNotFound), 5-second dispatch timeout, threat model (local control plane, no auth, DoS surface noted).
+  - **`docs/architecture.md`** written: background-task contract (write locks only on UI thread, background tasks read-lock or use future `BufferSnapshot`, results post back as `AppCommand::TaskResult`, cancellation via tokens); ViewKind dispatch checklist; Cache pattern checklist; Workspace/Layout/Persistence boundary summary.
+  - **`ViewId: FromStr`** added in `seqforge-core::model` so clap can auto-parse `--view 5`.
+  - **`BioOps::load` widening** is deferred — the adapter (`workspace.rs::pure_complement`) is small (~5 LOC of duplicated work per Open) and the rewrite touches three crates. Will land alongside Tier 3b (rope-backed Buffer) when both `Buffer` and `Annotations` need to flow through `BioOps` anyway.
+  - ~~Session restore~~ — done as part of 2.5e via `LayoutSnapshot` + `file_state`.
 
 Each stage is independently mergeable. Stage 2.5a was the load-bearing structural change; b/c/e each added a user-visible capability; 2.5d adds the remaining agent-protocol polish and locks in the async contract before Tier 4.
 
@@ -1341,8 +1341,8 @@ Phase 9 verification (in progress)
   ├─→ 2.5c multi-pane split-view   ✅ 19c2a77
   ├─→ 2.5c flatten Tab::View       ✅ 19c2a77
   ├─→ focus/overlay polish + fix   ✅ 19c2a77
-  ├─→ 2.5e PersistedSession etc.   ✅ (uncommitted)
-  └─→ 2.5d ViewKind + socket proto ⏳ NEXT (view-only targeting)
+  ├─→ 2.5e PersistedSession etc.   ✅ 3e5deb9
+  └─→ 2.5d ViewKind + socket proto ✅ (uncommitted)
 
   Tier 3 — editor prerequisites
   ├─→ 3a version-keyed caches      🟡 (caches done; edit-bump in 3d)
@@ -1359,4 +1359,4 @@ Phase 9 verification (in progress)
 
 Tier 1 and Tier 2 land in parallel with Stage 2.5; none of them blocks the others. Stage 2.5 ended up as five landings — a/b/c were the original staged plan; **2.5e** was a follow-up architectural deep-clean prompted by realizing the dock_state-as-`#[serde]` pattern was the structural cause of every layout-sync bug we'd hit; **2.5d** is the remaining agent-protocol polish ahead of Tier 3. Tier 3 is strict-sequential and each item is now a local PR inside `Buffer`.
 
-**Snapshot:** main is on `19c2a77` (Stage 2.5c) → `d712fc2` (PLAN housekeeping). Uncommitted working tree carries **Stage 2.5e** (`PersistedSession` + `LayoutSnapshot` + `FileState`; `dock_state` no longer `#[serde]`-persisted; `Cache<K, V>` helper; `command.rs` split into `command/{mod, file, nav, layout}.rs`). The structural foundation for the editor is complete: Workspace owns identity; egui_dock owns session layout; persistence is path-keyed; orphan-id bugs are impossible by construction; per-file selection/scroll restores across close+reopen and across process restart. Next concrete work is **Stage 2.5d** (`ViewKind` plumbing + socket protocol view-targeting + background-task contract doc), followed by **Tier 3b** (rope-backed Buffer) which begins the editor track.
+**Snapshot:** main is on `3e5deb9` (Stage 2.5e) → `9725b4c` (PLAN). Uncommitted working tree carries **Stage 2.5d**: `ViewKind` dispatch in the renderer, `Pane:TextView` keymap context tag, socket protocol view-targeting (`ViewerRequest::{GoTo,Find,Enzymes}` gain optional `view: ViewId`), `seqforge` CLI `--view` flag, `ViewId: FromStr`, plus two new docs (`docs/socket-protocol.md` + `docs/architecture.md`) covering the wire format, error codes, threat model, and background-task contract. **Tier 2.5 is now complete.** All structural prerequisites for the editor are in place; next concrete work is **Tier 3b — rope-backed `Buffer`**, which begins the editor track.
