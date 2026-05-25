@@ -6,6 +6,7 @@ mod command;
 mod event;
 mod focus;
 mod keymap;
+mod minimap;
 mod overlay;
 mod persistence;
 #[cfg(unix)]

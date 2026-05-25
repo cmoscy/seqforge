@@ -4,6 +4,7 @@ use seqforge_core::ViewId;
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
 use crate::focus::{FocusScope, FocusState};
+use crate::minimap::MiniMap;
 use crate::overlay::{self, OverlayStack};
 use crate::terminal::TerminalPane;
 use crate::workspace::Workspace;
@@ -31,6 +32,7 @@ pub struct TabViewer<'a> {
     pub terminal: &'a mut Option<TerminalPane>,
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
+    pub minimap: &'a mut MiniMap,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -82,9 +84,54 @@ impl egui_dock::TabViewer for TabViewer<'_> {
 
         match tab {
             Tab::FileBrowser => {
-                if let Some(path) = self.browser.show(ui) {
-                    self.pending_commands.push((AppCommand::OpenFile(path), None));
+                let available_h = ui.available_height();
+                let available_w = ui.available_width();
+
+                // Fraction-based split: browser gets the top portion,
+                // minimap the bottom. `browser_fraction` is adjusted by
+                // the drag handle below and lives on `MiniMap` so it
+                // survives tab switches within the session.
+                let browser_h =
+                    (available_h * self.minimap.browser_fraction).max(40.0);
+
+                ui.allocate_ui(
+                    egui::Vec2::new(available_w, browser_h),
+                    |ui| {
+                        if let Some(path) = self.browser.show(ui) {
+                            self.pending_commands
+                                .push((AppCommand::OpenFile(path), None));
+                        }
+                    },
+                );
+
+                // ── Drag handle ───────────────────────────────────────────────
+                // A thin interactive strip the user drags to resize the split.
+                // Highlight on hover; update `browser_fraction` on drag.
+                let handle_size = egui::Vec2::new(available_w, 6.0);
+                let (handle_rect, handle_resp) =
+                    ui.allocate_exact_size(handle_size, egui::Sense::drag());
+
+                if handle_resp.hovered() || handle_resp.dragged() {
+                    ui.ctx()
+                        .set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 }
+                if handle_resp.dragged() {
+                    let delta = handle_resp.drag_delta().y / available_h;
+                    self.minimap.browser_fraction =
+                        (self.minimap.browser_fraction + delta).clamp(0.15, 0.85);
+                }
+                let handle_color = if handle_resp.hovered() || handle_resp.dragged() {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                };
+                ui.painter().hline(
+                    handle_rect.x_range(),
+                    handle_rect.center().y,
+                    egui::Stroke::new(1.0, handle_color),
+                );
+
+                self.minimap.show(ui, self.workspace, self.pending_commands);
             }
             Tab::Welcome => {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {

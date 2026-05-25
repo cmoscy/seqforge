@@ -206,6 +206,10 @@ pub struct View {
     pub cut_sites: Vec<CutSite>,
     #[serde(skip)]
     pub active_enzymes: Vec<String>,
+    /// Visible sequence range written each frame by the text viewer.
+    /// Used by the minimap to paint the viewport indicator.
+    #[serde(skip)]
+    pub visible_range: Option<(usize, usize)>,
 }
 
 impl View {
@@ -221,6 +225,7 @@ impl View {
             search_hits: Vec::new(),
             cut_sites: Vec::new(),
             active_enzymes: Vec::new(),
+            visible_range: None,
         }
     }
 

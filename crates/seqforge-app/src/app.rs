@@ -6,6 +6,7 @@ use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerR
 
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
+use crate::minimap::MiniMap;
 use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::keymap;
@@ -99,6 +100,8 @@ pub struct AppState {
     /// Bounded ring of recent events. Read by the status bar today;
     /// future panels/plugins will subscribe via their own receivers.
     pub event_log: EventLog,
+    /// Minimap sidebar panel rendered below the file browser.
+    pub minimap: MiniMap,
     /// Per-file UI state (selection, scroll) keyed by source path.
     /// Loaded from [`PersistedSession::file_state`] at launch and
     /// consumed when a file's `View` is first created (then dropped
@@ -140,6 +143,7 @@ impl Default for AppState {
             events,
             event_rx: Some(event_rx),
             event_log: EventLog::default(),
+            minimap: MiniMap::default(),
             pending_file_state: std::collections::HashMap::new(),
         }
     }
@@ -500,6 +504,7 @@ impl eframe::App for SeqForgeApp {
             terminal,
             overlays,
             focus,
+            minimap,
             ..
         } = &mut self.state;
 
@@ -517,6 +522,7 @@ impl eframe::App for SeqForgeApp {
                             terminal,
                             overlays,
                             focus,
+                            minimap,
                         },
                     );
             });

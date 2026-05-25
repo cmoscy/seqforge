@@ -25,7 +25,7 @@ const LABEL_CHAR_W: f32 = (FONT_SIZE - 3.0) * 0.55;
 /// Sorts ranges by start, then packs each into the first row whose last
 /// element ends at or before the current range's start.
 /// Returns `(item_idx → row, n_rows)`.
-fn greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize) {
+pub(crate) fn greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize) {
     if ranges.is_empty() {
         return (vec![], 0);
     }
@@ -71,7 +71,7 @@ fn stack_cut_labels(sites: &[seqforge_core::CutSite], char_width: f32) -> (Vec<u
 
 // ── Colors ────────────────────────────────────────────────────────────────────
 
-fn feature_color(kind: FeatureKind) -> Color32 {
+pub(crate) fn feature_color(kind: FeatureKind) -> Color32 {
     match kind {
         FeatureKind::Gene => Color32::from_rgb(100, 149, 237),
         FeatureKind::Cds => Color32::from_rgb(72, 201, 176),
@@ -124,9 +124,9 @@ fn annot_bar_rect(
 /// Stacked-row assignment for a set of intervals (features or cut
 /// labels). Both viewer caches share the same shape.
 #[derive(Debug, Default, Clone)]
-struct StackLayout {
-    row: Vec<usize>,
-    n_rows: usize,
+pub(crate) struct StackLayout {
+    pub(crate) row: Vec<usize>,
+    pub(crate) n_rows: usize,
 }
 
 /// Rendering caches and interaction state for the sequence viewer widget.
@@ -259,6 +259,7 @@ impl SequenceView {
         if let Some(offset) = scroll_offset {
             scroll_area = scroll_area.vertical_scroll_offset(offset);
         }
+        let mut computed_visible: Option<(usize, usize)> = None;
         scroll_area.show(ui, |ui| {
                 let (response, painter) = ui.allocate_painter(
                     Vec2::new(alloc_width, total_height),
@@ -639,7 +640,17 @@ impl SequenceView {
                         );
                     }
                 }
+
+                // Visible range for minimap viewport indicator.
+                let scroll_top = (clip.min.y - rect.min.y).max(0.0);
+                let first_block = (scroll_top / block_h) as usize;
+                let last_block = ((scroll_top + clip.height()) / block_h).ceil() as usize;
+                computed_visible = Some((
+                    (first_block * line_width).min(seq_len),
+                    ((last_block + 1) * line_width).min(seq_len),
+                ));
             });
+        view.visible_range = computed_visible;
     }
 }
 
