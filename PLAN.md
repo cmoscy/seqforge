@@ -545,6 +545,41 @@ CI is not in scope for v0.1.
 
 ---
 
+### Phase 9.5 — Sequence Minimap Sidebar Panel ✅ DONE
+
+**Goal:** Compact, read-only sequence overview panel below the file browser. Topology-aware: circular sequences render as a plasmid ring with feature arcs; linear sequences render as a proportional horizontal bar with feature rectangles. Click-to-navigate via the existing `GoTo` path. Non-focusable; never mutates state directly.
+
+**Features landed (`fb7d2d6`):**
+
+- [x] `MiniMap` widget in `crates/seqforge-app/src/minimap.rs` — retained state, geometry cache, painter
+- [x] **Topology dispatch:** `buf.is_circular()` → circular ring (`paint_circular`) or linear bar (`paint_linear`); adding a new topology is `+1 branch`
+- [x] **Circular ring:** backbone ring via `painter.circle_stroke`; feature arcs as polyline approximations (~1 segment per 3°); LOD filter drops arcs < 2.5° span
+- [x] **Linear bar:** backbone rect; feature bars using greedy stacking (reuses `viewer::greedy_stack`); LOD filter drops bars < 2 px wide; feature colors reuse `viewer::feature_color`
+- [x] **Geometry cache:** keyed by `(BufferId, buffer.version, quantised_panel_size)` — identical invalidation contract to `SequenceView::feature_cache`; rebuild is free once the editor lands and starts bumping `version`
+- [x] **Click-to-navigate:** angular hit-test (circular) or proportional x hit-test (linear) → `AppCommand::Viewer(GoTo{position})`
+- [x] **Cursor indicator:** 2 px white tick radially through backbone (circular) or 1.5 px white vline on spine (linear)
+- [x] **Selection highlight:** blue semi-transparent arc (circular) or rect (linear) over the selected range
+- [x] **Selected feature highlight:** white stroke border over the selected feature's arc/bar
+- [x] **Strand arrowheads:** small filled triangles at arc/bar termini for `Strand::Forward` / `Strand::Reverse` features
+- [x] **Viewport indicator:** `View::visible_range` written each frame by `SequenceView::show`; minimap renders a white semi-transparent arc (circular) or rect (linear) showing the currently visible portion of the sequence
+- [x] **Header label:** construct name (truncated with `…`) + bp count + topology tag rendered above the panel
+- [x] **Dynamic sizing:** panel fills available pane space; circular is `min(w, h)` square; linear uses full width; panel size is part of the cache key (quantised to 0.5 px steps)
+- [x] **Resizable split:** drag handle between browser tree and minimap adjusts `browser_fraction`; persisted in `MiniMap` across tab switches; clamped to `[0.15, 0.85]`
+- [x] **Centering:** circular ring horizontally and vertically centered in the available panel area
+- [x] Background inherits egui theme (no explicit fill = transparent over egui's default)
+
+**Key files:**
+
+- `crates/seqforge-app/src/minimap.rs` — new; `MiniMap`, geometry builders, painters, arrowhead helpers
+- `crates/seqforge-app/src/tabs.rs` — `TabViewer::minimap` field; `Tab::FileBrowser` arm wired with drag handle and `minimap.show()`
+- `crates/seqforge-app/src/viewer.rs` — `visible_range` computed and written to `view.visible_range` at end of scroll closure; `greedy_stack` + `feature_color` + `StackLayout` made `pub(crate)`
+- `crates/seqforge-core/src/model.rs` — `View::visible_range: Option<(usize, usize)>` added (`#[serde(skip)]`)
+- `crates/seqforge-app/src/app.rs` — `AppState::minimap: MiniMap` + destructuring in `update()`
+
+**Done when:** open `pUC19.gbk` → ring with colored arcs + arrowheads + white viewport arc; scroll text viewer → arc moves; click ring → viewer navigates. Open linear `.fasta` → bar with feature rects + viewport rect. ✅
+
+---
+
 ## Dependency-of-phases graph
 
 ```
@@ -552,7 +587,7 @@ CI is not in scope for v0.1.
                ↓    ↑
                4 ───┘
                     ↓
-                    7 → 8 → 9
+                    7 → 8 → 9 → 9.5
 ```
 
 Phase 4 (viewer) and Phase 5 (dispatch) can be developed in parallel after Phase 3. Phase 6 needs both. Phase 7 needs viewer + dispatch.
@@ -1325,6 +1360,8 @@ Defer until you actually feel the pain.
 
 ```
 Phase 9 verification (in progress)
+  │
+  ├─→ Phase 9.5 minimap sidebar      ✅ fb7d2d6
   │
   │   Tier 1 — bug fixes
   ├─→ #2 set_var ordering         ✅ cadd087
