@@ -88,6 +88,18 @@ pub enum AppCommand {
     // ── Tools ────────────────────────────────────────────────────────
     InstallCli,
 
+    // ── Config ───────────────────────────────────────────────────────
+    /// Re-read settings / theme / keybindings from disk.
+    ReloadConfig,
+    /// Seed `settings.toml` if missing and open it in the user's editor.
+    OpenSettingsFile,
+    /// Seed `keybindings.toml` if missing and open it in the user's editor.
+    OpenKeybindingsFile,
+    /// Seed `themes/<active>.toml` if missing and open it in the user's editor.
+    OpenThemeFile,
+    /// Open the config directory in the platform file manager.
+    OpenConfigDir,
+
     // ── Pass-through ─────────────────────────────────────────────────
     Viewer(ViewerRequest),
 }
@@ -103,7 +115,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         Viewer(_) => true,
         SetSelection(_) | SelectFeature(_) => true,
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
-        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli => true,
+        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli
+        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile
+        | OpenConfigDir => true,
     }
 }
 
@@ -208,6 +222,24 @@ pub(super) fn dispatch_active<B: BioOps>(
         .and_then(|inner| inner)
 }
 
+/// Seed `path` from `template` if it doesn't exist, then launch it in
+/// the user's editor. Errors surface as toasts; the command never
+/// fails (returns `Ok(None)` either way).
+fn open_config_file(
+    state: &mut AppState,
+    path: std::path::PathBuf,
+    template: &str,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    if let Err(e) = crate::config::ensure_file_exists(&path, template) {
+        state.toasts.error(format!("seed config: {e}"));
+        return Ok(None);
+    }
+    if let Err(e) = crate::config::open_in_editor(&path) {
+        state.toasts.error(format!("open config: {e}"));
+    }
+    Ok(None)
+}
+
 // ── Public dispatcher ────────────────────────────────────────────────────────
 
 pub fn apply<B: BioOps>(
@@ -251,6 +283,47 @@ pub fn apply<B: BioOps>(
 
         // ── Tools ───────────────────────────────────────────────────
         InstallCli => file::apply_install_cli(state),
+
+        // ── Config ──────────────────────────────────────────────────
+        ReloadConfig => {
+            let epoch = state.config.epoch;
+            state.config = crate::config::Config::reload(epoch);
+            state.toasts.success("Reloaded config");
+            Ok(None)
+        }
+        OpenSettingsFile => open_config_file(
+            state,
+            crate::config::paths::settings_path(),
+            crate::config::defaults::SETTINGS_TEMPLATE,
+        ),
+        OpenKeybindingsFile => open_config_file(
+            state,
+            crate::config::paths::keybindings_path(),
+            crate::config::defaults::KEYBINDINGS_TEMPLATE,
+        ),
+        OpenThemeFile => {
+            let name = state.config.settings.theme.clone();
+            let template = match name.as_str() {
+                "default-light" => crate::config::defaults::DEFAULT_LIGHT,
+                _ => crate::config::defaults::DEFAULT_DARK,
+            };
+            open_config_file(
+                state,
+                crate::config::paths::theme_path(&name),
+                template,
+            )
+        }
+        OpenConfigDir => {
+            let dir = crate::config::paths::config_dir();
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                state.toasts.error(format!("create config dir: {e}"));
+                return Ok(None);
+            }
+            if let Err(e) = crate::config::open_in_editor(&dir) {
+                state.toasts.error(format!("open config dir: {e}"));
+            }
+            Ok(None)
+        }
 
         // ── Pass-through ────────────────────────────────────────────
         Viewer(req) => match req {

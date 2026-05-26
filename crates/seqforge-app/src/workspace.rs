@@ -30,6 +30,20 @@ use seqforge_core::{
     Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind,
 };
 
+/// User-facing label for a buffer: the source file's basename when the
+/// buffer is backed by a file, otherwise the sequence name from the
+/// record (e.g. for socket-injected or in-memory buffers). Single
+/// source of truth used by the tab title, minimap header, and
+/// DocOpened event so they never drift.
+pub fn display_name(buf: &Buffer) -> String {
+    buf.source_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| buf.name.clone())
+}
+
 use crate::viewer::SequenceView;
 
 // ── BufferStore ──────────────────────────────────────────────────────────────

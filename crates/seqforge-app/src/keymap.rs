@@ -170,6 +170,23 @@ pub fn dispatch(
 ) -> Vec<AppCommand> {
     let mut out = Vec::new();
     ctx.input_mut(|i| {
+        // ── User keybinding overrides (consulted first) ────────────────
+        // Any chord listed in `keybindings.toml` wins over the built-in
+        // KEYMAP. Workspace-scope only — the override file doesn't
+        // currently carry a context tag, so it fires whenever the chord
+        // is pressed at the workspace level.
+        let ws_ok = focus.context.contains(KeyContext::WORKSPACE);
+        if ws_ok {
+            for (mods, key, action) in state.config.keybindings.entries.iter() {
+                if i.consume_key(*mods, *key) {
+                    let cmd = action.to_command();
+                    if command::is_enabled(&cmd, state) {
+                        out.push(cmd);
+                    }
+                }
+            }
+        }
+
         for b in KEYMAP.iter() {
             // Context gate first — cheapest filter, and skipping it
             // means we do *not* call `consume_key`, so a chord that

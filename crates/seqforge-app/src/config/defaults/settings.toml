@@ -1,0 +1,53 @@
+# SeqForge — user settings.
+#
+# Every key below is OPTIONAL. Missing keys (or this whole file) fall
+# back to built-in defaults. Restore defaults by deleting this file.
+#
+# After editing, run "Reload Config" from the Settings menu or restart
+# the app.
+
+# Theme file under themes/<name>.toml (no extension). Ships with
+# "default-dark" and "default-light"; see "Open Theme" to author your own.
+# theme = "default-dark"
+
+[font]
+# sequence_size = 13.0   # DNA letters in the viewer (monospace)
+# label_size    = 11.0   # feature names on annotation bars
+# ruler_size    = 11.0   # ruler tick labels
+# ui_size       = 13.0   # header / chrome text
+
+[editor]
+# left_margin           = 30.0
+# right_margin          = 20.0
+# ruler_height          = 14.0
+# strand_bar_height     = 17.0
+# block_gap             = 14.0
+# label_padding         = 2.5
+# min_annot_row_height  = 16.0   # floor; rows grow to fit label_size
+
+# How feature labels behave when they're wider than their bar:
+#   "truncate" — hide entirely (current default)
+#   "ellipsis" — render "Name…" when at least one char + ellipsis fits
+#   "extend"   — draw at full width centered on the bar, overflowing
+# label_overflow = "truncate"
+
+[minimap]
+# spine_stroke              = 2.5
+# feature_arc_width         = 7.0
+# selected_border           = 2.0
+# cursor_tick_length        = 9.0
+# min_arc_degrees           = 2.5
+# min_bar_width             = 2.0
+# linear_spine_height       = 8.0
+# linear_feature_row_height = 6.0
+# spine_feature_gap         = 3.0
+# selection_alpha           = 90
+
+[layout]
+# file_browser_fraction      = 0.20
+# terminal_fraction          = 0.70
+# minimap_browser_fraction   = 0.62
+
+[terminal]
+# Empty = use $SHELL (or /bin/bash as a fallback)
+# shell = ""

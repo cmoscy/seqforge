@@ -4,8 +4,11 @@ use std::sync::mpsc;
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse};
 
+use std::sync::Arc;
+
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
+use crate::config::Config;
 use crate::minimap::MiniMap;
 use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
@@ -111,6 +114,11 @@ pub struct AppState {
         PathBuf,
         crate::persistence::FileState,
     >,
+    /// User configuration (settings + theme + key overrides). Loaded
+    /// from disk in `SeqForgeApp::new`; can be re-read at runtime via
+    /// the `ReloadConfig` command. Wrapped in `Arc` so widgets cheaply
+    /// clone a per-frame reference.
+    pub config: Arc<Config>,
 }
 
 impl Default for AppState {
@@ -118,11 +126,19 @@ impl Default for AppState {
         // Central area starts with a Welcome placeholder; first OpenFile
         // replaces it with a `Tab::View(_)`. The Welcome/View invariant
         // is maintained by `ensure_welcome_invariant` in command.rs.
+        let cfg = Config::default();
         let mut dock_state = DockState::new(vec![Tab::Welcome]);
         let surface = dock_state.main_surface_mut();
-        let [_right, _left] = surface.split_left(NodeIndex::root(), 0.20, vec![Tab::FileBrowser]);
-        let [_viewer, _terminal] =
-            surface.split_below(NodeIndex::root(), 0.70, vec![Tab::Terminal]);
+        let [_right, _left] = surface.split_left(
+            NodeIndex::root(),
+            cfg.settings.layout.file_browser_fraction,
+            vec![Tab::FileBrowser],
+        );
+        let [_viewer, _terminal] = surface.split_below(
+            NodeIndex::root(),
+            cfg.settings.layout.terminal_fraction,
+            vec![Tab::Terminal],
+        );
 
         let (events, event_rx) = EventSink::channel();
         Self {
@@ -145,6 +161,7 @@ impl Default for AppState {
             event_log: EventLog::default(),
             minimap: MiniMap::default(),
             pending_file_state: std::collections::HashMap::new(),
+            config: Arc::new(cfg),
         }
     }
 }
@@ -215,6 +232,24 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
     }
 }
 
+/// Reset the dock to a fresh Welcome+Browser+Terminal layout using the
+/// active configuration's split fractions. Called on first launch (no
+/// saved session) and by `AppCommand::ResetLayout`.
+pub(crate) fn rebuild_default_dock(dock: &mut DockState<Tab>, cfg: &Config) {
+    *dock = DockState::new(vec![Tab::Welcome]);
+    let surface = dock.main_surface_mut();
+    let [_right, _left] = surface.split_left(
+        NodeIndex::root(),
+        cfg.settings.layout.file_browser_fraction,
+        vec![Tab::FileBrowser],
+    );
+    let [_viewer, _terminal] = surface.split_below(
+        NodeIndex::root(),
+        cfg.settings.layout.terminal_fraction,
+        vec![Tab::Terminal],
+    );
+}
+
 // ── SeqForgeApp ───────────────────────────────────────────────────────────────
 
 pub struct SeqForgeApp {
@@ -224,6 +259,13 @@ pub struct SeqForgeApp {
 impl SeqForgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::default();
+        state.config = Config::load();
+        state.minimap.browser_fraction =
+            state.config.settings.layout.minimap_browser_fraction.clamp(0.15, 0.85);
+        // If no saved session restores the layout below, rebuild the
+        // default dock using the *user-configured* split fractions so a
+        // first launch honours `[layout]` overrides.
+        rebuild_default_dock(&mut state.dock_state, &state.config);
 
         // Stage 2.5e: dock_state is no longer persisted as raw egui_dock
         // state; we save/load a path-keyed `PersistedSession` blob and
@@ -265,9 +307,12 @@ impl SeqForgeApp {
         #[cfg(not(unix))]
         crate::terminal::install_pty_env(None);
 
-        state.terminal = TerminalPane::new(cc.egui_ctx.clone())
-            .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
-            .ok();
+        state.terminal = TerminalPane::new(
+            cc.egui_ctx.clone(),
+            &state.config.settings.terminal.shell,
+        )
+        .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
+        .ok();
 
         Self { state }
     }
@@ -436,6 +481,29 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("Settings", |ui| {
+                    if ui.button("Open Settings…").clicked() {
+                        menu_cmds.push(AppCommand::OpenSettingsFile);
+                        ui.close_menu();
+                    }
+                    if ui.button("Open Keybindings…").clicked() {
+                        menu_cmds.push(AppCommand::OpenKeybindingsFile);
+                        ui.close_menu();
+                    }
+                    if ui.button("Open Theme File…").clicked() {
+                        menu_cmds.push(AppCommand::OpenThemeFile);
+                        ui.close_menu();
+                    }
+                    if ui.button("Open Config Folder").clicked() {
+                        menu_cmds.push(AppCommand::OpenConfigDir);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Reload Config").clicked() {
+                        menu_cmds.push(AppCommand::ReloadConfig);
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
                         ui.close_menu();
@@ -505,6 +573,7 @@ impl eframe::App for SeqForgeApp {
             overlays,
             focus,
             minimap,
+            config,
             ..
         } = &mut self.state;
 
@@ -523,6 +592,7 @@ impl eframe::App for SeqForgeApp {
                             overlays,
                             focus,
                             minimap,
+                            config: config.clone(),
                         },
                     );
             });

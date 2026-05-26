@@ -17,31 +17,8 @@ use seqforge_core::{Annotations, BufferId, Strand, ViewerRequest};
 
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
-use crate::viewer::feature_color;
+use crate::config::{Config, MinimapSettings};
 use crate::workspace::Workspace;
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/// Backbone ring stroke width (px).
-const SPINE_W: f32 = 2.5;
-/// Feature arc/bar stroke width (px).
-const FEAT_W: f32 = 7.0;
-/// Selected-feature highlight stroke (white border) width (px).
-const SEL_FEAT_W: f32 = 2.0;
-/// Cursor indicator tick half-length radially from backbone (px).
-const CURSOR_TICK: f32 = 9.0;
-/// Minimum arc span (degrees) to render a circular feature — LOD filter.
-const MIN_ARC_DEG: f32 = 2.5;
-/// Minimum bar width (px) to render a linear feature — LOD filter.
-const MIN_BAR_PX: f32 = 2.0;
-/// Height of the linear backbone bar (px).
-const LINEAR_SPINE_H: f32 = 8.0;
-/// Height of each linear feature bar row (px).
-const LINEAR_FEAT_H: f32 = 6.0;
-/// Gap between linear spine and first feature row (px).
-const LINEAR_GAP: f32 = 3.0;
-/// Selection highlight alpha (0–255).
-const SEL_ALPHA: u8 = 90;
 
 // ── Cached geometry ───────────────────────────────────────────────────────────
 
@@ -87,6 +64,8 @@ fn build_circular_geom(
     ann: &Annotations,
     seq_len: usize,
     panel_size: f32,
+    settings: &MinimapSettings,
+    theme: &crate::config::Theme,
 ) -> MinimapGeom {
     let center = Pos2::new(panel_size / 2.0, panel_size / 2.0);
     let radius = panel_size * 0.38;
@@ -103,7 +82,7 @@ fn build_circular_geom(
         }
         let span_deg = span.to_degrees();
 
-        if span_deg < MIN_ARC_DEG {
+        if span_deg < settings.min_arc_degrees {
             continue; // LOD: too small to see
         }
 
@@ -121,7 +100,7 @@ fn build_circular_geom(
 
         arcs.push(PaintArc {
             points,
-            color: feature_color(feat.kind),
+            color: theme.feature_color(feat.kind),
             feat_idx,
             strand: feat.strand,
         });
@@ -135,6 +114,8 @@ fn build_linear_geom(
     ann: &Annotations,
     seq_len: usize,
     panel_width: f32,
+    settings: &MinimapSettings,
+    theme: &crate::config::Theme,
 ) -> MinimapGeom {
     // Feature rows packed identically to the text viewer's stacking.
     let ranges: Vec<(usize, usize)> = ann
@@ -149,19 +130,24 @@ fn build_linear_geom(
         let x = (feat.range.start as f32 / seq_len as f32) * panel_width;
         let w = ((feat.range.end - feat.range.start) as f32 / seq_len as f32) * panel_width;
 
-        if w < MIN_BAR_PX {
+        if w < settings.min_bar_width {
             continue; // LOD: sub-pixel
         }
 
         let row = row_assign[feat_idx];
-        let y = LINEAR_SPINE_H + LINEAR_GAP + row as f32 * (LINEAR_FEAT_H + 1.0);
+        let y = settings.linear_spine_height
+            + settings.spine_feature_gap
+            + row as f32 * (settings.linear_feature_row_height + 1.0);
 
         bars.push(PaintBar {
             rect: Rect::from_min_size(
                 Pos2::new(x, y),
-                Vec2::new(w.max(MIN_BAR_PX), LINEAR_FEAT_H),
+                Vec2::new(
+                    w.max(settings.min_bar_width),
+                    settings.linear_feature_row_height,
+                ),
             ),
-            color: feature_color(feat.kind),
+            color: theme.feature_color(feat.kind),
             feat_idx,
             strand: feat.strand,
         });
@@ -181,10 +167,11 @@ fn angle_for_pos(pos: usize, seq_len: usize) -> f32 {
 
 /// Retained state for the minimap panel.
 pub struct MiniMap {
-    /// `(buffer_id, buffer.version, panel_size_q)` → cached geometry.
+    /// `(buffer_id, buffer.version, panel_size_q, config_epoch)` → cached geometry.
     /// `panel_size_q` is `(panel_size * 2.0).round() as u32` so sub-0.5px
-    /// resize noise doesn't thrash the cache.
-    geom_cache: Cache<(BufferId, u64, u32), MinimapGeom>,
+    /// resize noise doesn't thrash the cache. `config_epoch` bumps on
+    /// `ReloadConfig` so a theme/sizing change re-tessellates.
+    geom_cache: Cache<(BufferId, u64, u32, u64), MinimapGeom>,
     /// Fraction of the FileBrowser tab height given to the browser tree.
     /// The remainder is the minimap. Adjusted by the drag handle in
     /// `tabs.rs`. Clamped to `[0.15, 0.85]` during drag.
@@ -207,6 +194,7 @@ impl MiniMap {
         ui: &mut egui::Ui,
         workspace: &mut Workspace,
         cmds: &mut Vec<PendingCommand>,
+        cfg: &Config,
     ) {
         // ── No document open ─────────────────────────────────────────────────
         if workspace.active_view().is_none() {
@@ -233,7 +221,9 @@ impl MiniMap {
             cursor_pos: usize,
             selection: Option<seqforge_core::Selection>,
             selected_feature: Option<usize>,
-            name: String,
+            /// Display label — file basename when the buffer is backed
+            /// by a file, otherwise the sequence name from the record.
+            display_name: String,
             visible_range: Option<(usize, usize)>,
         }
 
@@ -246,7 +236,7 @@ impl MiniMap {
                 cursor_pos: view.selection.map(|s| s.anchor).unwrap_or(0),
                 selection: view.selection,
                 selected_feature: view.selected_feature,
-                name: buf.name.clone(),
+                display_name: crate::workspace::display_name(buf),
                 visible_range: view.visible_range,
             })
             .ok();
@@ -261,13 +251,15 @@ impl MiniMap {
         ui.vertical_centered(|ui| {
             let topology = if snap.is_circular { "circular" } else { "linear" };
             ui.add(
-                egui::Label::new(egui::RichText::new(&snap.name).small().strong())
+                egui::Label::new(egui::RichText::new(&snap.display_name).strong())
                     .truncate(),
             );
+            // Use the regular text colour at slight de-emphasis instead
+            // of `weak_text_color`, which is too faded against the panel
+            // background to read at a glance.
             ui.label(
                 egui::RichText::new(format!("{} bp  ·  {topology}", snap.seq_len))
-                    .small()
-                    .color(ui.visuals().weak_text_color()),
+                    .color(ui.visuals().text_color().gamma_multiply(0.85)),
             );
         });
         ui.add_space(4.0);
@@ -277,13 +269,17 @@ impl MiniMap {
         // user-resizable so dynamic sizing is the correct behaviour.
         let available_w = ui.available_width().max(60.0);
         let available_h = ui.available_height();
+        let m = &cfg.settings.minimap;
         let (geom_dim, panel_w, panel_h) = if snap.is_circular {
             // Keep the ring square; fit inside whichever dimension is smaller.
             let size = available_w.min(available_h).max(60.0);
             (size, size, size)
         } else {
             // Linear: full width, fixed height (capped so it doesn't overflow).
-            let h = (LINEAR_SPINE_H + LINEAR_GAP + 4.0 * (LINEAR_FEAT_H + 1.0) + 8.0)
+            let h = (m.linear_spine_height
+                + m.spine_feature_gap
+                + 4.0 * (m.linear_feature_row_height + 1.0)
+                + 8.0)
                 .min(available_h);
             (available_w, available_w, h)
         };
@@ -310,8 +306,10 @@ impl MiniMap {
         // doesn't thrash the cache while still triggering rebuilds on meaningful
         // size changes — same strategy as SequenceView::cut_label_cache.
         let panel_size_q = (geom_dim * 2.0).round() as u32;
-        let cache_key = (snap.buffer_id, snap.version, panel_size_q);
+        let cache_key = (snap.buffer_id, snap.version, panel_size_q, cfg.epoch);
 
+        let settings = cfg.settings.minimap.clone();
+        let theme = cfg.theme.clone();
         // Re-enter the workspace to access annotations for the compute
         // closure. `self` (MiniMap) and `workspace` are disjoint borrows
         // so the borrow checker accepts the nested capture.
@@ -320,9 +318,9 @@ impl MiniMap {
                 self.geom_cache
                     .get_or_compute(cache_key, || {
                         if buf.is_circular() {
-                            build_circular_geom(ann, buf.len(), geom_dim)
+                            build_circular_geom(ann, buf.len(), geom_dim, &settings, &theme)
                         } else {
-                            build_linear_geom(ann, buf.len(), geom_dim)
+                            build_linear_geom(ann, buf.len(), geom_dim, &settings, &theme)
                         }
                     })
                     .clone()
@@ -347,6 +345,8 @@ impl MiniMap {
                 snap.cursor_pos,
                 snap.visible_range,
                 spine_color,
+                &cfg.settings.minimap,
+                &cfg.theme,
             );
         } else {
             paint_linear(
@@ -359,6 +359,8 @@ impl MiniMap {
                 snap.visible_range,
                 panel_w,
                 spine_color,
+                &cfg.settings.minimap,
+                &cfg.theme,
             );
         }
 
@@ -396,20 +398,28 @@ fn paint_circular(
     cursor_pos: usize,
     visible_range: Option<(usize, usize)>,
     spine_color: Color32,
+    settings: &MinimapSettings,
+    theme: &crate::config::Theme,
 ) {
     let center = rect.center();
     let panel_size = rect.width().min(rect.height());
     let radius = panel_size * 0.38;
     let seq_len = geom.seq_len;
     let offset = rect.min.to_vec2();
+    let spine_w = settings.spine_stroke;
+    let feat_w = settings.feature_arc_width;
+    let sel_feat_w = settings.selected_border;
+    let cursor_tick = settings.cursor_tick_length;
 
     // Backbone ring
-    painter.circle_stroke(center, radius, Stroke::new(SPINE_W, spine_color));
+    painter.circle_stroke(center, radius, Stroke::new(spine_w, spine_color));
 
     // Viewport highlight arc (behind features)
     if let Some((vs, ve)) = visible_range {
-        paint_arc_range(painter, center, radius, vs, ve, seq_len,
-            Stroke::new(SPINE_W + 8.0, Color32::from_rgba_unmultiplied(255, 255, 255, 28)));
+        paint_arc_range(
+            painter, center, radius, vs, ve, seq_len,
+            Stroke::new(spine_w + 8.0, theme.minimap.viewport.0),
+        );
     }
 
     // Feature arcs (normal, non-selected first)
@@ -418,7 +428,7 @@ fn paint_circular(
             continue; // drawn on top below
         }
         let pts: Vec<Pos2> = arc.points.iter().map(|p| rect.min + p.to_vec2()).collect();
-        painter.add(Shape::line(pts, Stroke::new(FEAT_W, arc.color)));
+        painter.add(Shape::line(pts, Stroke::new(feat_w, arc.color)));
         if let Some(shape) = arc_arrowhead(arc, arc.strand, offset, arc.color) {
             painter.add(shape);
         }
@@ -428,9 +438,11 @@ fn paint_circular(
     if let Some(sel) = selection {
         if !sel.is_cursor() {
             let (s, e) = sel.ordered();
-            let sel_color = Color32::from_rgba_unmultiplied(173, 214, 255, SEL_ALPHA);
-            paint_arc_range(painter, center, radius + FEAT_W * 0.5, s, e, seq_len,
-                Stroke::new(FEAT_W + 4.0, sel_color));
+            let sel_color = theme.minimap.selection.0;
+            paint_arc_range(
+                painter, center, radius + feat_w * 0.5, s, e, seq_len,
+                Stroke::new(feat_w + 4.0, sel_color),
+            );
         }
     }
 
@@ -438,8 +450,8 @@ fn paint_circular(
     if let Some(sel_idx) = selected_feature {
         if let Some(arc) = geom.arcs.iter().find(|a| a.feat_idx == sel_idx) {
             let pts: Vec<Pos2> = arc.points.iter().map(|p| rect.min + p.to_vec2()).collect();
-            painter.add(Shape::line(pts.clone(), Stroke::new(FEAT_W, arc.color)));
-            painter.add(Shape::line(pts, Stroke::new(SEL_FEAT_W, Color32::WHITE)));
+            painter.add(Shape::line(pts.clone(), Stroke::new(feat_w, arc.color)));
+            painter.add(Shape::line(pts, Stroke::new(sel_feat_w, Color32::WHITE)));
             if let Some(shape) = arc_arrowhead(arc, arc.strand, offset, arc.color) {
                 painter.add(shape);
             }
@@ -450,8 +462,8 @@ fn paint_circular(
     let cursor_a = angle_for_pos(cursor_pos, seq_len);
     let dir = Vec2::new(cursor_a.cos(), cursor_a.sin());
     painter.line_segment(
-        [center + dir * (radius - CURSOR_TICK), center + dir * (radius + CURSOR_TICK)],
-        Stroke::new(2.0, Color32::WHITE),
+        [center + dir * (radius - cursor_tick), center + dir * (radius + cursor_tick)],
+        Stroke::new(2.0, theme.minimap.cursor.0),
     );
 }
 
@@ -521,10 +533,14 @@ fn paint_linear(
     visible_range: Option<(usize, usize)>,
     panel_width: f32,
     spine_color: Color32,
+    settings: &MinimapSettings,
+    theme: &crate::config::Theme,
 ) {
     let origin = rect.min;
     let seq_len = geom.seq_len;
     let panel_h = rect.height();
+    let spine_h = settings.linear_spine_height;
+    let sel_feat_w = settings.selected_border;
 
     // Viewport highlight (behind everything)
     if let Some((vs, ve)) = visible_range {
@@ -534,15 +550,17 @@ fn paint_linear(
             Pos2::new(vx, origin.y),
             Vec2::new(vw.max(2.0), panel_h),
         );
-        painter.rect_filled(vp_rect, 0.0,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 18));
-        painter.rect_stroke(vp_rect, 0.0,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 100)),
-            egui::StrokeKind::Inside);
+        painter.rect_filled(vp_rect, 0.0, theme.minimap.viewport.0);
+        painter.rect_stroke(
+            vp_rect,
+            0.0,
+            Stroke::new(1.0, theme.minimap.cursor.0.gamma_multiply(0.4)),
+            egui::StrokeKind::Inside,
+        );
     }
 
     // Backbone bar
-    let spine_rect = Rect::from_min_size(origin, Vec2::new(panel_width, LINEAR_SPINE_H));
+    let spine_rect = Rect::from_min_size(origin, Vec2::new(panel_width, spine_h));
     painter.rect_filled(spine_rect, 2.0, spine_color);
 
     // Feature bars + strand arrowheads
@@ -550,8 +568,11 @@ fn paint_linear(
         let r = Rect::from_min_size(origin + bar.rect.min.to_vec2(), bar.rect.size());
         painter.rect_filled(r, 1.0, bar.color);
         if Some(bar.feat_idx) == selected_feature {
-            painter.rect_stroke(r, 1.0, Stroke::new(SEL_FEAT_W, Color32::WHITE),
-                egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                r, 1.0,
+                Stroke::new(sel_feat_w, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
         }
         if r.width() >= 6.0 {
             if let Some(shape) = bar_arrowhead(r, bar.strand, bar.color) {
@@ -566,11 +587,10 @@ fn paint_linear(
             let (s, e) = sel.ordered();
             let sx = origin.x + (s as f32 / seq_len as f32) * panel_width;
             let ex = origin.x + (e as f32 / seq_len as f32) * panel_width;
-            let sel_color = Color32::from_rgba_unmultiplied(173, 214, 255, SEL_ALPHA);
             painter.rect_filled(
-                Rect::from_x_y_ranges(sx..=ex, origin.y..=(origin.y + LINEAR_SPINE_H)),
+                Rect::from_x_y_ranges(sx..=ex, origin.y..=(origin.y + spine_h)),
                 0.0,
-                sel_color,
+                theme.minimap.selection.0,
             );
         }
     }
@@ -579,8 +599,8 @@ fn paint_linear(
     let cx = origin.x + (cursor_pos as f32 / seq_len as f32) * panel_width;
     painter.vline(
         cx,
-        origin.y..=(origin.y + LINEAR_SPINE_H),
-        Stroke::new(1.5, Color32::WHITE),
+        origin.y..=(origin.y + spine_h),
+        Stroke::new(1.5, theme.minimap.cursor.0),
     );
 }
 

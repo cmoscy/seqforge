@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use seqforge_core::ViewId;
 
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
+use crate::config::Config;
 use crate::focus::{FocusScope, FocusState};
 use crate::minimap::MiniMap;
 use crate::overlay::{self, OverlayStack};
@@ -33,6 +36,8 @@ pub struct TabViewer<'a> {
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
     pub minimap: &'a mut MiniMap,
+    /// Per-frame snapshot of the active config; cheap to clone.
+    pub config: Arc<Config>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -47,7 +52,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 let name = self.workspace.view(*vid).and_then(|v| {
                     let arc = self.workspace.buffers.get(v.buffer_id)?;
                     let buf = arc.read().ok()?;
-                    Some(buf.name.clone())
+                    Some(crate::workspace::display_name(&buf))
                 });
                 name.unwrap_or_else(|| "Untitled".to_string()).into()
             }
@@ -131,7 +136,12 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     egui::Stroke::new(1.0, handle_color),
                 );
 
-                self.minimap.show(ui, self.workspace, self.pending_commands);
+                self.minimap.show(
+                    ui,
+                    self.workspace,
+                    self.pending_commands,
+                    &self.config,
+                );
             }
             Tab::Welcome => {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
@@ -165,6 +175,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 let TabViewer {
                     workspace,
                     pending_commands,
+                    config,
                     ..
                 } = self;
                 // ViewKind dispatch (Stage 2.5d). Today only `TextView`
@@ -173,11 +184,12 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // elsewhere. The pattern matches Helix's view-kind
                 // dispatch and keeps the renderer module per-kind
                 // closed.
+                let cfg = config.clone();
                 let rendered =
                     workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
                         match view.kind {
                             seqforge_core::ViewKind::TextView => {
-                                seq_view.show(ui, view, buf, ann, pending_commands);
+                                seq_view.show(ui, view, buf, ann, pending_commands, &cfg);
                             }
                         }
                     });

@@ -83,7 +83,7 @@ pub(super) fn apply_open_file<B: BioOps>(
             .workspace
             .buffers
             .get(v.buffer_id)
-            .and_then(|arc| arc.read().ok().map(|b| (b.name.clone(), b.len())))
+            .and_then(|arc| arc.read().ok().map(|b| (crate::workspace::display_name(&b), b.len())))
     }) {
         state.events.emit(AppEvent::DocOpened { name, len });
     }

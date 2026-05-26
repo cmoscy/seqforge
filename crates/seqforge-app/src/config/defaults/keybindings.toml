@@ -1,0 +1,29 @@
+# SeqForge — keybinding overrides.
+#
+# Format: "chord" = "action_name"
+#
+# Chord tokens (case-insensitive, separated by `+`):
+#   cmd / command / meta / super
+#   ctrl / control
+#   alt / option / opt
+#   shift
+#   <key>     letters, digits, named keys (enter, esc, tab, space, left,
+#             right, up, down, [, ], \, /, -, =, ',', ., ;, ', `)
+#
+# Actions:
+#   open_file         Show the file open dialog
+#   close_doc         Close the active document
+#   find              Open the find bar
+#   goto              Open the go-to-position bar
+#   next_tab          Cycle to the next tab in the active pane
+#   prev_tab          Cycle to the previous tab in the active pane
+#   split_horizontal  Split the active viewer pane left/right
+#   split_vertical    Split the active viewer pane top/bottom
+#   dismiss_overlay   Close the topmost overlay (find/goto/dialog)
+#   reload_config     Re-read settings.toml, keybindings.toml, and theme
+#
+# Anything not listed here keeps its built-in chord.
+
+# "ctrl+s"        = "save"
+# "cmd+shift+p"   = "find"
+# "cmd+r"         = "reload_config"

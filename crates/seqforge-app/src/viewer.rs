@@ -1,23 +1,11 @@
 use egui::{text::LayoutJob, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, Buffer, BufferId, Feature, FeatureKind, Selection, Strand, View,
+    Annotations, Buffer, BufferId, Feature, Selection, Strand, View,
 };
 
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
-
-const FONT_SIZE: f32 = 13.0;
-const ANNOT_ROW_HEIGHT: f32 = 16.0;
-const CUT_LABEL_ROW_H: f32 = 14.0;
-const RULER_HEIGHT: f32 = 14.0;
-const STRAND_HEIGHT: f32 = 17.0;
-const BLOCK_GAP: f32 = 14.0;
-const LEFT_MARGIN: f32 = 30.0;
-const RIGHT_MARGIN: f32 = 20.0;
-const SELECTION_COLOR: Color32 = Color32::from_rgb(173, 214, 255);
-const CURSOR_COLOR: Color32 = Color32::from_rgb(50, 120, 255);
-const CUT_SITE_COLOR: Color32 = Color32::from_rgb(220, 80, 200);
-const LABEL_CHAR_W: f32 = (FONT_SIZE - 3.0) * 0.55;
+use crate::config::{Config, LabelOverflow};
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
 
@@ -57,40 +45,20 @@ fn stack_features(features: &[Feature]) -> (Vec<usize>, usize) {
     greedy_stack(&ranges)
 }
 
-fn stack_cut_labels(sites: &[seqforge_core::CutSite], char_width: f32) -> (Vec<usize>, usize) {
+fn stack_cut_labels(
+    sites: &[seqforge_core::CutSite],
+    char_width: f32,
+    label_char_w: f32,
+) -> (Vec<usize>, usize) {
     let ranges: Vec<(usize, usize)> = sites
         .iter()
         .map(|s| {
-            let half_px = s.enzyme.len() as f32 * LABEL_CHAR_W * 0.5 + 4.0;
+            let half_px = s.enzyme.len() as f32 * label_char_w * 0.5 + 4.0;
             let half_bases = (half_px / char_width).ceil() as usize + 1;
             (s.cut_pos.saturating_sub(half_bases), s.cut_pos + half_bases)
         })
         .collect();
     greedy_stack(&ranges)
-}
-
-// ── Colors ────────────────────────────────────────────────────────────────────
-
-pub(crate) fn feature_color(kind: FeatureKind) -> Color32 {
-    match kind {
-        FeatureKind::Gene => Color32::from_rgb(100, 149, 237),
-        FeatureKind::Cds => Color32::from_rgb(72, 201, 176),
-        FeatureKind::Promoter => Color32::from_rgb(241, 196, 15),
-        FeatureKind::Terminator => Color32::from_rgb(231, 76, 60),
-        FeatureKind::Rep => Color32::from_rgb(155, 89, 182),
-        FeatureKind::Source => Color32::from_rgb(149, 165, 166),
-        FeatureKind::Misc | FeatureKind::Other => Color32::from_rgb(189, 195, 199),
-    }
-}
-
-fn base_color(base: u8) -> Color32 {
-    match base.to_ascii_uppercase() {
-        b'A' => Color32::from_rgb(0, 150, 64),
-        b'T' => Color32::from_rgb(200, 30, 60),
-        b'G' => Color32::from_rgb(220, 120, 0),
-        b'C' => Color32::from_rgb(50, 100, 220),
-        _ => Color32::DARK_GRAY,
-    }
 }
 
 // ── Geometry helper ───────────────────────────────────────────────────────────
@@ -104,6 +72,7 @@ fn annot_bar_rect(
     bar_row_y: f32, // top of the feature's stacked row
     seq_x0: f32,
     char_width: f32,
+    row_h: f32,
 ) -> Option<Rect> {
     if feat.range.end <= block_start || feat.range.start >= block_end {
         return None;
@@ -112,10 +81,7 @@ fn annot_bar_rect(
     let col_e = feat.range.end.min(block_end) - block_start;
     Some(Rect::from_min_size(
         Pos2::new(seq_x0 + col_s as f32 * char_width, bar_row_y + 1.0),
-        Vec2::new(
-            (col_e - col_s) as f32 * char_width,
-            ANNOT_ROW_HEIGHT - 2.0,
-        ),
+        Vec2::new((col_e - col_s) as f32 * char_width, row_h - 2.0),
     ))
 }
 
@@ -174,6 +140,7 @@ impl SequenceView {
         buffer: &Buffer,
         annotations: &Annotations,
         cmds: &mut Vec<PendingCommand>,
+        cfg: &Config,
     ) {
         let seq = &buffer.text;
         let seq_len = seq.len();
@@ -184,6 +151,29 @@ impl SequenceView {
             });
             return;
         }
+
+        // ── Resolve runtime sizing from config ───────────────────────
+        let font_size = cfg.settings.font.sequence_size;
+        let label_size = cfg.settings.font.label_size;
+        let ruler_size = cfg.settings.font.ruler_size;
+        let annot_row_h = (label_size + 2.0 * cfg.settings.editor.label_padding)
+            .max(cfg.settings.editor.min_annot_row_height);
+        let ruler_h = cfg
+            .settings
+            .editor
+            .ruler_height
+            .max(ruler_size + 2.0);
+        let strand_h = cfg.settings.editor.strand_bar_height;
+        let block_gap = cfg.settings.editor.block_gap;
+        let left_margin = cfg.settings.editor.left_margin;
+        let right_margin = cfg.settings.editor.right_margin;
+        let cut_label_row_h = ruler_size + 3.0;
+        let selection_color = cfg.theme.ui.selection.0;
+        let cursor_color = cfg.theme.ui.cursor.0;
+        let cut_site_color = cfg.theme.ui.cut_site.0;
+        let label_text_light = cfg.theme.ui.label_text.0;
+        let label_text_dark = cfg.theme.ui.label_text_alt.0;
+        let label_overflow = cfg.settings.editor.label_overflow;
 
         // Feature stacking keyed by (buffer_id, buffer.version). The
         // `Cache` helper handles version-driven invalidation; producer
@@ -202,22 +192,29 @@ impl SequenceView {
         let feat_row = &feature_layout.row;
         let n_annot_rows = feature_layout.n_rows;
 
-        let font_id = FontId::monospace(FONT_SIZE);
-        let small_font = FontId::proportional(FONT_SIZE - 2.0);
+        let font_id = FontId::monospace(font_size);
+        let small_font = FontId::proportional(label_size);
+        let ruler_font = FontId::proportional(ruler_size);
 
         // Measure char_width from an actual galley so feature bar positions
         // use the same per-character advance that LayoutJob renders, not the
         // single-glyph metric which can differ due to subpixel rounding.
-        let (char_width, char_height) = ui.fonts(|f| {
+        let (char_width, char_height, label_char_w) = ui.fonts(|f| {
             let probe = f.layout_no_wrap("A".repeat(64), font_id.clone(), Color32::BLACK);
-            (probe.rect.width() / 64.0, f.row_height(&font_id))
+            let label_probe =
+                f.layout_no_wrap("A".repeat(32), small_font.clone(), Color32::BLACK);
+            (
+                probe.rect.width() / 64.0,
+                f.row_height(&font_id),
+                label_probe.rect.width() / 32.0,
+            )
         });
 
         // Fit the line width to the available pane width.
-        let avail = (ui.available_width() - LEFT_MARGIN - RIGHT_MARGIN).max(char_width);
+        let avail = (ui.available_width() - left_margin - right_margin).max(char_width);
         let line_width = ((avail / char_width) as usize).max(10);
 
-        let annot_section_h = n_annot_rows as f32 * ANNOT_ROW_HEIGHT;
+        let annot_section_h = n_annot_rows as f32 * annot_row_h;
 
         // Cut-label stacking. Key on sorted cut positions (catches
         // enzyme swaps that don't change count) and quantized char
@@ -233,18 +230,18 @@ impl SequenceView {
         let cut_layout = self
             .cut_label_cache
             .get_or_compute((cut_site_key, char_width_q), || {
-                let (row, n_rows) = stack_cut_labels(&sites, char_width);
+                let (row, n_rows) = stack_cut_labels(&sites, char_width, label_char_w);
                 StackLayout { row, n_rows }
             })
             .clone();
         let cut_label_row = &cut_layout.row;
         let n_cut_label_rows = cut_layout.n_rows;
-        let cut_label_h = n_cut_label_rows as f32 * CUT_LABEL_ROW_H;
+        let cut_label_h = n_cut_label_rows as f32 * cut_label_row_h;
 
-        let block_h = cut_label_h + RULER_HEIGHT + STRAND_HEIGHT * 2.0 + annot_section_h + BLOCK_GAP;
+        let block_h = cut_label_h + ruler_h + strand_h * 2.0 + annot_section_h + block_gap;
         let n_blocks = seq_len.div_ceil(line_width);
         let total_height = n_blocks as f32 * block_h;
-        let content_width = LEFT_MARGIN + line_width as f32 * char_width + RIGHT_MARGIN;
+        let content_width = left_margin + line_width as f32 * char_width + right_margin;
         let alloc_width = content_width.max(ui.available_width());
 
         // Consume the one-shot scroll request: center the target block in the
@@ -268,7 +265,7 @@ impl SequenceView {
                 let rect = response.rect;
                 let clip = painter.clip_rect();
                 let text_color = ui.visuals().text_color();
-                let seq_x0 = rect.min.x + LEFT_MARGIN;
+                let seq_x0 = rect.min.x + left_margin;
 
                 // ── Pass 1: collect click-rects for all interactive elements ──
 
@@ -285,15 +282,15 @@ impl SequenceView {
                     }
                     let block_start = block_idx * line_width;
                     let block_end = (block_start + line_width).min(seq_len);
-                    let top_y = block_y + cut_label_h + RULER_HEIGHT;
-                    let bot_y = top_y + STRAND_HEIGHT;
-                    let annot_base_y = bot_y + STRAND_HEIGHT;
+                    let top_y = block_y + cut_label_h + ruler_h;
+                    let bot_y = top_y + strand_h;
+                    let annot_base_y = bot_y + strand_h;
 
                     for (feat_idx, feat) in annotations.features.iter().enumerate() {
-                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
-                        if let Some(r) =
-                            annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
-                        {
+                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * annot_row_h;
+                        if let Some(r) = annot_bar_rect(
+                            feat, block_start, block_end, bar_row_y, seq_x0, char_width, annot_row_h,
+                        ) {
                             annot_hits.push((r, feat_idx));
                         }
                     }
@@ -306,7 +303,7 @@ impl SequenceView {
                             search_hit_rects.push((
                                 Rect::from_min_size(
                                     Pos2::new(sx, top_y),
-                                    Vec2::new(sw, STRAND_HEIGHT * 2.0),
+                                    Vec2::new(sw, strand_h * 2.0),
                                 ),
                                 hit_idx,
                             ));
@@ -318,12 +315,12 @@ impl SequenceView {
                     for (site_idx, site) in view.cut_sites.iter().enumerate() {
                         if site.cut_pos >= block_start && site.cut_pos <= block_end {
                             let cx = seq_x0 + (site.cut_pos - block_start) as f32 * char_width;
-                            let label_w = site.enzyme.len() as f32 * LABEL_CHAR_W + 8.0;
+                            let label_w = site.enzyme.len() as f32 * label_char_w + 8.0;
                             let row = cut_label_row[site_idx];
                             cut_site_rects.push((
                                 Rect::from_center_size(
-                                    Pos2::new(cx, block_y + (row as f32 + 0.5) * CUT_LABEL_ROW_H),
-                                    Vec2::new(label_w, CUT_LABEL_ROW_H),
+                                    Pos2::new(cx, block_y + (row as f32 + 0.5) * cut_label_row_h),
+                                    Vec2::new(label_w, cut_label_row_h),
                                 ),
                                 site_idx,
                             ));
@@ -335,7 +332,7 @@ impl SequenceView {
 
                 let ptr = response.interact_pointer_pos();
                 let ptr_seq = ptr.and_then(|p| {
-                    screen_to_seq(p, rect, char_width, line_width, seq_len, block_h)
+                    screen_to_seq(p, rect, char_width, line_width, seq_len, block_h, left_margin)
                 });
 
                 let shift_held = ui.input(|i| i.modifiers.shift);
@@ -435,6 +432,7 @@ impl SequenceView {
 
                     // ── Ruler ─────────────────────────────────────────────────
                     let ruler_y = block_y + cut_label_h;
+                    let ruler_text = cfg.theme.ui.ruler_text.0;
                     for col in 0..block_len {
                         let abs = block_start + col;
                         if abs == 0 || (abs + 1) % 10 == 0 {
@@ -442,15 +440,15 @@ impl SequenceView {
                                 Pos2::new(seq_x0 + col as f32 * char_width, ruler_y),
                                 Align2::LEFT_TOP,
                                 format!("{}", abs + 1),
-                                small_font.clone(),
-                                text_color.gamma_multiply(0.55),
+                                ruler_font.clone(),
+                                ruler_text,
                             );
                         }
                     }
 
-                    let top_y = ruler_y + RULER_HEIGHT;
-                    let bot_y = top_y + STRAND_HEIGHT;
-                    let annot_base_y = bot_y + STRAND_HEIGHT;
+                    let top_y = ruler_y + ruler_h;
+                    let bot_y = top_y + strand_h;
+                    let annot_base_y = bot_y + strand_h;
 
                     // ── Search hit highlights (behind selection and text) ──────
                     for hit in &view.search_hits {
@@ -459,7 +457,7 @@ impl SequenceView {
                         if vis_s < vis_e && vis_e > block_start {
                             let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                             let sw = (vis_e - vis_s) as f32 * char_width;
-                            let color = search_hit_color(hit.strand);
+                            let color = search_hit_color(&cfg.theme, hit.strand);
                             painter.rect_filled(
                                 Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
                                 2.0,
@@ -483,10 +481,10 @@ impl SequenceView {
                                 painter.rect_filled(
                                     Rect::from_min_size(
                                         Pos2::new(cx - 0.75, top_y),
-                                        Vec2::new(1.5, STRAND_HEIGHT * 2.0),
+                                        Vec2::new(1.5, strand_h * 2.0),
                                     ),
                                     0.0,
-                                    CURSOR_COLOR,
+                                    cursor_color,
                                 );
                             }
                         } else {
@@ -502,7 +500,7 @@ impl SequenceView {
                                         Vec2::new(sw, char_height),
                                     ),
                                     0.0,
-                                    SELECTION_COLOR,
+                                    selection_color,
                                 );
                                 painter.rect_filled(
                                     Rect::from_min_size(
@@ -510,7 +508,7 @@ impl SequenceView {
                                         Vec2::new(sw, char_height),
                                     ),
                                     0.0,
-                                    SELECTION_COLOR.gamma_multiply(0.7),
+                                    selection_color.gamma_multiply(0.7),
                                 );
                             }
                         }
@@ -535,22 +533,24 @@ impl SequenceView {
                     }
 
                     // ── Strands ───────────────────────────────────────────────
-                    let top_galley =
-                        build_strand_galley(ui, &seq[block_start..block_end], &font_id, 1.0);
+                    let top_galley = build_strand_galley(
+                        ui, &seq[block_start..block_end], &font_id, 1.0, &cfg.theme,
+                    );
                     painter.galley(Pos2::new(seq_x0, top_y), top_galley, text_color);
 
-                    let bot_galley =
-                        build_strand_galley(ui, &comp[block_start..block_end], &font_id, 0.65);
+                    let bot_galley = build_strand_galley(
+                        ui, &comp[block_start..block_end], &font_id, 0.65, &cfg.theme,
+                    );
                     painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
 
                     // ── Annotation bars (below strands) ───────────────────────
                     for (feat_idx, feat) in annotations.features.iter().enumerate() {
-                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * ANNOT_ROW_HEIGHT;
-                        if let Some(bar) =
-                            annot_bar_rect(feat, block_start, block_end, bar_row_y, seq_x0, char_width)
-                        {
+                        let bar_row_y = annot_base_y + feat_row[feat_idx] as f32 * annot_row_h;
+                        if let Some(bar) = annot_bar_rect(
+                            feat, block_start, block_end, bar_row_y, seq_x0, char_width, annot_row_h,
+                        ) {
                             let is_selected = view.selected_feature == Some(feat_idx);
-                            painter.rect_filled(bar, 2.0, feature_color(feat.kind));
+                            painter.rect_filled(bar, 2.0, cfg.theme.feature_color(feat.kind));
                             if is_selected {
                                 painter.rect_stroke(
                                     bar,
@@ -559,14 +559,19 @@ impl SequenceView {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            let label_min_width = feat.label.chars().count() as f32 * char_width;
-                            if bar.width() >= label_min_width && !feat.label.is_empty() {
-                                painter.text(
-                                    bar.center(),
-                                    Align2::CENTER_CENTER,
+                            if !feat.label.is_empty() {
+                                let swatch = cfg.theme.feature_color(feat.kind);
+                                let fg = crate::config::theme::pick_contrast(
+                                    swatch, label_text_light, label_text_dark,
+                                );
+                                paint_feature_label(
+                                    &painter,
+                                    &small_font,
+                                    fg,
+                                    label_overflow,
+                                    label_char_w,
+                                    bar,
                                     &feat.label,
-                                    small_font.clone(),
-                                    Color32::WHITE,
                                 );
                             }
                         }
@@ -584,21 +589,21 @@ impl SequenceView {
                             continue;
                         }
                         let tcx = seq_x0 + (top_cut - block_start) as f32 * char_width;
-                        let stroke = Stroke::new(1.5, CUT_SITE_COLOR);
+                        let stroke = Stroke::new(1.5, cut_site_color);
 
                         // Label in its assigned stacking row.
                         let row = cut_label_row[site_idx];
-                        let label_y = block_y + row as f32 * CUT_LABEL_ROW_H;
+                        let label_y = block_y + row as f32 * cut_label_row_h;
                         painter.text(
                             Pos2::new(tcx, label_y),
                             Align2::CENTER_TOP,
                             &site.enzyme,
-                            FontId::proportional(FONT_SIZE - 3.0),
-                            CUT_SITE_COLOR,
+                            FontId::proportional((ruler_size - 1.0).max(8.0)),
+                            cut_site_color,
                         );
 
                         // Vertical from bottom of label row down through the top strand.
-                        let line_top = block_y + (row + 1) as f32 * CUT_LABEL_ROW_H;
+                        let line_top = block_y + (row + 1) as f32 * cut_label_row_h;
                         painter.line_segment(
                             [Pos2::new(tcx, line_top), Pos2::new(tcx, bot_y)],
                             stroke,
@@ -607,7 +612,7 @@ impl SequenceView {
                         if top_cut == bot_cut {
                             // Blunt: straight line through both strands.
                             painter.line_segment(
-                                [Pos2::new(tcx, bot_y), Pos2::new(tcx, bot_y + STRAND_HEIGHT)],
+                                [Pos2::new(tcx, bot_y), Pos2::new(tcx, bot_y + strand_h)],
                                 stroke,
                             );
                         } else if bot_cut >= block_start && bot_cut <= block_end {
@@ -618,15 +623,15 @@ impl SequenceView {
                                 stroke,
                             );
                             painter.line_segment(
-                                [Pos2::new(bcx, bot_y), Pos2::new(bcx, bot_y + STRAND_HEIGHT)],
+                                [Pos2::new(bcx, bot_y), Pos2::new(bcx, bot_y + strand_h)],
                                 stroke,
                             );
                         } else {
                             // Bottom cut in a different block — stub the top half.
                             painter.line_segment(
                                 [Pos2::new(tcx, bot_y),
-                                 Pos2::new(tcx, bot_y + STRAND_HEIGHT * 0.5)],
-                                Stroke::new(1.5, CUT_SITE_COLOR.gamma_multiply(0.4)),
+                                 Pos2::new(tcx, bot_y + strand_h * 0.5)],
+                                Stroke::new(1.5, cut_site_color.gamma_multiply(0.4)),
                             );
                         }
                     }
@@ -635,7 +640,7 @@ impl SequenceView {
                     if block_idx + 1 < n_blocks {
                         painter.hline(
                             rect.min.x..=rect.min.x + content_width,
-                            block_y + block_h - BLOCK_GAP * 0.5,
+                            block_y + block_h - block_gap * 0.5,
                             Stroke::new(0.5, text_color.gamma_multiply(0.08)),
                         );
                     }
@@ -671,8 +676,9 @@ fn screen_to_seq(
     line_width: usize,
     seq_len: usize,
     block_h: f32,
+    left_margin: f32,
 ) -> Option<usize> {
-    let rel_x = pos.x - rect.min.x - LEFT_MARGIN;
+    let rel_x = pos.x - rect.min.x - left_margin;
     let rel_y = pos.y - rect.min.y;
     if rel_x < 0.0 || rel_y < 0.0 {
         return None;
@@ -686,12 +692,11 @@ fn screen_to_seq(
     if p > seq_len { None } else { Some(p) }
 }
 
-fn search_hit_color(strand: Strand) -> Color32 {
+fn search_hit_color(theme: &crate::config::Theme, strand: Strand) -> Color32 {
     match strand {
-        // amber for forward, cyan for reverse — semi-transparent via gamma
-        Strand::Forward => Color32::from_rgba_unmultiplied(255, 190, 0, 110),
-        Strand::Reverse => Color32::from_rgba_unmultiplied(0, 190, 255, 110),
-        _ => Color32::from_rgba_unmultiplied(200, 200, 200, 90),
+        Strand::Forward => theme.strand.forward.0,
+        Strand::Reverse => theme.strand.reverse.0,
+        _ => theme.strand.unknown.0,
     }
 }
 
@@ -700,6 +705,7 @@ fn build_strand_galley(
     bases: &[u8],
     font_id: &FontId,
     alpha: f32,
+    theme: &crate::config::Theme,
 ) -> std::sync::Arc<egui::Galley> {
     let mut job = LayoutJob::default();
     for &b in bases {
@@ -708,10 +714,47 @@ fn build_strand_galley(
             0.0,
             egui::text::TextFormat {
                 font_id: font_id.clone(),
-                color: base_color(b).gamma_multiply(alpha),
+                color: theme.bases.for_base(b).gamma_multiply(alpha),
                 ..Default::default()
             },
         );
     }
     ui.fonts(|f| f.layout_job(job))
+}
+
+/// Draw a feature label according to the `label_overflow` policy.
+/// Contrast is guaranteed by the WCAG-aware text colour picker at the
+/// call site, so no outline is needed.
+fn paint_feature_label(
+    painter: &egui::Painter,
+    font: &FontId,
+    color: Color32,
+    overflow: LabelOverflow,
+    label_char_w: f32,
+    bar: Rect,
+    label: &str,
+) {
+    let bar_w = bar.width();
+    let full_w = label.chars().count() as f32 * label_char_w;
+    let text: Option<String> = if bar_w >= full_w {
+        Some(label.to_string())
+    } else {
+        match overflow {
+            LabelOverflow::Truncate => None,
+            LabelOverflow::Extend => Some(label.to_string()),
+            LabelOverflow::Ellipsis => {
+                let usable = (bar_w - label_char_w).max(0.0);
+                let n = (usable / label_char_w).floor() as usize;
+                if n == 0 {
+                    None
+                } else {
+                    let mut s: String = label.chars().take(n).collect();
+                    s.push('…');
+                    Some(s)
+                }
+            }
+        }
+    };
+    let Some(text) = text else { return };
+    painter.text(bar.center(), Align2::CENTER_CENTER, &text, font.clone(), color);
 }

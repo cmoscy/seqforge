@@ -120,7 +120,7 @@ pub(super) fn apply_split_pane(
 pub(super) fn apply_reset_layout(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    state.dock_state = AppState::default().dock_state;
+    crate::app::rebuild_default_dock(&mut state.dock_state, &state.config);
     Ok(None)
 }
 

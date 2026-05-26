@@ -1,0 +1,36 @@
+name = "Default Dark"
+
+[bases]
+A = "#009640"
+T = "#C81E3C"
+G = "#DC7800"
+C = "#3264DC"
+other = "#555555"
+
+[ui]
+selection      = "#ADD6FF"
+cursor         = "#3278FF"
+cut_site       = "#DC50C8"
+label_text     = "#FFFFFF"   # used on dark feature swatches
+label_text_alt = "#141414"   # used on light feature swatches (auto-picked via WCAG)
+ruler_text     = "#A0A0A0"
+
+[features]
+gene       = "#6495ED"
+cds        = "#48C9B0"
+promoter   = "#F1C40F"
+terminator = "#E74C3C"
+rep        = "#9B59B6"
+source     = "#95A5A6"
+misc       = "#BDC3C7"
+other      = "#BDC3C7"
+
+[strand]
+forward = "#FFBE006E"
+reverse = "#00BEFF6E"
+unknown = "#C8C8C85A"
+
+[minimap]
+viewport  = "#FFFFFF1C"
+selection = "#ADD6FF5A"
+cursor    = "#FFFFFF"

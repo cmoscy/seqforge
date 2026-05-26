@@ -66,8 +66,12 @@ pub struct TerminalPane {
 impl TerminalPane {
     /// Construct the embedded terminal. Assumes [`install_pty_env`] has
     /// already been called on the main thread before any thread was spawned.
-    pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    pub fn new(ctx: egui::Context, configured_shell: &str) -> anyhow::Result<Self> {
+        let shell = if !configured_shell.is_empty() {
+            configured_shell.to_string()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        };
         let settings = BackendSettings {
             shell,
             // stub: sandbox_wrapper — post-MVP: prepend args to shell command

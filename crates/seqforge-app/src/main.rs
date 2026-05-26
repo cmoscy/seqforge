@@ -3,6 +3,7 @@ mod browser;
 mod cache;
 mod cli_install;
 mod command;
+mod config;
 mod event;
 mod focus;
 mod keymap;
