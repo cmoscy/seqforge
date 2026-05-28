@@ -1,5 +1,3 @@
-name = "Default Dark"
-
 [bases]
 A = "#009640"
 T = "#C81E3C"

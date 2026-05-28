@@ -96,7 +96,7 @@ pub(super) fn apply_split_pane(
     let (surface, node, _) = state
         .dock_state
         .find_tab(&Tab::View(active_vid))
-        .ok_or(DispatchError::NoActiveView)?;
+        .ok_or(DispatchError::ViewNotFound(active_vid))?;
 
     let new_vid = state.workspace.add_view(buffer_id, ViewKind::TextView);
     let split = match direction {

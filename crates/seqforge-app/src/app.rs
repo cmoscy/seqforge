@@ -123,22 +123,9 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
-        // Central area starts with a Welcome placeholder; first OpenFile
-        // replaces it with a `Tab::View(_)`. The Welcome/View invariant
-        // is maintained by `ensure_welcome_invariant` in command.rs.
-        let cfg = Config::default();
-        let mut dock_state = DockState::new(vec![Tab::Welcome]);
-        let surface = dock_state.main_surface_mut();
-        let [_right, _left] = surface.split_left(
-            NodeIndex::root(),
-            cfg.settings.layout.file_browser_fraction,
-            vec![Tab::FileBrowser],
-        );
-        let [_viewer, _terminal] = surface.split_below(
-            NodeIndex::root(),
-            cfg.settings.layout.terminal_fraction,
-            vec![Tab::Terminal],
-        );
+        // Stub layout: SeqForgeApp::new populates the real splits via
+        // rebuild_default_dock once the user config is loaded.
+        let dock_state = DockState::new(vec![Tab::Welcome]);
 
         let (events, event_rx) = EventSink::channel();
         Self {
@@ -161,7 +148,7 @@ impl Default for AppState {
             event_log: EventLog::default(),
             minimap: MiniMap::default(),
             pending_file_state: std::collections::HashMap::new(),
-            config: Arc::new(cfg),
+            config: Arc::new(Config::default()),
         }
     }
 }
@@ -259,7 +246,11 @@ pub struct SeqForgeApp {
 impl SeqForgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::default();
-        state.config = Config::load();
+        let (config, cfg_warnings) = Config::load();
+        state.config = config;
+        for w in cfg_warnings {
+            state.toasts.warning(w);
+        }
         state.minimap.browser_fraction =
             state.config.settings.layout.minimap_browser_fraction.clamp(0.15, 0.85);
         // If no saved session restores the layout below, rebuild the

@@ -67,27 +67,29 @@ impl Default for Config {
 
 impl Config {
     /// Read all config files from disk, layered on top of the built-in
-    /// defaults. Any parse error logs to stderr and returns the
-    /// defaults for that section — never panics, never blocks startup.
-    pub fn load() -> Arc<Self> {
-        Arc::new(Self::load_with_epoch(0))
+    /// defaults. Parse errors are returned as human-readable strings for
+    /// the caller to surface as toasts; never panics, never blocks startup.
+    pub fn load() -> (Arc<Self>, Vec<String>) {
+        let (cfg, warnings) = Self::load_with_epoch(0);
+        (Arc::new(cfg), warnings)
     }
 
-    /// Like [`load`] but reuses an existing epoch (incremented by one).
-    /// Used by the "Reload Config" command.
-    pub fn reload(prev_epoch: u64) -> Arc<Self> {
-        Arc::new(Self::load_with_epoch(prev_epoch.wrapping_add(1)))
+    /// Like [`load`] but increments the epoch. Used by "Reload Config".
+    pub fn reload(prev_epoch: u64) -> (Arc<Self>, Vec<String>) {
+        let (cfg, warnings) = Self::load_with_epoch(prev_epoch.wrapping_add(1));
+        (Arc::new(cfg), warnings)
     }
 
-    fn load_with_epoch(epoch: u64) -> Self {
-        let settings = read_settings();
-        let theme = read_theme(&settings.theme);
-        let keybindings = read_keybindings();
-        Self { settings, theme, keybindings, epoch }
+    fn load_with_epoch(epoch: u64) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        let settings = read_settings(&mut warnings);
+        let theme = read_theme(&settings.theme, &mut warnings);
+        let keybindings = read_keybindings(&mut warnings);
+        (Self { settings, theme, keybindings, epoch }, warnings)
     }
 }
 
-fn read_settings() -> Settings {
+fn read_settings(warnings: &mut Vec<String>) -> Settings {
     let path = paths::settings_path();
     let Ok(body) = std::fs::read_to_string(&path) else {
         return Settings::default();
@@ -95,28 +97,19 @@ fn read_settings() -> Settings {
     match toml::from_str::<Settings>(&body) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[seqforge config] settings.toml parse error ({}): {}",
-                path.display(),
-                e
-            );
+            warnings.push(format!("settings.toml: {e}"));
             Settings::default()
         }
     }
 }
 
-fn read_theme(name: &str) -> Theme {
+fn read_theme(name: &str, warnings: &mut Vec<String>) -> Theme {
     // Try user file first.
     let user_path = paths::theme_path(name);
     if let Ok(body) = std::fs::read_to_string(&user_path) {
         match toml::from_str::<Theme>(&body) {
             Ok(t) => return t,
-            Err(e) => eprintln!(
-                "[seqforge config] theme {:?} parse error ({}): {}",
-                name,
-                user_path.display(),
-                e
-            ),
+            Err(e) => warnings.push(format!("theme {name:?} ({}): {e}", user_path.display())),
         }
     }
     // Embedded built-ins.
@@ -128,20 +121,17 @@ fn read_theme(name: &str) -> Theme {
     if let Some(body) = embedded {
         match toml::from_str::<Theme>(body) {
             Ok(t) => return t,
-            Err(e) => eprintln!("[seqforge config] embedded theme parse error: {e}"),
+            Err(e) => warnings.push(format!("embedded theme {name:?}: {e}")),
         }
     }
     // Unknown theme name and no embedded match: fall back to built-in default.
     if !user_path.exists() {
-        eprintln!(
-            "[seqforge config] theme {:?} not found; using built-in defaults",
-            name
-        );
+        warnings.push(format!("theme {name:?} not found; using built-in defaults"));
     }
     Theme::default()
 }
 
-fn read_keybindings() -> KeyBindings {
+fn read_keybindings(warnings: &mut Vec<String>) -> KeyBindings {
     let path = paths::keybindings_path();
     let Ok(body) = std::fs::read_to_string(&path) else {
         return KeyBindings::default();
@@ -149,11 +139,7 @@ fn read_keybindings() -> KeyBindings {
     match keybindings::parse(&body) {
         Ok(k) => k,
         Err(e) => {
-            eprintln!(
-                "[seqforge config] keybindings.toml parse error ({}): {}",
-                path.display(),
-                e
-            );
+            warnings.push(format!("keybindings.toml: {e}"));
             KeyBindings::default()
         }
     }
@@ -196,9 +182,20 @@ pub fn open_in_editor(path: &std::path::Path) -> std::io::Result<()> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        if let Ok(editor) = std::env::var("EDITOR") {
+        // Prefer xdg-open so the system default app launches (a GUI text
+        // editor for files, a file manager for directories). Only fall
+        // back to $VISUAL/$EDITOR when running headless (no display server),
+        // where xdg-open would silently fail or open the wrong thing.
+        let has_display = std::env::var_os("DISPLAY").is_some()
+            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if has_display {
+            std::process::Command::new("xdg-open").arg(path).spawn()?;
+        } else if let Some(editor) =
+            std::env::var_os("VISUAL").or_else(|| std::env::var_os("EDITOR"))
+        {
             std::process::Command::new(editor).arg(path).spawn()?;
         } else {
+            // Headless with no editor configured — best effort.
             std::process::Command::new("xdg-open").arg(path).spawn()?;
         }
         Ok(())

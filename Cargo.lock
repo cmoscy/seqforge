@@ -3581,6 +3581,7 @@ dependencies = [
  "egui_dock",
  "egui_extras",
  "egui_term",
+ "indexmap",
  "seqforge-bio",
  "seqforge-core",
  "serde",

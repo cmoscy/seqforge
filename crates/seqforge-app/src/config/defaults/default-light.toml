@@ -1,5 +1,3 @@
-name = "Default Light"
-
 [bases]
 A = "#1E8A3C"
 T = "#A8182C"

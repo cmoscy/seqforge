@@ -3,35 +3,43 @@
 //! Colours parse from `#RRGGBB` or `#RRGGBBAA` hex strings into
 //! [`egui::Color32`]. Any palette section can be omitted; missing keys
 //! use the built-in defaults from the corresponding `Default` impl.
+//!
+//! [`Theme::default()`] is the canonical source of truth for the dark
+//! palette — it parses `defaults/default-dark.toml` once via
+//! [`std::sync::LazyLock`] so the embedded TOML and the runtime defaults
+//! can never diverge.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use egui::Color32;
 use seqforge_core::FeatureKind;
 use serde::{Deserialize, Deserializer};
 
+use super::defaults::DEFAULT_DARK;
+
+static DEFAULT_DARK_THEME: LazyLock<Theme> = LazyLock::new(|| {
+    toml::from_str(DEFAULT_DARK).expect("embedded default-dark.toml is valid TOML")
+});
+
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct Theme {
-    /// Display name (informational; the file name is the lookup key).
-    pub name: String,
+    #[serde(default)]
     pub bases: BaseColors,
+    #[serde(default)]
     pub ui: UiColors,
+    #[serde(default)]
     pub features: HashMap<String, HexColor>,
+    #[serde(default)]
     pub strand: StrandColors,
+    #[serde(default)]
     pub minimap: MinimapColors,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self {
-            name: "Default Dark".into(),
-            bases: BaseColors::default(),
-            ui: UiColors::default(),
-            features: HashMap::new(),
-            strand: StrandColors::default(),
-            minimap: MinimapColors::default(),
-        }
+        DEFAULT_DARK_THEME.clone()
     }
 }
 
@@ -66,7 +74,7 @@ impl Theme {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BaseColors {
     #[serde(rename = "A")]
     pub a: HexColor,
@@ -135,7 +143,7 @@ impl BaseColors {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct UiColors {
     pub selection: HexColor,
     pub cursor: HexColor,
@@ -165,7 +173,7 @@ impl Default for UiColors {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct StrandColors {
     pub forward: HexColor,
     pub reverse: HexColor,
@@ -183,7 +191,7 @@ impl Default for StrandColors {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct MinimapColors {
     /// Viewport indicator drawn behind features on the spine.
     pub viewport: HexColor,
@@ -239,5 +247,15 @@ fn parse_hex(s: &str) -> Option<Color32> {
             Some(Color32::from_rgba_unmultiplied(r, g, b, a))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_dark_theme_parses() {
+        let t = Theme::default();
+        assert!(t.features.contains_key("gene"));
     }
 }

@@ -308,19 +308,26 @@ impl MiniMap {
         let panel_size_q = (geom_dim * 2.0).round() as u32;
         let cache_key = (snap.buffer_id, snap.version, panel_size_q, cfg.epoch);
 
-        let settings = cfg.settings.minimap.clone();
-        let theme = cfg.theme.clone();
-        // Re-enter the workspace to access annotations for the compute
-        // closure. `self` (MiniMap) and `workspace` are disjoint borrows
-        // so the borrow checker accepts the nested capture.
         let geom: MinimapGeom = workspace
             .with_active_buffer(|_view, buf, ann| {
                 self.geom_cache
                     .get_or_compute(cache_key, || {
                         if buf.is_circular() {
-                            build_circular_geom(ann, buf.len(), geom_dim, &settings, &theme)
+                            build_circular_geom(
+                                ann,
+                                buf.len(),
+                                geom_dim,
+                                &cfg.settings.minimap,
+                                &cfg.theme,
+                            )
                         } else {
-                            build_linear_geom(ann, buf.len(), geom_dim, &settings, &theme)
+                            build_linear_geom(
+                                ann,
+                                buf.len(),
+                                geom_dim,
+                                &cfg.settings.minimap,
+                                &cfg.theme,
+                            )
                         }
                     })
                     .clone()

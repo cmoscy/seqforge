@@ -287,8 +287,20 @@ pub fn apply<B: BioOps>(
         // ── Config ──────────────────────────────────────────────────
         ReloadConfig => {
             let epoch = state.config.epoch;
-            state.config = crate::config::Config::reload(epoch);
-            state.toasts.success("Reloaded config");
+            let old_shell = state.config.settings.terminal.shell.clone();
+            let (new_cfg, warnings) = crate::config::Config::reload(epoch);
+            let new_shell = new_cfg.settings.terminal.shell.clone();
+            state.config = new_cfg;
+            if warnings.is_empty() {
+                state.toasts.success("Reloaded config");
+            } else {
+                for w in warnings {
+                    state.toasts.warning(w);
+                }
+            }
+            if new_shell != old_shell {
+                state.toasts.info("Terminal shell change applies after restart");
+            }
             Ok(None)
         }
         OpenSettingsFile => open_config_file(

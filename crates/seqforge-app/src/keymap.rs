@@ -172,10 +172,12 @@ pub fn dispatch(
     ctx.input_mut(|i| {
         // ── User keybinding overrides (consulted first) ────────────────
         // Any chord listed in `keybindings.toml` wins over the built-in
-        // KEYMAP. Workspace-scope only — the override file doesn't
-        // currently carry a context tag, so it fires whenever the chord
-        // is pressed at the workspace level.
-        let ws_ok = focus.context.contains(KeyContext::WORKSPACE);
+        // KEYMAP. Skipped when any overlay is active so that overlays
+        // (Find bar, GoTo bar, file dialog) remain the rightful owners
+        // of their keystrokes — the override file carries no context tag
+        // and would otherwise fire unconditionally.
+        let ws_ok = focus.context.contains(KeyContext::WORKSPACE)
+            && !focus.context.contains(Overlay::TAG_ACTIVE);
         if ws_ok {
             for (mods, key, action) in state.config.keybindings.entries.iter() {
                 if i.consume_key(*mods, *key) {

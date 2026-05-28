@@ -1,15 +1,18 @@
 //! User key-binding overrides.
 //!
 //! The file format is a flat TOML table mapping a chord string
-//! (e.g. `"cmd+shift+f"`) to an action name (e.g. `"find"`). The
-//! action names are a closed set listed in [`Action::ALL`]; unknown
+//! (e.g. `"cmd+shift+f"`) to an action name (e.g. `"find"`). Unknown
 //! actions emit a warning at load time and are dropped.
 //!
 //! Lookups happen *before* the built-in [`crate::keymap::KEYMAP`] is
 //! consulted, so an override always wins. Anything not listed falls
 //! through to the built-in binding.
+//!
+//! TOML tables are parsed in document order (via `IndexMap`). When two
+//! entries bind the same chord, **the first one listed wins**.
 
 use egui::{Key, Modifiers};
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::command::{AppCommand, SplitDirection};
@@ -32,24 +35,20 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: &'static [(&'static str, Action)] = &[
-        ("open_file", Action::PromptOpenFile),
-        ("close_doc", Action::CloseDoc),
-        ("find", Action::Find),
-        ("goto", Action::GoTo),
-        ("next_tab", Action::NextTab),
-        ("prev_tab", Action::PrevTab),
-        ("split_horizontal", Action::SplitHorizontal),
-        ("split_vertical", Action::SplitVertical),
-        ("dismiss_overlay", Action::DismissOverlay),
-        ("reload_config", Action::ReloadConfig),
-    ];
-
     fn from_name(s: &str) -> Option<Action> {
-        Self::ALL
-            .iter()
-            .find(|(n, _)| *n == s)
-            .map(|(_, a)| *a)
+        match s {
+            "open_file" => Some(Action::PromptOpenFile),
+            "close_doc" => Some(Action::CloseDoc),
+            "find" => Some(Action::Find),
+            "goto" => Some(Action::GoTo),
+            "next_tab" => Some(Action::NextTab),
+            "prev_tab" => Some(Action::PrevTab),
+            "split_horizontal" => Some(Action::SplitHorizontal),
+            "split_vertical" => Some(Action::SplitVertical),
+            "dismiss_overlay" => Some(Action::DismissOverlay),
+            "reload_config" => Some(Action::ReloadConfig),
+            _ => None,
+        }
     }
 
     pub fn to_command(self) -> AppCommand {
@@ -72,16 +71,14 @@ impl Action {
     }
 }
 
-/// Parsed user overrides. `entries` is ordered by load order, which is
-/// also the priority order (first match wins).
+/// Parsed user overrides. `entries` preserves document order; first match wins.
 #[derive(Debug, Clone, Default)]
 pub struct KeyBindings {
     pub entries: Vec<(Modifiers, Key, Action)>,
 }
 
-
 #[derive(Deserialize)]
-struct RawFile(std::collections::HashMap<String, String>);
+struct RawFile(IndexMap<String, String>);
 
 /// Parse a `keybindings.toml` body. Unknown actions and unparseable
 /// chords are logged to stderr and skipped, never fatal.
@@ -123,6 +120,24 @@ fn parse_chord(s: &str) -> Option<(Modifiers, Key)> {
     }
     let key = parse_key(key_tok)?;
     Some((mods, key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_preserves_document_order() {
+        // First-listed binding wins, so document order must round-trip.
+        let toml = r#"
+"cmd+n" = "next_tab"
+"cmd+p" = "prev_tab"
+"cmd+f" = "find"
+"#;
+        let kb = parse(toml).expect("valid");
+        let actions: Vec<_> = kb.entries.iter().map(|(_, _, a)| *a).collect();
+        assert_eq!(actions, vec![Action::NextTab, Action::PrevTab, Action::Find]);
+    }
 }
 
 fn parse_key(s: &str) -> Option<Key> {

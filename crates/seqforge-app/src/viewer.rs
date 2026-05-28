@@ -107,7 +107,7 @@ pub struct SequenceView {
     /// views of the same buffer at the same version share the layout
     /// conceptually; sharing the cache itself is a future Tier 4 win
     /// (today each `SequenceView` has its own).
-    feature_cache: Cache<(BufferId, u64), StackLayout>,
+    feature_cache: Cache<(BufferId, u64, u64), StackLayout>,
     /// Cut-label stacking: keyed by `(sorted_cut_positions, char_width_q)`
     /// where `char_width_q` is `char_width × 4` rounded to integer so
     /// sub-quarter-pixel font changes don't thrash the cache. Pane
@@ -180,7 +180,7 @@ impl SequenceView {
         // runs at most once per distinct key.
         let feature_layout = self
             .feature_cache
-            .get_or_compute((view.buffer_id, buffer.version), || {
+            .get_or_compute((view.buffer_id, buffer.version, cfg.epoch), || {
                 let (row, n_rows) = stack_features(&annotations.features);
                 StackLayout { row, n_rows }
             })

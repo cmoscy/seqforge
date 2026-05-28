@@ -36,7 +36,7 @@ impl Default for Settings {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct FontSettings {
     /// DNA base letters in the viewer (monospace).
     pub sequence_size: f32,
@@ -60,7 +60,7 @@ impl Default for FontSettings {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct EditorSettings {
     pub left_margin: f32,
     pub right_margin: f32,
@@ -107,7 +107,7 @@ pub enum LabelOverflow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct MinimapSettings {
     pub spine_stroke: f32,
     pub feature_arc_width: f32,
@@ -118,7 +118,6 @@ pub struct MinimapSettings {
     pub linear_spine_height: f32,
     pub linear_feature_row_height: f32,
     pub spine_feature_gap: f32,
-    pub selection_alpha: u8,
 }
 
 impl Default for MinimapSettings {
@@ -133,13 +132,12 @@ impl Default for MinimapSettings {
             linear_spine_height: 8.0,
             linear_feature_row_height: 6.0,
             spine_feature_gap: 3.0,
-            selection_alpha: 90,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct LayoutSettings {
     /// Width fraction given to the file browser in a fresh layout.
     pub file_browser_fraction: f32,
@@ -161,7 +159,7 @@ impl Default for LayoutSettings {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct TerminalSettings {
     /// Shell to spawn. Empty string = use `$SHELL` (or `/bin/bash` as a fallback).
     pub shell: String,
