@@ -4,6 +4,7 @@ members = [
     "crates/seqforge-core",
     "crates/seqforge-bio",
     "crates/seqforge-cli",
+    "crates/seqforge-restriction",
 ]
 resolver = "2"
 
@@ -18,7 +19,6 @@ serde_json = "1"
 
 # Bio crates
 gb-io = "0.9"
-na_seq = "0.3"
 bio = "2"
 
 # CLI

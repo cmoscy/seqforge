@@ -1,9 +1,5 @@
-use na_seq::{
-    Nucleotide,
-    re_lib::load_re_library,
-    restriction_enzyme::find_re_matches,
-};
 use seqforge_core::{CutSite, SearchHit, Strand};
+use seqforge_restriction::find_all_sites;
 
 // ── IUPAC matching ────────────────────────────────────────────────────────────
 
@@ -96,71 +92,39 @@ pub fn find_iupac_matches(
 
 /// Find cut sites for the named restriction enzymes in `seq`.
 ///
-/// Names are matched case-insensitively against the na_seq built-in library.
-/// Unknown enzyme names are silently skipped (the caller should validate names
-/// and surface an error if nothing matched).
+/// Names are matched case-insensitively against the embedded REBASE table.
+/// Unknown enzyme names are silently skipped (the caller should validate
+/// names and surface an error if nothing matched).
 ///
 /// For circular sequences, pass `circular = true` to detect sites spanning
-/// the origin (requires na_seq >= 0.3.15 library coverage).
+/// the origin.
 pub fn find_cut_sites(seq: &[u8], enzyme_names: &[&str], circular: bool) -> Vec<CutSite> {
     if seq.is_empty() || enzyme_names.is_empty() {
         return vec![];
     }
-
-    let lib = load_re_library();
-    let filtered: Vec<_> = lib
-        .into_iter()
-        .filter(|re| enzyme_names.iter().any(|n| n.eq_ignore_ascii_case(&re.name)))
+    let lookups: Vec<_> = enzyme_names
+        .iter()
+        .filter_map(|n| seqforge_restriction::enzyme_by_name(n))
         .collect();
-
-    if filtered.is_empty() {
+    if lookups.is_empty() {
         return vec![];
     }
+    let sites = find_all_sites(seq, &lookups, circular);
+    sites.into_iter().map(site_to_cutsite).collect()
+}
 
-    let seq_len = seq.len();
-
-    // Convert to na_seq Nucleotide, skipping non-ACGT bytes (e.g., ambiguity codes).
-    // For circular: extend by max recognition-seq length - 1 to catch wrap-around sites.
-    let max_re_len = filtered.iter().map(|re| re.cut_seq.len()).max().unwrap_or(0);
-
-    let search_bytes: Vec<u8> = if circular && max_re_len > 1 {
-        seq.iter().chain(seq[..max_re_len - 1].iter()).copied().collect()
-    } else {
-        seq.to_vec()
-    };
-
-    let na_seq_vec: Vec<Nucleotide> = search_bytes
-        .iter()
-        .filter_map(|&b| Nucleotide::from_u8_letter(b).ok())
-        .collect();
-
-    // If any byte couldn't be converted (ambiguity codes), the length won't match.
-    // Proceed anyway — na_seq's find_re_matches won't match partial non-ACGT positions.
-
-    let matches = find_re_matches(&na_seq_vec, &filtered);
-
-    matches
-        .into_iter()
-        .filter_map(|m| {
-            let re = &filtered[m.lib_index];
-            // seq_index is 1-based start of the recognition site in the search buffer.
-            let rec_start_ext = m.seq_index.checked_sub(1)?;
-            let recognition_start = rec_start_ext % seq_len;
-            let recognition_end = recognition_start + re.cut_seq.len();
-            let cut_pos = recognition_start + re.cut_after as usize + 1;
-            // For palindromic enzymes the bottom strand cuts symmetrically:
-            //   bottom_cut_pos = recognition_end - cut_after - 1
-            // Blunt cutters: top == bottom. 5' overhang: bottom > top. 3' overhang: bottom < top.
-            let bottom_cut_pos = recognition_end.saturating_sub(re.cut_after as usize + 1);
-            Some(CutSite {
-                enzyme: re.name.clone(),
-                recognition_start,
-                recognition_end,
-                cut_pos,
-                bottom_cut_pos,
-            })
-        })
-        .collect()
+/// Bridge: convert the new `seqforge_restriction::Site` to the existing
+/// `seqforge_core::CutSite` shape the renderer and view state already know
+/// how to consume. Keeps the `na_seq → seqforge-restriction` migration
+/// invisible to upstream callers.
+pub(crate) fn site_to_cutsite(s: seqforge_restriction::Site) -> CutSite {
+    CutSite {
+        enzyme: s.enzyme.to_string(),
+        recognition_start: s.recognition_start,
+        recognition_end: s.recognition_end,
+        cut_pos: s.top_cut,
+        bottom_cut_pos: s.bottom_cut,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -184,7 +148,6 @@ mod tests {
 
     #[test]
     fn palindrome_not_double_counted() {
-        // GAATTC is palindromic — should appear once
         let seq = b"GAATTC";
         let hits = find_iupac_matches(seq, ECORI_SITE, 0, false);
         assert_eq!(hits.len(), 1, "palindromic site must not be double-counted");
@@ -192,13 +155,8 @@ mod tests {
 
     #[test]
     fn reverse_complement_hit() {
-        // GGATCC (BamHI) is palindromic; AATCGG is not the same as GGATCC
-        // Use a non-palindromic pattern: AAAA on a seq with TTTT on other strand
-        let seq = b"CCTTTTGG"; // top strand; RC = CCAAAAGG
+        let seq = b"CCTTTTGG";
         let hits = find_iupac_matches(seq, b"AAAA", 0, false);
-        // forward: no AAAA in CCTTTTGG
-        // reverse: RC of AAAA = TTTT — but we search RC of pattern in the sequence
-        // rc_pat = TTTT; CCTTTTGG contains TTTT at pos 2
         assert!(hits.iter().any(|h| h.strand == Strand::Reverse));
     }
 
@@ -211,7 +169,6 @@ mod tests {
 
     #[test]
     fn mismatch_allowance() {
-        // GAATTC vs GAACTC: 1 mismatch at pos 3
         let seq = b"GAACTC";
         let hits_0 = find_iupac_matches(seq, b"GAATTC", 0, false);
         let hits_1 = find_iupac_matches(seq, b"GAATTC", 1, false);
@@ -221,58 +178,20 @@ mod tests {
 
     #[test]
     fn circular_wrap_around() {
-        // Pattern GAATTC spanning the origin of a circular sequence
-        // seq = b"ATTCAAAGAA" — last 3 chars + first 3 chars = "GAATTC"
-        // GAA at end (pos 7-9), TTC at start (pos 0-2)? No...
-        // Let's put: seq = b"AATTCAAAGAA" → start "AATTC", end "GAA"
-        // Circular concat: "AATTCAAAGAA" + "AAT" = has "GAATTC" at pos 8?
-        // seq[8..] = "GAA", wrapped: "GAA" + seq[0..3] = "GAA"+"AAT" = "GAAAAT"? No.
-        // Let me pick a cleaner example.
-        // seq = b"TCAAAGAATT" (len 10), circular: "GAATTC" starts at pos 7
-        // seq[7..10] = "ATT", then wraps to seq[0..3] = "TCA"... that gives "ATTTCA", not right.
-        //
-        // Simplest: seq = b"TCGAATTCGA", site starts at pos 2 (non-wrap).
-        // For wrap test: seq = b"AATTCGAAG" (len 9)
-        //   extension: "AATTCGAAG" + "AATT" (first 4 bytes for pat_len=6-1=5)...
-        // Actually: seq = "AATTCNNNGA" + "A" hmm.
-        //
-        // Clean wrap test: seq = "ATTCNNGAA" (len 9), pat = GAATTC (len 6)
-        //   circular extension appends seq[0..5] = "ATTCNN"
-        //   extended = "ATTCNNGAAATTCNN"
-        //   search at i=6: extended[6..12] = "GAAATT" — doesn't match GAATTC exactly
-        //
-        // Let's use: seq = "TCNNGAATTCN" (len 11), non-wrap site starting at i=4
-        // This is a normal (non-wrap) case. For wrap: need site crossing boundary.
-        // seq = b"TCGAA" (len 5) + pat GAATTC: can't fit even half.
-        // Let seq = b"AATTCNNNNNNNNNNNNNNG" (len 20).
-        // Site starts at pos 17: seq[17..20] = "NNG"... no.
-        // For circular wrap: last chars of seq are start of GAATTC, first chars complete it.
-        // seq = b"TCNNNNNNNNNG" (len 12), pat = GAATTC
-        //   seq ends with "G", site start = 11: seq[11] = 'G', seq[12..] wraps to seq[0..5] = "TCNNN"
-        //   "GAATTC" != "GTCNNN". Not right.
-        //
-        // Cleanest: seq = b"AATTCNNNNNNNNNNG" — GAATTC where 'G' is the last char
-        // seq len = 16, last char = 'G', first 5 = "AATTC"
-        // Circular extension: seq + seq[0..5] = "AATTCNNNNNNNNNNG" + "AATTC"
-        // Search at i = 15 (last position before extension): extended[15..21] = "GAATTC" ✓
         let seq = b"AATTCNNNNNNNNNNG"; // len 16, 'G' at pos 15
         let hits = find_iupac_matches(seq, ECORI_SITE, 0, true);
-        // Should find: the wrap-around site (G at pos 15, AATTC at pos 0-4)
-        // start = 15 % 16 = 15, end = 15 + 6 = 21
         let wrap = hits.iter().find(|h| h.start == 15);
         assert!(wrap.is_some(), "should find wrap-around site; got: {hits:?}");
     }
 
     #[test]
     fn find_ecori_cut_sites() {
-        // GAATTC is EcoRI. Embed it in a sequence.
         let seq = b"AAAGAATTCAAA";
         let sites = find_cut_sites(seq, &["EcoRI"], false);
         assert_eq!(sites.len(), 1);
         assert_eq!(sites[0].enzyme, "EcoRI");
         assert_eq!(sites[0].recognition_start, 3);
-        assert_eq!(sites[0].recognition_end, 9); // 3 + 6
-        // cut_after = 0 for EcoRI: cut_pos = 3+0+1 = 4, bottom_cut_pos = 9-0-1 = 8 (4-base 5' overhang)
+        assert_eq!(sites[0].recognition_end, 9);
         assert_eq!(sites[0].cut_pos, 4);
         assert_eq!(sites[0].bottom_cut_pos, 8);
     }
@@ -297,5 +216,18 @@ mod tests {
         let seq = b"AAAGAATTCAAAGGATCCAAA";
         let sites = find_cut_sites(seq, &["EcoRI", "BamHI"], false);
         assert_eq!(sites.len(), 2);
+    }
+
+    #[test]
+    fn bsai_type_iis_found_via_find_cut_sites() {
+        // 30 bases; GGTCTC at position 5 — well within range for the
+        // bottom cut at position 5 + 11 = 16.
+        //          0         1         2
+        //          0123456789012345678901234567890
+        let seq = b"AAAAAGGTCTCAAAAAAAAAAAAAAAAAAA";
+        let sites = find_cut_sites(seq, &["BsaI"], false);
+        assert_eq!(sites.len(), 1, "BsaI Type IIs should be found via bridge");
+        assert_eq!(sites[0].cut_pos, 12);    // 5 + 7
+        assert_eq!(sites[0].bottom_cut_pos, 16); // 5 + 11
     }
 }

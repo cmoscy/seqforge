@@ -70,9 +70,11 @@ pub enum AppCommand {
     // ── Overlays ─────────────────────────────────────────────────────
     OpenFind,
     OpenGoTo,
+    OpenEnzymes,
     DismissOverlay,
     SubmitFind { pattern: String, mismatches: u8 },
     SubmitGoTo { position: usize },
+    SubmitEnzymes { query: String },
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
@@ -108,8 +110,10 @@ pub enum AppCommand {
 pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
     use AppCommand::*;
     match cmd {
-        OpenFind | OpenGoTo | SubmitFind { .. } | SubmitGoTo { .. } | CloseDoc
-        | SplitPane { .. } => state.workspace.active_view().is_some(),
+        OpenFind | OpenGoTo | OpenEnzymes | SubmitFind { .. } | SubmitGoTo { .. }
+        | SubmitEnzymes { .. } | CloseDoc | SplitPane { .. } => {
+            state.workspace.active_view().is_some()
+        }
         NextTab | PrevTab => count_view_tabs(state) >= 2,
         SwitchTab { .. } | CloseTab { .. } => true,
         Viewer(_) => true,
@@ -264,11 +268,13 @@ pub fn apply<B: BioOps>(
         // ── Overlays ────────────────────────────────────────────────
         OpenFind => nav::apply_open_find(state),
         OpenGoTo => nav::apply_open_goto(state),
+        OpenEnzymes => nav::apply_open_enzymes(state),
         DismissOverlay => nav::apply_dismiss_overlay(state),
         SubmitFind { pattern, mismatches } => {
             nav::apply_submit_find(state, bio, pattern, mismatches)
         }
         SubmitGoTo { position } => nav::apply_submit_goto(state, bio, position),
+        SubmitEnzymes { query } => nav::apply_submit_enzymes(state, bio, query),
         DismissCliStatus => file::apply_dismiss_cli_status(state),
 
         // ── Focus / layout ──────────────────────────────────────────

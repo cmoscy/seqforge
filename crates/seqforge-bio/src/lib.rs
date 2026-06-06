@@ -1,11 +1,13 @@
 // seqforge-bio: thin wrappers over na_seq + gb-io + bio; ported workflows
 
 mod dna;
+mod enzyme_query;
 mod fasta;
 mod genbank;
 mod search;
 
 pub use dna::{complement, reverse_complement};
+pub use enzyme_query::{parse_enzyme_query, resolve_query, EnzymePreset, EnzymeQuery};
 pub use search::{find_cut_sites, find_iupac_matches};
 
 use seqforge_core::Document;

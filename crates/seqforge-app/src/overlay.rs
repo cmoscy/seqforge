@@ -57,6 +57,17 @@ impl Default for GoToBar {
     }
 }
 
+pub struct EnzymeBar {
+    pub input: String,
+    needs_focus: bool,
+}
+
+impl Default for EnzymeBar {
+    fn default() -> Self {
+        Self { input: String::new(), needs_focus: true }
+    }
+}
+
 // ── Overlay variants ──────────────────────────────────────────────────────────
 
 /// All transient UI that may be present at once. Variants are
@@ -64,6 +75,7 @@ impl Default for GoToBar {
 pub enum Overlay {
     FindBar(FindBar),
     GoToBar(GoToBar),
+    EnzymeBar(EnzymeBar),
     /// Boxed because `FileDialog` is ~2.4 KB — keeping it inline would
     /// blow up every `Overlay` value to that size.
     FileDialog(Box<FileDialog>),
@@ -73,6 +85,7 @@ pub enum Overlay {
 impl Overlay {
     pub const TAG_FIND_BAR: &'static str = "FindBar";
     pub const TAG_GOTO_BAR: &'static str = "GoToBar";
+    pub const TAG_ENZYME_BAR: &'static str = "EnzymeBar";
     pub const TAG_FILE_DIALOG: &'static str = "FileDialog";
     pub const TAG_CLI_STATUS: &'static str = "CliStatus";
     /// Generic "any overlay" marker — pushed onto the KeyContext stack
@@ -84,6 +97,7 @@ impl Overlay {
         match self {
             Overlay::FindBar(_) => Self::TAG_FIND_BAR,
             Overlay::GoToBar(_) => Self::TAG_GOTO_BAR,
+            Overlay::EnzymeBar(_) => Self::TAG_ENZYME_BAR,
             Overlay::FileDialog(_) => Self::TAG_FILE_DIALOG,
             Overlay::CliStatus(_) => Self::TAG_CLI_STATUS,
         }
@@ -161,6 +175,13 @@ impl OverlayStack {
         })
     }
 
+    pub fn enzyme_bar_mut(&mut self) -> Option<&mut EnzymeBar> {
+        self.overlays.iter_mut().find_map(|o| match o {
+            Overlay::EnzymeBar(b) => Some(b),
+            _ => None,
+        })
+    }
+
     pub fn file_dialog_mut(&mut self) -> Option<&mut FileDialog> {
         self.overlays.iter_mut().find_map(|o| match o {
             Overlay::FileDialog(d) => Some(d.as_mut()),
@@ -193,6 +214,9 @@ pub fn show_inline_bar(stack: &mut OverlayStack, ui: &mut egui::Ui) -> Option<Ap
     }
     if let Some(b) = stack.goto_bar_mut() {
         return render_goto_bar(b, ui);
+    }
+    if let Some(b) = stack.enzyme_bar_mut() {
+        return render_enzyme_bar(b, ui);
     }
     None
 }
@@ -247,6 +271,48 @@ fn render_find_bar(b: &mut FindBar, ui: &mut egui::Ui) -> Option<AppCommand> {
                     pattern: b.pattern.clone(),
                     mismatches: b.mismatches,
                 });
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("✕").clicked() {
+                    command = Some(AppCommand::DismissOverlay);
+                }
+            });
+        });
+    });
+
+    ui.separator();
+    command
+}
+
+fn render_enzyme_bar(b: &mut EnzymeBar, ui: &mut egui::Ui) -> Option<AppCommand> {
+    let mut command: Option<AppCommand> = None;
+
+    bar_frame(ui).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Enzymes:");
+            let text_resp = ui.add(
+                egui::TextEdit::singleline(&mut b.input)
+                    .hint_text("unique • unique+dual • non-cutters • type IIs • golden gate • moclo • EcoRI BamHI • none")
+                    .desired_width(380.0),
+            );
+            if b.needs_focus {
+                text_resp.request_focus();
+                b.needs_focus = false;
+            }
+
+            if ui.button("Show").clicked() {
+                command = Some(AppCommand::SubmitEnzymes { query: b.input.clone() });
+            }
+            if ui.button("Clear").clicked() {
+                command = Some(AppCommand::SubmitEnzymes { query: String::new() });
+            }
+
+            // Enter submits — same lost_focus + key_pressed(Enter) idiom as
+            // `render_find_bar`.
+            let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
+            if enter_pressed && text_resp.lost_focus() {
+                command = Some(AppCommand::SubmitEnzymes { query: b.input.clone() });
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

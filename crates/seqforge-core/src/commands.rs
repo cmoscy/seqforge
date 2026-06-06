@@ -128,9 +128,14 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
-    /// Show restriction cut sites for the given enzymes.
+    /// Show restriction cut sites. `query` is a free-text expression accepted
+    /// by `seqforge_bio::parse_enzyme_query`: a preset keyword (`unique`,
+    /// `unique and dual`, `non-cutters`), `all`, `none`/`clear`, or a
+    /// whitespace/comma-separated list of enzyme names.
     Enzymes {
-        enzymes: Vec<String>,
+        /// Raw query string. Empty / `none` / `clear` drops all sites.
+        #[arg(default_value = "")]
+        query: String,
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
@@ -180,6 +185,24 @@ pub trait BioOps {
         circular: bool,
     ) -> Vec<SearchHit>;
     fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite>;
+    /// Resolve a free-text enzyme query against the sequence.
+    ///
+    /// Returns `(active_enzymes, cut_sites)`:
+    ///   - `active_enzymes` — names recorded into `view.active_enzymes` (the
+    ///     resolved set for preset queries; the input list for explicit
+    ///     names; empty for clear).
+    ///   - `cut_sites` — sites to render. Empty for clear queries and for
+    ///     the `non-cutters` preset (by definition).
+    ///
+    /// Grammar lives in `seqforge_bio::parse_enzyme_query`; this trait
+    /// method is the seqforge-core seam so the dispatcher can call it
+    /// without depending on seqforge-bio.
+    fn resolve_enzymes(
+        &self,
+        seq: &[u8],
+        query: &str,
+        circular: bool,
+    ) -> (Vec<String>, Vec<CutSite>);
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -247,18 +270,12 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::SearchResults { count, hits })
         }
 
-        ViewerRequest::Enzymes { enzymes, view: _ } => {
-            if enzymes.is_empty() {
-                view.cut_sites.clear();
-                view.active_enzymes.clear();
-                return Ok(ViewerResponse::CutSites { count: 0, sites: vec![] });
-            }
+        ViewerRequest::Enzymes { query, view: _ } => {
             let circular = buffer.is_circular();
-            let enzyme_refs: Vec<&str> = enzymes.iter().map(String::as_str).collect();
-            let sites = bio.find_cut_sites(&buffer.text, &enzyme_refs, circular);
+            let (active, sites) = bio.resolve_enzymes(&buffer.text, &query, circular);
             let count = sites.len();
             view.cut_sites = sites.clone();
-            view.active_enzymes = enzymes;
+            view.active_enzymes = active;
             Ok(ViewerResponse::CutSites { count, sites })
         }
     }
@@ -340,6 +357,27 @@ mod tests {
             _circular: bool,
         ) -> Vec<CutSite> {
             self.sites.clone()
+        }
+        fn resolve_enzymes(
+            &self,
+            _seq: &[u8],
+            query: &str,
+            _circular: bool,
+        ) -> (Vec<String>, Vec<CutSite>) {
+            if query.trim().is_empty()
+                || query.eq_ignore_ascii_case("none")
+                || query.eq_ignore_ascii_case("clear")
+            {
+                return (Vec::new(), Vec::new());
+            }
+            // Stub: treat any non-empty query as a verbatim name list and
+            // echo the stored sites unchanged.
+            let names: Vec<String> = query
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            (names, self.sites.clone())
         }
     }
 
@@ -430,12 +468,20 @@ mod tests {
 
     #[test]
     fn viewer_request_serde_round_trip_enzymes() {
-        let req = ViewerRequest::Enzymes { enzymes: vec!["EcoRI".into(), "BamHI".into()], view: None };
+        let req = ViewerRequest::Enzymes { query: "EcoRI BamHI".into(), view: None };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(back, ViewerRequest::Enzymes { ref enzymes, .. } if enzymes == &["EcoRI", "BamHI"])
+            matches!(back, ViewerRequest::Enzymes { ref query, .. } if query == "EcoRI BamHI")
         );
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_enzymes_preset() {
+        let req = ViewerRequest::Enzymes { query: "unique".into(), view: None };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ViewerRequest::Enzymes { ref query, .. } if query == "unique"));
     }
 
     // ── dispatch correctness ──────────────────────────────────────────────────
@@ -508,10 +554,11 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::Enzymes { enzymes: vec![], view: None },
+            ViewerRequest::Enzymes { query: String::new(), view: None },
         )
         .unwrap();
         assert!(view.cut_sites.is_empty());
+        assert!(view.active_enzymes.is_empty());
         assert!(matches!(resp, ViewerResponse::CutSites { count: 0, .. }));
     }
 

@@ -49,6 +49,16 @@ impl BioOps for AppBio {
     fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite> {
         seqforge_bio::find_cut_sites(seq, enzymes, circular)
     }
+
+    fn resolve_enzymes(
+        &self,
+        seq: &[u8],
+        query: &str,
+        circular: bool,
+    ) -> (Vec<String>, Vec<CutSite>) {
+        let parsed = seqforge_bio::parse_enzyme_query(query);
+        seqforge_bio::resolve_query(&parsed, seq, circular)
+    }
 }
 
 // ── AppState ──────────────────────────────────────────────────────────────────
@@ -453,7 +463,10 @@ impl eframe::App for SeqForgeApp {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
-                    ui.add_enabled(false, egui::Button::new("Restriction Sites…"));
+                    if ui.button("Restriction Sites…  ⌘E").clicked() {
+                        menu_cmds.push(AppCommand::OpenEnzymes);
+                        ui.close_menu();
+                    }
                     ui.separator();
                     let label = if crate::cli_install::is_installed() {
                         "Reinstall 'seqforge' CLI to PATH"

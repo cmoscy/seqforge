@@ -447,6 +447,14 @@ mod tests {
             ) -> Vec<seqforge_core::CutSite> {
                 vec![]
             }
+            fn resolve_enzymes(
+                &self,
+                _: &[u8],
+                _: &str,
+                _: bool,
+            ) -> (Vec<String>, Vec<seqforge_core::CutSite>) {
+                (vec![], vec![])
+            }
         }
 
         let got = ws.buffers.open_path(&path, &ExplodingBio).unwrap();

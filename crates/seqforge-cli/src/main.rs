@@ -63,9 +63,14 @@ enum Cmd {
         #[arg(long)]
         view: Option<ViewId>,
     },
-    /// Show restriction sites for given enzymes
+    /// Show restriction sites.
+    ///
+    /// `args` is a free-text query: a preset (`unique`, `unique and dual`,
+    /// `non-cutters`), `all`, `none`/`clear` (or empty) to drop sites, or a
+    /// whitespace/comma-separated list of enzyme names (e.g. `EcoRI BamHI`).
     Enzymes {
-        enzymes: Vec<String>,
+        /// Query tokens; joined with single spaces. Empty clears.
+        args: Vec<String>,
         /// Target view id (omit to operate on the active view)
         #[arg(long)]
         view: Option<ViewId>,
@@ -90,8 +95,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Find { pattern, mismatches, view } => seqforge_cli::dispatch_viewer_cmd(
             ViewerRequest::Find { pattern, mismatches, view },
         ),
-        Cmd::Enzymes { enzymes, view } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { enzymes, view })
+        Cmd::Enzymes { args, view } => {
+            let query = args.join(" ");
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { query, view })
         }
     }
 }

@@ -77,6 +77,11 @@ pub const KEYMAP: &[Binding] = &[
         when_context: &[KeyContext::WORKSPACE],
         command: || AppCommand::OpenGoTo,
     },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::E),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::OpenEnzymes,
+    },
     // ── Tab cycling ────────────────────────────────────────────────
     // Cmd+Shift+] / [ matches the macOS browser / VSCode convention.
     // is_enabled returns false when the active pane has fewer than two

@@ -8,7 +8,7 @@ other = "#555555"
 [ui]
 selection      = "#ADD6FF"
 cursor         = "#3278FF"
-cut_site       = "#DC50C8"
+cut_site       = "#9CA8B8"
 label_text     = "#FFFFFF"   # used on dark feature swatches
 label_text_alt = "#141414"   # used on light feature swatches (auto-picked via WCAG)
 ruler_text     = "#A0A0A0"

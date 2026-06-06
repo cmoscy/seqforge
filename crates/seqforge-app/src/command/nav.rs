@@ -9,7 +9,7 @@ use super::{
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
-use crate::overlay::{FindBar, GoToBar, Overlay};
+use crate::overlay::{EnzymeBar, FindBar, GoToBar, Overlay};
 
 pub(super) fn apply_open_find(
     state: &mut AppState,
@@ -45,6 +45,22 @@ pub(super) fn apply_open_goto(
     Ok(None)
 }
 
+pub(super) fn apply_open_enzymes(
+    state: &mut AppState,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    snapshot_focus_for_overlay(state);
+    if let Some(vid) = state.workspace.active_view {
+        state.focus.set_scope(FocusScope::View(vid));
+    }
+    if let Some(tag) = state
+        .overlays
+        .push_unique(Overlay::EnzymeBar(EnzymeBar::default()))
+    {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+    Ok(None)
+}
+
 pub(super) fn apply_dismiss_overlay(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
@@ -74,6 +90,23 @@ pub(super) fn apply_submit_find<B: BioOps>(
         state.events.emit(AppEvent::SearchCompleted { hits: *count });
     }
     emit_selection_diff(state, sel_before);
+    restore_focus_after_overlay(state);
+    Ok(Some(resp))
+}
+
+pub(super) fn apply_submit_enzymes<B: BioOps>(
+    state: &mut AppState,
+    bio: &B,
+    query: String,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_ENZYME_BAR) {
+        state.events.emit(AppEvent::OverlayPopped(tag));
+    }
+    let resp = dispatch_active(
+        state,
+        bio,
+        ViewerRequest::Enzymes { query, view: None },
+    )?;
     restore_focus_after_overlay(state);
     Ok(Some(resp))
 }

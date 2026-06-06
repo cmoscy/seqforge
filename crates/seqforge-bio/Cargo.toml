@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 seqforge-core = { path = "../seqforge-core" }
+seqforge-restriction = { path = "../seqforge-restriction" }
 thiserror = { workspace = true }
 gb-io = { workspace = true }
-na_seq = { workspace = true }
 bio = { workspace = true }

@@ -3,3 +3,9 @@ examples/
 .DS_Store
 *.swp
 *.swo
+
+# Raw REBASE snapshot (~4.5 MB) — a build-time input to the enzyme-table
+# codegen only. Not tracked: the generated, committed
+# crates/seqforge-restriction/src/enzymes_generated.rs is the source of truth.
+# Refresh it manually with `codegen -- --fetch` (see that crate's README).
+crates/seqforge-restriction/data/

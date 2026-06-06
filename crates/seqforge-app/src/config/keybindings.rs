@@ -26,6 +26,7 @@ pub enum Action {
     CloseDoc,
     Find,
     GoTo,
+    Enzymes,
     NextTab,
     PrevTab,
     SplitHorizontal,
@@ -41,6 +42,7 @@ impl Action {
             "close_doc" => Some(Action::CloseDoc),
             "find" => Some(Action::Find),
             "goto" => Some(Action::GoTo),
+            "enzymes" => Some(Action::Enzymes),
             "next_tab" => Some(Action::NextTab),
             "prev_tab" => Some(Action::PrevTab),
             "split_horizontal" => Some(Action::SplitHorizontal),
@@ -57,6 +59,7 @@ impl Action {
             Action::CloseDoc => AppCommand::CloseDoc,
             Action::Find => AppCommand::OpenFind,
             Action::GoTo => AppCommand::OpenGoTo,
+            Action::Enzymes => AppCommand::OpenEnzymes,
             Action::NextTab => AppCommand::NextTab,
             Action::PrevTab => AppCommand::PrevTab,
             Action::SplitHorizontal => AppCommand::SplitPane {

@@ -164,7 +164,7 @@ impl Default for UiColors {
         Self {
             selection: HexColor(Color32::from_rgb(173, 214, 255)),
             cursor: HexColor(Color32::from_rgb(50, 120, 255)),
-            cut_site: HexColor(Color32::from_rgb(220, 80, 200)),
+            cut_site: HexColor(Color32::from_rgb(156, 168, 184)),
             label_text: HexColor(Color32::WHITE),
             label_text_alt: HexColor(Color32::from_rgb(20, 20, 20)),
             ruler_text: HexColor(Color32::from_rgb(160, 160, 160)),
