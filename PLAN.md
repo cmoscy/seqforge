@@ -147,7 +147,8 @@ Keyboard focus, command dispatch, and the event bus are fully covered in [Focus 
 | Need | Crate | Status |
 |---|---|---|
 | GenBank parse/write | `gb-io` 0.9 | Active, used by PlasCAD |
-| FASTA + DNA primitives, restriction enzymes, complement, translation, GC%, MW | `na_seq` 0.3.15 (Feb 2026) | Active, MIT, by PlasCAD's author |
+| Restriction enzymes (recognition, cut offsets, Type IIs, presets) | `seqforge-restriction` (in-workspace) | **Replaced `na_seq` (see RESTRICTION_PLAN.md). `na_seq` dependency dropped.** |
+| FASTA + DNA primitives (complement, translation, GC%, MW) | hand-rolled in `seqforge-bio` | IUPAC complement table + parsers live in `seqforge-bio` |
 | Pattern matching (IUPAC, mismatches), alphabets, alignment (later) | `bio` (rust-bio) 2.3 | Active |
 | SnapGene `.dna` (deferred to post-MVP) | None — port from `tg-oss/packages/bio-parsers/src/snapgeneToJson.js` when needed | n/a |
 
@@ -160,7 +161,7 @@ Keyboard focus, command dispatch, and the event bus are fully covered in [Focus 
 
 - Annotation row-stacking — `stackElements` from `examples/seqviz/src/elementsToRows.ts` (~30 LOC Rust). Landed in Phase 4.
 
-Skip porting: complement, translation, restriction-site finding (covered by `na_seq` + `bio::pattern_matching`).
+Skip porting: complement, translation (hand-rolled in `seqforge-bio`), restriction-site finding (now covered by the in-workspace `seqforge-restriction` crate, which replaced `na_seq` — see RESTRICTION_PLAN.md). Digest fragment enumeration is `seqforge-restriction` Tier 2.
 
 ---
 
@@ -459,6 +460,13 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 ### Phase 7 — Restriction sites + search ✅ DONE
 
 **Goal:** The two real sequence operations for MVP.
+
+> **Superseded (post-MVP):** the `na_seq`-based cut-site backend described
+> below was replaced by the in-workspace `seqforge-restriction` crate
+> (REBASE-derived table, Type IIs support, presets). The `seqforge-bio`
+> public API (`find_cut_sites`, `resolve_query`) is unchanged — the swap was
+> invisible to callers. See **RESTRICTION_PLAN.md** for the new design. The
+> checkboxes below record the original Phase 7 implementation.
 
 - [x] Use `na_seq`'s restriction enzyme module (`re_lib::load_re_library` + `find_re_matches`) to find cut sites
 - [x] `find_iupac_matches` — own O(n·m) IUPAC scanner with Hamming-distance mismatch allowance; circular extension handled by appending first `pat_len-1` bases before scanning

@@ -50,7 +50,7 @@ The bottom pane is a real shell. Prefix a line with `:` to send a viewer command
 :open path/to/plasmid.gb      open a file in the viewer
 :goto 1234                    place cursor at position 1234
 :find ATGCNNNNGCAT            search (IUPAC; Phase 7)
-:enzymes EcoRI BamHI          show cut sites (Phase 7)
+:enzymes EcoRI BamHI          show cut sites (also: unique, type IIs, golden gate, moclo)
 :close                        close the current document
 ```
 
@@ -74,7 +74,13 @@ seqforge goto 500
 seqforge close
 seqforge find ATGC
 seqforge enzymes EcoRI BamHI
+seqforge enzymes golden gate          # preset: BsaI, BsmBI, BbsI, SapI
 ```
+
+Enzyme queries accept individual names, comma/space lists, or named presets
+(`unique`, `unique+dual`, `non-cutters`, `type IIs`, `golden gate`, `moclo`,
+`all`, `none`). The same grammar is shared by the GUI enzyme bar (`⌘E`), the
+terminal `:enzymes`, and the CLI.
 
 When the GUI is running, it sets `SEQFORGE_SOCKET` in the embedded terminal's environment. Any `seqforge` viewer command executed there — or in any shell that has `SEQFORGE_SOCKET` set — routes to the live viewer. If the variable is absent, viewer commands exit with a clear error.
 
@@ -111,12 +117,13 @@ cargo run -p seqforge-app          # subsequent runs: rebuilds only what changed
 
 The CLI binary (`target/debug/seqforge`) persists between `cargo run` invocations, so the embedded terminal continues to find it as a sibling of the app binary.
 
-The workspace has four crates:
+The workspace has five crates:
 
 | Crate | Role |
 |-------|------|
 | `seqforge-core` | `Document`, `ViewerState`, `ViewerCommand`, `dispatch_*` — no GUI deps |
-| `seqforge-bio` | GenBank/FASTA loading, DNA utilities; wraps `gb-io`, `na_seq`, `bio` |
+| `seqforge-bio` | GenBank/FASTA loading, DNA utilities, sequence/cut-site search; wraps `gb-io`, `bio`, and `seqforge-restriction` |
+| `seqforge-restriction` | REBASE-derived restriction enzyme database + scanner + presets (Type IIs, Golden Gate, MoClo). Unpublished; see [RESTRICTION_PLAN.md](RESTRICTION_PLAN.md) |
 | `seqforge-app` | `eframe` + `egui_dock` + `egui_term` GUI shell |
 | `seqforge-cli` | Standalone `seqforge` binary |
 
