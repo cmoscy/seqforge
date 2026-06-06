@@ -74,7 +74,16 @@ pub enum AppCommand {
     DismissOverlay,
     SubmitFind { pattern: String, mismatches: u8 },
     SubmitGoTo { position: usize },
+    /// Replace the active enzyme set with the query's result (`EnzymeOp::Set`).
     SubmitEnzymes { query: String },
+    /// Union the query's enzymes into the active set (`EnzymeOp::Add`).
+    AddEnzymes { query: String },
+    /// Remove a single enzyme from the active set by name (`EnzymeOp::Remove`).
+    RemoveEnzyme { name: String },
+    /// Select a 0-based half-open range in the active view and scroll it into
+    /// view. Used by the enzyme overlay to jump to a cut site; generic enough
+    /// to reuse for search results / features later.
+    RevealRange { start: usize, end: usize },
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
@@ -111,13 +120,13 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
     use AppCommand::*;
     match cmd {
         OpenFind | OpenGoTo | OpenEnzymes | SubmitFind { .. } | SubmitGoTo { .. }
-        | SubmitEnzymes { .. } | CloseDoc | SplitPane { .. } => {
-            state.workspace.active_view().is_some()
-        }
+        | SubmitEnzymes { .. } | AddEnzymes { .. } | RemoveEnzyme { .. } | CloseDoc
+        | SplitPane { .. } => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
         SwitchTab { .. } | CloseTab { .. } => true,
         Viewer(_) => true,
         SetSelection(_) | SelectFeature(_) => true,
+        RevealRange { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli
         | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile
@@ -274,7 +283,16 @@ pub fn apply<B: BioOps>(
             nav::apply_submit_find(state, bio, pattern, mismatches)
         }
         SubmitGoTo { position } => nav::apply_submit_goto(state, bio, position),
-        SubmitEnzymes { query } => nav::apply_submit_enzymes(state, bio, query),
+        SubmitEnzymes { query } => {
+            nav::apply_enzyme_op(state, bio, query, seqforge_core::EnzymeOp::Set)
+        }
+        AddEnzymes { query } => {
+            nav::apply_enzyme_op(state, bio, query, seqforge_core::EnzymeOp::Add)
+        }
+        RemoveEnzyme { name } => {
+            nav::apply_enzyme_op(state, bio, name, seqforge_core::EnzymeOp::Remove)
+        }
+        RevealRange { start, end } => nav::apply_reveal_range(state, start, end),
         DismissCliStatus => file::apply_dismiss_cli_status(state),
 
         // ── Focus / layout ──────────────────────────────────────────

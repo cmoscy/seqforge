@@ -1,6 +1,6 @@
 //! Navigation, search, selection commands.
 
-use seqforge_core::{BioOps, DispatchError, Selection, ViewerRequest, ViewerResponse};
+use seqforge_core::{BioOps, DispatchError, EnzymeOp, Selection, ViewerRequest, ViewerResponse};
 
 use super::{
     active_selection, dispatch_active, emit_selection_diff,
@@ -94,20 +94,21 @@ pub(super) fn apply_submit_find<B: BioOps>(
     Ok(Some(resp))
 }
 
-pub(super) fn apply_submit_enzymes<B: BioOps>(
+/// Set / Add / Remove against the active enzyme set. Unlike Find / GoTo, the
+/// enzyme overlay is **persistent**: these ops mutate the set and re-render
+/// without closing it, so the user can refine the set in place. Only
+/// `DismissOverlay` (Esc / ✕) closes the bar.
+pub(super) fn apply_enzyme_op<B: BioOps>(
     state: &mut AppState,
     bio: &B,
     query: String,
+    op: EnzymeOp,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    if let Some(tag) = state.overlays.pop_kind(Overlay::TAG_ENZYME_BAR) {
-        state.events.emit(AppEvent::OverlayPopped(tag));
-    }
     let resp = dispatch_active(
         state,
         bio,
-        ViewerRequest::Enzymes { query, view: None },
+        ViewerRequest::Enzymes { query, op, view: None },
     )?;
-    restore_focus_after_overlay(state);
     Ok(Some(resp))
 }
 
@@ -128,6 +129,24 @@ pub(super) fn apply_submit_goto<B: BioOps>(
     emit_selection_diff(state, sel_before);
     restore_focus_after_overlay(state);
     Ok(Some(resp))
+}
+
+/// Select `start..end` (0-based, half-open) in the active view and scroll it
+/// into view. The enzyme overlay stays open (it's persistent), so the user can
+/// keep clicking sites; the viewer behind it scrolls and highlights.
+pub(super) fn apply_reveal_range(
+    state: &mut AppState,
+    start: usize,
+    end: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let before = active_selection(state);
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selection = Some(Selection::range(start, end));
+        view.scroll_to = Some(start);
+        view.selected_feature = None;
+    }
+    emit_selection_diff(state, before);
+    Ok(None)
 }
 
 pub(super) fn apply_set_selection(

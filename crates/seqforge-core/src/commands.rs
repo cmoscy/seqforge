@@ -102,6 +102,24 @@ pub enum DispatchError {
 /// view has been closed since the agent enumerated it. There is
 /// intentionally no pane targeting — panes are a layout concept
 /// owned by the dock, not addressable identity.
+/// How an `Enzymes` request mutates `view.active_enzymes` (the source of
+/// truth). The resulting `cut_sites` are always re-derived from the new set
+/// via `find_cut_sites`, so all three ops share one rendering path.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EnzymeOp {
+    /// Replace the active set with the query's result (the historical
+    /// behaviour; empty / `none` / `clear` query thus clears all).
+    #[default]
+    Set,
+    /// Union the query's result into the current active set.
+    Add,
+    /// Remove the query's result from the current active set.
+    Remove,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum ViewerRequest {
@@ -133,9 +151,14 @@ pub enum ViewerRequest {
     /// `unique and dual`, `non-cutters`), `all`, `none`/`clear`, or a
     /// whitespace/comma-separated list of enzyme names.
     Enzymes {
-        /// Raw query string. Empty / `none` / `clear` drops all sites.
+        /// Raw query string. For `set`, empty / `none` / `clear` drops all
+        /// sites; for `add` / `remove` it names the enzymes to union/subtract.
         #[arg(default_value = "")]
         query: String,
+        /// Set (replace, default), add, or remove against the active set.
+        #[arg(long, value_enum, default_value_t = EnzymeOp::Set)]
+        #[serde(default)]
+        op: EnzymeOp,
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
@@ -185,24 +208,37 @@ pub trait BioOps {
         circular: bool,
     ) -> Vec<SearchHit>;
     fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite>;
-    /// Resolve a free-text enzyme query against the sequence.
+    /// Resolve a free-text enzyme query to a list of **canonical** enzyme
+    /// names (presets resolved against the sequence; explicit names mapped to
+    /// their canonical spelling; unknown names dropped; empty for clear).
     ///
-    /// Returns `(active_enzymes, cut_sites)`:
-    ///   - `active_enzymes` — names recorded into `view.active_enzymes` (the
-    ///     resolved set for preset queries; the input list for explicit
-    ///     names; empty for clear).
-    ///   - `cut_sites` — sites to render. Empty for clear queries and for
-    ///     the `non-cutters` preset (by definition).
-    ///
-    /// Grammar lives in `seqforge_bio::parse_enzyme_query`; this trait
-    /// method is the seqforge-core seam so the dispatcher can call it
-    /// without depending on seqforge-bio.
-    fn resolve_enzymes(
-        &self,
-        seq: &[u8],
-        query: &str,
-        circular: bool,
-    ) -> (Vec<String>, Vec<CutSite>);
+    /// This is names-only: the dispatcher combines the result with the view's
+    /// current set per `EnzymeOp`, then re-derives `cut_sites` via
+    /// `find_cut_sites`. Grammar lives in `seqforge_bio::parse_enzyme_query`;
+    /// this trait method is the seqforge-core seam so the dispatcher can call
+    /// it without depending on seqforge-bio.
+    fn resolve_enzyme_names(&self, seq: &[u8], query: &str, circular: bool) -> Vec<String>;
+}
+
+/// Union `add` into `base`, preserving order and skipping case-insensitive
+/// duplicates. Canonical names mean exact matches in practice; the
+/// case-insensitive guard is belt-and-suspenders.
+fn union_names(base: &[String], add: &[String]) -> Vec<String> {
+    let mut out = base.to_vec();
+    for name in add {
+        if !out.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// `base` minus any name appearing in `remove` (case-insensitive).
+fn difference_names(base: &[String], remove: &[String]) -> Vec<String> {
+    base.iter()
+        .filter(|n| !remove.iter().any(|r| r.eq_ignore_ascii_case(n)))
+        .cloned()
+        .collect()
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -270,12 +306,21 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::SearchResults { count, hits })
         }
 
-        ViewerRequest::Enzymes { query, view: _ } => {
+        ViewerRequest::Enzymes { query, op, view: _ } => {
             let circular = buffer.is_circular();
-            let (active, sites) = bio.resolve_enzymes(&buffer.text, &query, circular);
+            // active_enzymes is the source of truth; the op mutates it and
+            // cut_sites is always re-derived through the single scanner.
+            let resolved = bio.resolve_enzyme_names(&buffer.text, &query, circular);
+            let new_set = match op {
+                EnzymeOp::Set => resolved,
+                EnzymeOp::Add => union_names(&view.active_enzymes, &resolved),
+                EnzymeOp::Remove => difference_names(&view.active_enzymes, &resolved),
+            };
+            let refs: Vec<&str> = new_set.iter().map(String::as_str).collect();
+            let sites = bio.find_cut_sites(&buffer.text, &refs, circular);
             let count = sites.len();
+            view.active_enzymes = new_set;
             view.cut_sites = sites.clone();
-            view.active_enzymes = active;
             Ok(ViewerResponse::CutSites { count, sites })
         }
     }
@@ -353,31 +398,30 @@ mod tests {
         fn find_cut_sites(
             &self,
             _seq: &[u8],
-            _enzymes: &[&str],
+            enzymes: &[&str],
             _circular: bool,
         ) -> Vec<CutSite> {
-            self.sites.clone()
+            // Honour the enzyme list so the dispatch's re-derive is testable:
+            // an empty set yields no sites; any non-empty set echoes the stub.
+            if enzymes.is_empty() {
+                vec![]
+            } else {
+                self.sites.clone()
+            }
         }
-        fn resolve_enzymes(
-            &self,
-            _seq: &[u8],
-            query: &str,
-            _circular: bool,
-        ) -> (Vec<String>, Vec<CutSite>) {
+        fn resolve_enzyme_names(&self, _seq: &[u8], query: &str, _circular: bool) -> Vec<String> {
             if query.trim().is_empty()
                 || query.eq_ignore_ascii_case("none")
                 || query.eq_ignore_ascii_case("clear")
             {
-                return (Vec::new(), Vec::new());
+                return Vec::new();
             }
-            // Stub: treat any non-empty query as a verbatim name list and
-            // echo the stored sites unchanged.
-            let names: Vec<String> = query
+            // Stub: treat any non-empty query as a verbatim name list.
+            query
                 .split(|c: char| c.is_whitespace() || c == ',')
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
-                .collect();
-            (names, self.sites.clone())
+                .collect()
         }
     }
 
@@ -468,7 +512,11 @@ mod tests {
 
     #[test]
     fn viewer_request_serde_round_trip_enzymes() {
-        let req = ViewerRequest::Enzymes { query: "EcoRI BamHI".into(), view: None };
+        let req = ViewerRequest::Enzymes {
+            query: "EcoRI BamHI".into(),
+            op: EnzymeOp::Set,
+            view: None,
+        };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(
@@ -478,7 +526,8 @@ mod tests {
 
     #[test]
     fn viewer_request_serde_round_trip_enzymes_preset() {
-        let req = ViewerRequest::Enzymes { query: "unique".into(), view: None };
+        let req =
+            ViewerRequest::Enzymes { query: "unique".into(), op: EnzymeOp::Set, view: None };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, ViewerRequest::Enzymes { ref query, .. } if query == "unique"));
@@ -544,6 +593,7 @@ mod tests {
         let (mut view, buf, mut ann) = fixture();
         view.cut_sites.push(crate::CutSite {
             enzyme: "EcoRI".into(),
+            recognition: "GAATTC".into(),
             recognition_start: 0,
             recognition_end: 6,
             cut_pos: 1,
@@ -554,12 +604,49 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::Enzymes { query: String::new(), view: None },
+            ViewerRequest::Enzymes { query: String::new(), op: EnzymeOp::Set, view: None },
         )
         .unwrap();
         assert!(view.cut_sites.is_empty());
         assert!(view.active_enzymes.is_empty());
         assert!(matches!(resp, ViewerResponse::CutSites { count: 0, .. }));
+    }
+
+    /// Run an enzyme op against `view`, returning nothing — callers assert on
+    /// `view.active_enzymes` afterward.
+    fn enzyme_op(view: &mut View, buf: &Buffer, ann: &mut Annotations, query: &str, op: EnzymeOp) {
+        dispatch(
+            view,
+            buf,
+            ann,
+            &FakeBio::new(),
+            ViewerRequest::Enzymes { query: query.into(), op, view: None },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dispatch_enzymes_add_unions_into_active_set() {
+        let (mut view, buf, mut ann) = fixture();
+        enzyme_op(&mut view, &buf, &mut ann, "EcoRI", EnzymeOp::Set);
+        enzyme_op(&mut view, &buf, &mut ann, "BamHI", EnzymeOp::Add);
+        assert_eq!(view.active_enzymes, vec!["EcoRI".to_string(), "BamHI".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_enzymes_add_is_idempotent_case_insensitive() {
+        let (mut view, buf, mut ann) = fixture();
+        enzyme_op(&mut view, &buf, &mut ann, "EcoRI", EnzymeOp::Set);
+        enzyme_op(&mut view, &buf, &mut ann, "ecori", EnzymeOp::Add);
+        assert_eq!(view.active_enzymes, vec!["EcoRI".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_enzymes_remove_subtracts_by_name() {
+        let (mut view, buf, mut ann) = fixture();
+        enzyme_op(&mut view, &buf, &mut ann, "EcoRI BamHI", EnzymeOp::Set);
+        enzyme_op(&mut view, &buf, &mut ann, "EcoRI", EnzymeOp::Remove);
+        assert_eq!(view.active_enzymes, vec!["BamHI".to_string()]);
     }
 
     #[test]

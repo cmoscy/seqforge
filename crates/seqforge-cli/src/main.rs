@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use seqforge_core::{ViewId, ViewerRequest};
+use seqforge_core::{EnzymeOp, ViewId, ViewerRequest};
 
 #[derive(Parser)]
 #[command(name = "seqforge", about = "SeqForge sequence tool")]
@@ -69,8 +69,11 @@ enum Cmd {
     /// `non-cutters`), `all`, `none`/`clear` (or empty) to drop sites, or a
     /// whitespace/comma-separated list of enzyme names (e.g. `EcoRI BamHI`).
     Enzymes {
-        /// Query tokens; joined with single spaces. Empty clears.
+        /// Query tokens; joined with single spaces. Empty clears (with `set`).
         args: Vec<String>,
+        /// set (replace, default), add, or remove against the active set.
+        #[arg(long, value_enum, default_value_t = EnzymeOp::Set)]
+        op: EnzymeOp,
         /// Target view id (omit to operate on the active view)
         #[arg(long)]
         view: Option<ViewId>,
@@ -95,9 +98,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::Find { pattern, mismatches, view } => seqforge_cli::dispatch_viewer_cmd(
             ViewerRequest::Find { pattern, mismatches, view },
         ),
-        Cmd::Enzymes { args, view } => {
+        Cmd::Enzymes { args, op, view } => {
             let query = args.join(" ");
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { query, view })
+            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { query, op, view })
         }
     }
 }

@@ -118,8 +118,14 @@ pub fn find_cut_sites(seq: &[u8], enzyme_names: &[&str], circular: bool) -> Vec<
 /// how to consume. Keeps the `na_seq → seqforge-restriction` migration
 /// invisible to upstream callers.
 pub(crate) fn site_to_cutsite(s: seqforge_restriction::Site) -> CutSite {
+    // Recognition pattern for display. `Iupac` is `#[repr(u8)]` over ASCII
+    // letters, so each variant casts straight to its character.
+    let recognition = seqforge_restriction::enzyme_by_name(s.enzyme)
+        .map(|e| e.recognition.iter().map(|i| *i as u8 as char).collect())
+        .unwrap_or_default();
     CutSite {
         enzyme: s.enzyme.to_string(),
+        recognition,
         recognition_start: s.recognition_start,
         recognition_end: s.recognition_end,
         cut_pos: s.top_cut,

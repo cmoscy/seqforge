@@ -15,8 +15,8 @@ pub mod document;
 pub mod model;
 
 pub use commands::{
-    dispatch, dispatch_file, BioOps, DispatchError, FileCommand, Selection, ViewerRequest,
-    ViewerResponse,
+    dispatch, dispatch_file, BioOps, DispatchError, EnzymeOp, FileCommand, Selection,
+    ViewerRequest, ViewerResponse,
 };
 pub use document::{CutSite, Document, Feature, FeatureKind, SearchHit, Strand, Topology};
 pub use model::{Annotations, Buffer, BufferId, View, ViewId, ViewKind};

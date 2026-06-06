@@ -50,14 +50,9 @@ impl BioOps for AppBio {
         seqforge_bio::find_cut_sites(seq, enzymes, circular)
     }
 
-    fn resolve_enzymes(
-        &self,
-        seq: &[u8],
-        query: &str,
-        circular: bool,
-    ) -> (Vec<String>, Vec<CutSite>) {
+    fn resolve_enzyme_names(&self, seq: &[u8], query: &str, circular: bool) -> Vec<String> {
         let parsed = seqforge_bio::parse_enzyme_query(query);
-        seqforge_bio::resolve_query(&parsed, seq, circular)
+        seqforge_bio::resolve_query_names(&parsed, seq, circular)
     }
 }
 

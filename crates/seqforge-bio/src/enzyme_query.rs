@@ -137,6 +137,28 @@ pub fn resolve_query(
     }
 }
 
+/// Resolve a parsed query to **canonical** enzyme names only (no scanning of
+/// the returned set into sites). Presets are still resolved against the
+/// sequence; explicit names are mapped to their canonical spelling and unknown
+/// names dropped. This is the primitive the GUI/CLI dispatch composes with set
+/// operations (add / remove) before re-deriving sites via `find_cut_sites`.
+pub fn resolve_query_names(query: &EnzymeQuery, seq: &[u8], circular: bool) -> Vec<String> {
+    match query {
+        EnzymeQuery::Clear => Vec::new(),
+        EnzymeQuery::Names(names) => names
+            .iter()
+            .filter_map(|n| seqforge_restriction::enzyme_by_name(n).map(|e| e.name.to_string()))
+            .collect(),
+        EnzymeQuery::All => seqforge_restriction::all_enzymes()
+            .iter()
+            .map(|e| e.name.to_string())
+            .collect(),
+        EnzymeQuery::Preset(p) => {
+            seqforge_restriction::resolve_preset(p.into_restriction(), seq, circular).enzymes
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

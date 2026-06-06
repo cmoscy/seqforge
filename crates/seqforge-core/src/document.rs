@@ -17,6 +17,9 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CutSite {
     pub enzyme: String,
+    /// IUPAC recognition pattern of the enzyme (e.g. `"GGTCTC"`). Display-only;
+    /// the canonical pattern, not the concrete bases at this site.
+    pub recognition: String,
     /// 0-based start of the recognition sequence.
     pub recognition_start: usize,
     /// 0-based exclusive end of the recognition sequence.
