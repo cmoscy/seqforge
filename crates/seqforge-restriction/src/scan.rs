@@ -24,11 +24,7 @@ pub fn find_sites(seq: &[u8], enzyme: &'static Enzyme, circular: bool) -> Vec<Si
 /// Find sites for many enzymes in `seq`. Results are flattened across all
 /// enzymes; callers that need per-enzyme grouping can sort/group by the
 /// `enzyme` field.
-pub fn find_all_sites(
-    seq: &[u8],
-    enzymes: &[&'static Enzyme],
-    circular: bool,
-) -> Vec<Site> {
+pub fn find_all_sites(seq: &[u8], enzymes: &[&'static Enzyme], circular: bool) -> Vec<Site> {
     let mut out = Vec::new();
     for enzyme in enzymes {
         scan_one_enzyme(seq, enzyme, circular, &mut out);
@@ -36,12 +32,7 @@ pub fn find_all_sites(
     out
 }
 
-fn scan_one_enzyme(
-    seq: &[u8],
-    enzyme: &'static Enzyme,
-    circular: bool,
-    out: &mut Vec<Site>,
-) {
+fn scan_one_enzyme(seq: &[u8], enzyme: &'static Enzyme, circular: bool, out: &mut Vec<Site>) {
     let rec_len = enzyme.recognition.len();
     let seq_len = seq.len();
     if rec_len == 0 || seq_len < rec_len {
@@ -53,7 +44,11 @@ fn scan_one_enzyme(
     // map back to the canonical range.
     let extended: Vec<u8>;
     let search: &[u8] = if circular && rec_len > 1 {
-        extended = seq.iter().chain(seq[..rec_len - 1].iter()).copied().collect();
+        extended = seq
+            .iter()
+            .chain(seq[..rec_len - 1].iter())
+            .copied()
+            .collect();
         &extended
     } else {
         seq
@@ -64,8 +59,12 @@ fn scan_one_enzyme(
     // strand and any non-palindromic case). For palindromic Type II
     // enzymes the RC matches the same positions as the forward; we suppress
     // the duplicate emission below.
-    let rc_pat: Vec<Iupac> =
-        enzyme.recognition.iter().rev().map(|i| i.complement()).collect();
+    let rc_pat: Vec<Iupac> = enzyme
+        .recognition
+        .iter()
+        .rev()
+        .map(|i| i.complement())
+        .collect();
     let is_palindromic = rc_pat
         .iter()
         .zip(enzyme.recognition.iter())
@@ -76,18 +75,35 @@ fn scan_one_enzyme(
 
         if iupac_match(enzyme.recognition, window) {
             let rec_start = i % seq_len;
-            push_site(out, enzyme, rec_start, SiteStrand::Forward, seq_len, circular);
+            push_site(
+                out,
+                enzyme,
+                rec_start,
+                SiteStrand::Forward,
+                seq_len,
+                circular,
+            );
         }
         if !is_palindromic && iupac_match(&rc_pat, window) {
             let rec_start = i % seq_len;
-            push_site(out, enzyme, rec_start, SiteStrand::Reverse, seq_len, circular);
+            push_site(
+                out,
+                enzyme,
+                rec_start,
+                SiteStrand::Reverse,
+                seq_len,
+                circular,
+            );
         }
     }
 }
 
 #[inline]
 fn iupac_match(pattern: &[Iupac], window: &[u8]) -> bool {
-    pattern.iter().zip(window.iter()).all(|(p, &b)| p.matches(b))
+    pattern
+        .iter()
+        .zip(window.iter())
+        .all(|(p, &b)| p.matches(b))
 }
 
 fn push_site(
@@ -115,18 +131,16 @@ fn push_site(
     let abs_top = signed_add(rec_start, top_o);
     let abs_bot = signed_add(rec_start, bot_o);
     let (top_cut, bottom_cut) = if circular {
-        (abs_top.rem_euclid(seq_len as isize) as usize,
-         abs_bot.rem_euclid(seq_len as isize) as usize)
+        (
+            abs_top.rem_euclid(seq_len as isize) as usize,
+            abs_bot.rem_euclid(seq_len as isize) as usize,
+        )
     } else {
         // For linear sequences, drop sites whose cuts fall outside [0,
         // seq_len]. Type IIs enzymes whose recognition is near the end can
         // produce cuts past the sequence — those are biologically irrelevant
         // because the enzyme can't cleave what isn't there.
-        if abs_top < 0
-            || abs_bot < 0
-            || abs_top > seq_len as isize
-            || abs_bot > seq_len as isize
-        {
+        if abs_top < 0 || abs_bot < 0 || abs_top > seq_len as isize || abs_bot > seq_len as isize {
             return;
         }
         (abs_top as usize, abs_bot as usize)

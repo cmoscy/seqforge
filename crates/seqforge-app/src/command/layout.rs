@@ -103,12 +103,9 @@ pub(super) fn apply_split_pane(
         SplitDirection::Horizontal => Split::Right,
         SplitDirection::Vertical => Split::Below,
     };
-    let _ = state.dock_state.split(
-        (surface, node),
-        split,
-        0.5,
-        Node::leaf(Tab::View(new_vid)),
-    );
+    let _ = state
+        .dock_state
+        .split((surface, node), split, 0.5, Node::leaf(Tab::View(new_vid)));
 
     state.workspace.focus_view(new_vid);
     let scope = FocusScope::View(new_vid);
@@ -172,8 +169,7 @@ pub(super) fn place_view_tab(state: &mut AppState, view_id: ViewId) {
     // (1) Active view's leaf.
     if let Some(active_vid) = state.workspace.active_view {
         if active_vid != view_id {
-            if let Some((si, ni, _)) = state.dock_state.find_tab(&Tab::View(active_vid))
-            {
+            if let Some((si, ni, _)) = state.dock_state.find_tab(&Tab::View(active_vid)) {
                 state.dock_state[si][ni].append_tab(Tab::View(view_id));
                 return;
             }
@@ -190,8 +186,7 @@ pub(super) fn place_view_tab(state: &mut AppState, view_id: ViewId) {
                         .iter()
                         .any(|t| matches!(t, Tab::View(_) | Tab::Welcome))
                     {
-                        found =
-                            Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
+                        found = Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
                         break;
                     }
                 }

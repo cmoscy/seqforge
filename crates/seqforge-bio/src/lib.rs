@@ -8,7 +8,7 @@ mod search;
 
 pub use dna::{complement, reverse_complement};
 pub use enzyme_query::{
-    parse_enzyme_query, resolve_query, resolve_query_names, EnzymePreset, EnzymeQuery,
+    EnzymePreset, EnzymeQuery, parse_enzyme_query, resolve_query, resolve_query_names,
 };
 pub use search::{find_cut_sites, find_iupac_matches};
 

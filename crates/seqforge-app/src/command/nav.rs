@@ -3,8 +3,8 @@
 use seqforge_core::{BioOps, DispatchError, EnzymeOp, Selection, ViewerRequest, ViewerResponse};
 
 use super::{
-    active_selection, dispatch_active, emit_selection_diff,
-    restore_focus_after_overlay, snapshot_focus_for_overlay,
+    active_selection, dispatch_active, emit_selection_diff, restore_focus_after_overlay,
+    snapshot_focus_for_overlay,
 };
 use crate::app::AppState;
 use crate::event::AppEvent;
@@ -84,10 +84,16 @@ pub(super) fn apply_submit_find<B: BioOps>(
     let resp = dispatch_active(
         state,
         bio,
-        ViewerRequest::Find { pattern, mismatches, view: None },
+        ViewerRequest::Find {
+            pattern,
+            mismatches,
+            view: None,
+        },
     )?;
     if let ViewerResponse::SearchResults { count, .. } = &resp {
-        state.events.emit(AppEvent::SearchCompleted { hits: *count });
+        state
+            .events
+            .emit(AppEvent::SearchCompleted { hits: *count });
     }
     emit_selection_diff(state, sel_before);
     restore_focus_after_overlay(state);
@@ -107,7 +113,11 @@ pub(super) fn apply_enzyme_op<B: BioOps>(
     let resp = dispatch_active(
         state,
         bio,
-        ViewerRequest::Enzymes { query, op, view: None },
+        ViewerRequest::Enzymes {
+            query,
+            op,
+            view: None,
+        },
     )?;
     Ok(Some(resp))
 }
@@ -124,7 +134,10 @@ pub(super) fn apply_submit_goto<B: BioOps>(
     let resp = dispatch_active(
         state,
         bio,
-        ViewerRequest::GoTo { position, view: None },
+        ViewerRequest::GoTo {
+            position,
+            view: None,
+        },
     )?;
     emit_selection_diff(state, sel_before);
     restore_focus_after_overlay(state);

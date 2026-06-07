@@ -35,16 +35,27 @@ pub const EVENT_LOG_CAP: usize = 100;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    DocOpened { name: String, len: usize },
+    DocOpened {
+        name: String,
+        len: usize,
+    },
     DocClosed,
-    SelectionChanged { selection: Option<Selection> },
-    SearchCompleted { hits: usize },
+    SelectionChanged {
+        selection: Option<Selection>,
+    },
+    SearchCompleted {
+        hits: usize,
+    },
     FocusChanged(FocusScope),
     /// Active tab changed (`SwitchTab` / `NextTab` / `PrevTab`).
-    TabSwitched { view: ViewId },
+    TabSwitched {
+        view: ViewId,
+    },
     /// A tab was closed. When this is the last view referencing its
     /// buffer, `DocClosed` is also emitted (issued by `apply_close`).
-    TabClosed { view: ViewId },
+    TabClosed {
+        view: ViewId,
+    },
     /// An overlay (Find bar, GoTo bar, CLI status, future modals)
     /// became active. Tag is a `&'static str` identifier; Stage 5
     /// formalises these as named constants on `OverlayStack`.
@@ -61,10 +72,14 @@ impl AppEvent {
         match self {
             AppEvent::DocOpened { name, len } => format!("opened {name} ({len} bp)"),
             AppEvent::DocClosed => "closed".to_owned(),
-            AppEvent::SelectionChanged { selection: Some(sel) } if sel.is_cursor() => {
+            AppEvent::SelectionChanged {
+                selection: Some(sel),
+            } if sel.is_cursor() => {
                 format!("cursor @ {}", sel.anchor + 1)
             }
-            AppEvent::SelectionChanged { selection: Some(sel) } => {
+            AppEvent::SelectionChanged {
+                selection: Some(sel),
+            } => {
                 let (s, e) = sel.ordered();
                 format!("sel {s}–{e}")
             }

@@ -175,7 +175,10 @@ mod tests {
 
     #[test]
     fn parse_unique_variants() {
-        assert_eq!(parse_enzyme_query("unique"), EnzymeQuery::Preset(EnzymePreset::Unique));
+        assert_eq!(
+            parse_enzyme_query("unique"),
+            EnzymeQuery::Preset(EnzymePreset::Unique)
+        );
         assert_eq!(
             parse_enzyme_query("Unique Cutters"),
             EnzymeQuery::Preset(EnzymePreset::Unique)
@@ -273,8 +276,7 @@ mod tests {
         //          0         1         2         3         4
         //          01234567890123456789012345678901234567890123456789
         let seq = b"AAAAAGGTCTCAAAAAAAAAAGAAGACAAAAAAAAAAAAAAAAAAAAAAA";
-        let (names, sites) =
-            resolve_query(&EnzymeQuery::Preset(EnzymePreset::TypeIIs), seq, false);
+        let (names, sites) = resolve_query(&EnzymeQuery::Preset(EnzymePreset::TypeIIs), seq, false);
         assert!(names.iter().any(|n| n == "BsaI"), "names: {names:?}");
         assert!(names.iter().any(|n| n == "BbsI"), "names: {names:?}");
         assert!(sites.len() >= 2);

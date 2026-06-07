@@ -23,11 +23,8 @@ fn puc19_has_well_known_unique_cutters() {
     // need to verify all of them — confirming a few well-known ones is
     // enough to prove the pipeline works end-to-end on real DNA.
     let (seq, circular) = load_puc19();
-    let (names, sites) = seqforge_bio::resolve_query(
-        &seqforge_bio::parse_enzyme_query("unique"),
-        &seq,
-        circular,
-    );
+    let (names, sites) =
+        seqforge_bio::resolve_query(&seqforge_bio::parse_enzyme_query("unique"), &seq, circular);
 
     assert!(!names.is_empty(), "pUC19 has many unique cutters");
     for expected in ["EcoRI", "BamHI", "HindIII", "PstI"] {
@@ -47,11 +44,8 @@ fn puc19_has_well_known_unique_cutters() {
 #[test]
 fn puc19_unique_or_dual_is_superset_of_unique() {
     let (seq, circular) = load_puc19();
-    let (unique_names, _) = seqforge_bio::resolve_query(
-        &seqforge_bio::parse_enzyme_query("unique"),
-        &seq,
-        circular,
-    );
+    let (unique_names, _) =
+        seqforge_bio::resolve_query(&seqforge_bio::parse_enzyme_query("unique"), &seq, circular);
     let (dual_names, _) = seqforge_bio::resolve_query(
         &seqforge_bio::parse_enzyme_query("unique and dual"),
         &seq,

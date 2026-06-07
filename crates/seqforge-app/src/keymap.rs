@@ -105,7 +105,9 @@ pub const KEYMAP: &[Binding] = &[
     Binding {
         chord: (Modifiers::COMMAND, Key::Backslash),
         when_context: &[KeyContext::WORKSPACE],
-        command: || AppCommand::SplitPane { direction: SplitDirection::Horizontal },
+        command: || AppCommand::SplitPane {
+            direction: SplitDirection::Horizontal,
+        },
     },
     Binding {
         chord: (Modifiers::COMMAND, Key::Num1),
@@ -168,11 +170,7 @@ pub const KEYMAP: &[Binding] = &[
 /// Run the keymap once. Returns every command whose chord fired this
 /// frame. The frame lifecycle (`app.rs::update`) appends these to
 /// `pending_commands` immediately after the socket drain.
-pub fn dispatch(
-    focus: &FocusState,
-    state: &AppState,
-    ctx: &egui::Context,
-) -> Vec<AppCommand> {
+pub fn dispatch(focus: &FocusState, state: &AppState, ctx: &egui::Context) -> Vec<AppCommand> {
     let mut out = Vec::new();
     ctx.input_mut(|i| {
         // ── User keybinding overrides (consulted first) ────────────────
@@ -199,10 +197,7 @@ pub fn dispatch(
             // means we do *not* call `consume_key`, so a chord that
             // doesn't apply to the current pane falls through to
             // whoever is listening (e.g. the terminal).
-            let ctx_ok = b
-                .when_context
-                .iter()
-                .all(|tag| focus.context.contains(tag));
+            let ctx_ok = b.when_context.iter().all(|tag| focus.context.contains(tag));
             if !ctx_ok {
                 continue;
             }

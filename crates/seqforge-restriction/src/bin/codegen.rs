@@ -106,7 +106,9 @@ fn fetch_snapshot(url: &str, dest: &str) {
         .status()
         .expect("failed to launch curl — is it installed?");
     if !status.success() {
-        panic!("curl failed ({status}); snapshot not updated. Check the URL or pass --fetch <url>.");
+        panic!(
+            "curl failed ({status}); snapshot not updated. Check the URL or pass --fetch <url>."
+        );
     }
 }
 
@@ -216,8 +218,11 @@ fn filter_and_classify(raw: Vec<RawRecord>) -> Vec<Entry> {
 ///   `A, ?;`                              (unknown cut — skipped)
 fn parse_rs(rs: &str) -> Option<(Vec<u8>, i16, i16, bool)> {
     // Split on `;`, then within each part split on `,`.
-    let parts: Vec<&str> =
-        rs.split(';').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = rs
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     if parts.is_empty() {
         return None;
     }
@@ -232,12 +237,25 @@ fn parse_rs(rs: &str) -> Option<(Vec<u8>, i16, i16, bool)> {
         }
         // Validate recognition: must be IUPAC letters only.
         let rec_bytes: Vec<u8> = rec.bytes().map(|b| b.to_ascii_uppercase()).collect();
-        if !rec_bytes
-            .iter()
-            .all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T'
-                | b'R' | b'Y' | b'S' | b'W' | b'K' | b'M'
-                | b'B' | b'D' | b'H' | b'V' | b'N'))
-        {
+        if !rec_bytes.iter().all(|&b| {
+            matches!(
+                b,
+                b'A' | b'C'
+                    | b'G'
+                    | b'T'
+                    | b'R'
+                    | b'Y'
+                    | b'S'
+                    | b'W'
+                    | b'K'
+                    | b'M'
+                    | b'B'
+                    | b'D'
+                    | b'H'
+                    | b'V'
+                    | b'N'
+            )
+        }) {
             return None;
         }
         let cut_pos: i16 = pos.parse().ok()?;
@@ -286,7 +304,10 @@ fn emit_generated(entries: &[Entry]) -> String {
          // ╚══════════════════════════════════════════════════════════════════╝\n\n",
     );
     s.push_str("use crate::enzyme::{Enzyme, EnzymeType, Iupac};\n\n");
-    s.push_str(&format!("pub const ENZYMES: &[Enzyme] = &[\n"));
+    // `rustfmt::skip` keeps the compact one-line-per-enzyme layout: without it
+    // rustfmt explodes each entry across ~9 lines and `fmt --check` would fail
+    // after any regen.
+    s.push_str("#[rustfmt::skip]\npub const ENZYMES: &[Enzyme] = &[\n");
     for e in entries {
         let rec = e
             .recognition

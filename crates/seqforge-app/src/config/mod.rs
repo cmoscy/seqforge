@@ -29,20 +29,16 @@ pub use theme::Theme;
 /// "Open …" and to ship the built-in themes without requiring disk
 /// writes at startup.
 pub mod defaults {
-    pub const SETTINGS_TEMPLATE: &str =
-        include_str!("defaults/settings.toml");
-    pub const KEYBINDINGS_TEMPLATE: &str =
-        include_str!("defaults/keybindings.toml");
-    pub const DEFAULT_DARK: &str =
-        include_str!("defaults/default-dark.toml");
-    pub const DEFAULT_LIGHT: &str =
-        include_str!("defaults/default-light.toml");
+    pub const SETTINGS_TEMPLATE: &str = include_str!("defaults/settings.toml");
+    pub const KEYBINDINGS_TEMPLATE: &str = include_str!("defaults/keybindings.toml");
+    pub const DEFAULT_DARK: &str = include_str!("defaults/default-dark.toml");
+    pub const DEFAULT_LIGHT: &str = include_str!("defaults/default-light.toml");
 }
 
 /// Composed, runtime-ready configuration. Wrapped in [`Arc`] on
 /// [`crate::app::AppState`] so widgets can hold a cheap clone for the
 /// duration of a frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     pub settings: Settings,
     pub theme: Theme,
@@ -52,17 +48,6 @@ pub struct Config {
     /// invalidate when the user reloads. Stays at 0 until the first
     /// reload.
     pub epoch: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            settings: Settings::default(),
-            theme: Theme::default(),
-            keybindings: KeyBindings::default(),
-            epoch: 0,
-        }
-    }
 }
 
 impl Config {
@@ -85,7 +70,15 @@ impl Config {
         let settings = read_settings(&mut warnings);
         let theme = read_theme(&settings.theme, &mut warnings);
         let keybindings = read_keybindings(&mut warnings);
-        (Self { settings, theme, keybindings, epoch }, warnings)
+        (
+            Self {
+                settings,
+                theme,
+                keybindings,
+                epoch,
+            },
+            warnings,
+        )
     }
 }
 
@@ -150,10 +143,7 @@ fn read_keybindings(warnings: &mut Vec<String>) -> KeyBindings {
 /// Theme" menu commands so the user always sees a populated file when
 /// they click through, while the runtime stays defaults-only until
 /// they actually customise something.
-pub fn ensure_file_exists(
-    path: &std::path::Path,
-    template: &str,
-) -> std::io::Result<()> {
+pub fn ensure_file_exists(path: &std::path::Path, template: &str) -> std::io::Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -170,7 +160,6 @@ pub fn open_in_editor(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open").arg(path).spawn()?;
-        return Ok(());
     }
     #[cfg(target_os = "windows")]
     {
@@ -178,7 +167,6 @@ pub fn open_in_editor(path: &std::path::Path) -> std::io::Result<()> {
             .args(["/C", "start", ""])
             .arg(path)
             .spawn()?;
-        return Ok(());
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -186,8 +174,8 @@ pub fn open_in_editor(path: &std::path::Path) -> std::io::Result<()> {
         // editor for files, a file manager for directories). Only fall
         // back to $VISUAL/$EDITOR when running headless (no display server),
         // where xdg-open would silently fail or open the wrong thing.
-        let has_display = std::env::var_os("DISPLAY").is_some()
-            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
         if has_display {
             std::process::Command::new("xdg-open").arg(path).spawn()?;
         } else if let Some(editor) =
@@ -198,6 +186,6 @@ pub fn open_in_editor(path: &std::path::Path) -> std::io::Result<()> {
             // Headless with no editor configured — best effort.
             std::process::Command::new("xdg-open").arg(path).spawn()?;
         }
-        Ok(())
     }
+    Ok(())
 }

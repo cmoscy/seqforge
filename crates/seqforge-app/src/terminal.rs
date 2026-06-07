@@ -82,7 +82,10 @@ impl TerminalPane {
         let (tx, rx) = mpsc::channel();
         let backend = TerminalBackend::new(1, ctx, tx, settings)?;
 
-        Ok(Self { backend, _pty_rx: rx })
+        Ok(Self {
+            backend,
+            _pty_rx: rx,
+        })
     }
 
     /// Render the terminal pane. Viewer commands reach the GUI via the session

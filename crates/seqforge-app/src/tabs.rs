@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use seqforge_core::ViewId;
+use serde::{Deserialize, Serialize};
 
 use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
@@ -96,18 +96,14 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // minimap the bottom. `browser_fraction` is adjusted by
                 // the drag handle below and lives on `MiniMap` so it
                 // survives tab switches within the session.
-                let browser_h =
-                    (available_h * self.minimap.browser_fraction).max(40.0);
+                let browser_h = (available_h * self.minimap.browser_fraction).max(40.0);
 
-                ui.allocate_ui(
-                    egui::Vec2::new(available_w, browser_h),
-                    |ui| {
-                        if let Some(path) = self.browser.show(ui) {
-                            self.pending_commands
-                                .push((AppCommand::OpenFile(path), None));
-                        }
-                    },
-                );
+                ui.allocate_ui(egui::Vec2::new(available_w, browser_h), |ui| {
+                    if let Some(path) = self.browser.show(ui) {
+                        self.pending_commands
+                            .push((AppCommand::OpenFile(path), None));
+                    }
+                });
 
                 // ── Drag handle ───────────────────────────────────────────────
                 // A thin interactive strip the user drags to resize the split.
@@ -117,8 +113,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     ui.allocate_exact_size(handle_size, egui::Sense::drag());
 
                 if handle_resp.hovered() || handle_resp.dragged() {
-                    ui.ctx()
-                        .set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 }
                 if handle_resp.dragged() {
                     let delta = handle_resp.drag_delta().y / available_h;
@@ -136,12 +131,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     egui::Stroke::new(1.0, handle_color),
                 );
 
-                self.minimap.show(
-                    ui,
-                    self.workspace,
-                    self.pending_commands,
-                    &self.config,
-                );
+                self.minimap
+                    .show(ui, self.workspace, self.pending_commands, &self.config);
             }
             Tab::Welcome => {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui, &[]) {
@@ -179,9 +170,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     } else {
                         Vec::new()
                     };
-                    if let Some(cmd) =
-                        overlay::show_inline_bar(self.overlays, ui, &enzyme_rows)
-                    {
+                    if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui, &enzyme_rows) {
                         self.pending_commands.push((cmd, None));
                     }
                 }
@@ -198,14 +187,13 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // dispatch and keeps the renderer module per-kind
                 // closed.
                 let cfg = config.clone();
-                let rendered =
-                    workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
-                        match view.kind {
-                            seqforge_core::ViewKind::TextView => {
-                                seq_view.show(ui, view, buf, ann, pending_commands, &cfg);
-                            }
+                let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
+                    match view.kind {
+                        seqforge_core::ViewKind::TextView => {
+                            seq_view.show(ui, view, buf, ann, pending_commands, &cfg);
                         }
-                    });
+                    }
+                });
                 if rendered.is_err() {
                     ui.centered_and_justified(|ui| {
                         ui.label("(view closed)");
@@ -229,8 +217,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {
-                    let terminal_has_focus = self.focus.scope == FocusScope::Terminal
-                        && self.overlays.is_empty();
+                    let terminal_has_focus =
+                        self.focus.scope == FocusScope::Terminal && self.overlays.is_empty();
                     term.show(ui, terminal_has_focus);
                 }
                 None => {
@@ -249,7 +237,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             && ui.ctx().input(|i| i.pointer.any_pressed())
             && self.focus.scope != pane_scope
         {
-            self.pending_commands.push((AppCommand::FocusPane(pane_scope), None));
+            self.pending_commands
+                .push((AppCommand::FocusPane(pane_scope), None));
         }
     }
 }

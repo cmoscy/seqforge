@@ -125,24 +125,6 @@ fn parse_chord(s: &str) -> Option<(Modifiers, Key)> {
     Some((mods, key))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_preserves_document_order() {
-        // First-listed binding wins, so document order must round-trip.
-        let toml = r#"
-"cmd+n" = "next_tab"
-"cmd+p" = "prev_tab"
-"cmd+f" = "find"
-"#;
-        let kb = parse(toml).expect("valid");
-        let actions: Vec<_> = kb.entries.iter().map(|(_, _, a)| *a).collect();
-        assert_eq!(actions, vec![Action::NextTab, Action::PrevTab, Action::Find]);
-    }
-}
-
 fn parse_key(s: &str) -> Option<Key> {
     let lower = s.to_ascii_lowercase();
     // Letters and digits.
@@ -182,4 +164,25 @@ fn parse_key(s: &str) -> Option<Key> {
         other => other,
     };
     Key::from_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_preserves_document_order() {
+        // First-listed binding wins, so document order must round-trip.
+        let toml = r#"
+"cmd+n" = "next_tab"
+"cmd+p" = "prev_tab"
+"cmd+f" = "find"
+"#;
+        let kb = parse(toml).expect("valid");
+        let actions: Vec<_> = kb.entries.iter().map(|(_, _, a)| *a).collect();
+        assert_eq!(
+            actions,
+            vec![Action::NextTab, Action::PrevTab, Action::Find]
+        );
+    }
 }

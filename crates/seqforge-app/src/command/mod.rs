@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use seqforge_core::{
-    dispatch, BioOps, DispatchError, Selection, ViewId, ViewerRequest, ViewerResponse,
+    BioOps, DispatchError, Selection, ViewId, ViewerRequest, ViewerResponse, dispatch,
 };
 
 use crate::app::AppState;
@@ -62,8 +62,12 @@ pub enum AppCommand {
     CloseDoc,
 
     // ── Tabs ─────────────────────────────────────────────────────────
-    SwitchTab { view: ViewId },
-    CloseTab { view: ViewId },
+    SwitchTab {
+        view: ViewId,
+    },
+    CloseTab {
+        view: ViewId,
+    },
     NextTab,
     PrevTab,
 
@@ -72,24 +76,40 @@ pub enum AppCommand {
     OpenGoTo,
     OpenEnzymes,
     DismissOverlay,
-    SubmitFind { pattern: String, mismatches: u8 },
-    SubmitGoTo { position: usize },
+    SubmitFind {
+        pattern: String,
+        mismatches: u8,
+    },
+    SubmitGoTo {
+        position: usize,
+    },
     /// Replace the active enzyme set with the query's result (`EnzymeOp::Set`).
-    SubmitEnzymes { query: String },
+    SubmitEnzymes {
+        query: String,
+    },
     /// Union the query's enzymes into the active set (`EnzymeOp::Add`).
-    AddEnzymes { query: String },
+    AddEnzymes {
+        query: String,
+    },
     /// Remove a single enzyme from the active set by name (`EnzymeOp::Remove`).
-    RemoveEnzyme { name: String },
+    RemoveEnzyme {
+        name: String,
+    },
     /// Select a 0-based half-open range in the active view and scroll it into
     /// view. Used by the enzyme overlay to jump to a cut site; generic enough
     /// to reuse for search results / features later.
-    RevealRange { start: usize, end: usize },
+    RevealRange {
+        start: usize,
+        end: usize,
+    },
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
     FocusPane(FocusScope),
     FocusPaneByIndex(usize),
-    SplitPane { direction: SplitDirection },
+    SplitPane {
+        direction: SplitDirection,
+    },
     ResetLayout,
 
     // ── Selection ────────────────────────────────────────────────────
@@ -119,8 +139,15 @@ pub enum AppCommand {
 pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
     use AppCommand::*;
     match cmd {
-        OpenFind | OpenGoTo | OpenEnzymes | SubmitFind { .. } | SubmitGoTo { .. }
-        | SubmitEnzymes { .. } | AddEnzymes { .. } | RemoveEnzyme { .. } | CloseDoc
+        OpenFind
+        | OpenGoTo
+        | OpenEnzymes
+        | SubmitFind { .. }
+        | SubmitGoTo { .. }
+        | SubmitEnzymes { .. }
+        | AddEnzymes { .. }
+        | RemoveEnzyme { .. }
+        | CloseDoc
         | SplitPane { .. } => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
         SwitchTab { .. } | CloseTab { .. } => true,
@@ -128,9 +155,8 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         SetSelection(_) | SelectFeature(_) => true,
         RevealRange { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
-        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli
-        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile
-        | OpenConfigDir => true,
+        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli | ReloadConfig
+        | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile | OpenConfigDir => true,
     }
 }
 
@@ -176,7 +202,9 @@ pub(super) fn active_selection(state: &AppState) -> Option<Selection> {
 pub(super) fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
     let after = active_selection(state);
     if after != before {
-        state.events.emit(AppEvent::SelectionChanged { selection: after });
+        state
+            .events
+            .emit(AppEvent::SelectionChanged { selection: after });
     }
 }
 
@@ -279,9 +307,10 @@ pub fn apply<B: BioOps>(
         OpenGoTo => nav::apply_open_goto(state),
         OpenEnzymes => nav::apply_open_enzymes(state),
         DismissOverlay => nav::apply_dismiss_overlay(state),
-        SubmitFind { pattern, mismatches } => {
-            nav::apply_submit_find(state, bio, pattern, mismatches)
-        }
+        SubmitFind {
+            pattern,
+            mismatches,
+        } => nav::apply_submit_find(state, bio, pattern, mismatches),
         SubmitGoTo { position } => nav::apply_submit_goto(state, bio, position),
         SubmitEnzymes { query } => {
             nav::apply_enzyme_op(state, bio, query, seqforge_core::EnzymeOp::Set)
@@ -323,7 +352,9 @@ pub fn apply<B: BioOps>(
                 }
             }
             if new_shell != old_shell {
-                state.toasts.info("Terminal shell change applies after restart");
+                state
+                    .toasts
+                    .info("Terminal shell change applies after restart");
             }
             Ok(None)
         }
@@ -343,11 +374,7 @@ pub fn apply<B: BioOps>(
                 "default-light" => crate::config::defaults::DEFAULT_LIGHT,
                 _ => crate::config::defaults::DEFAULT_DARK,
             };
-            open_config_file(
-                state,
-                crate::config::paths::theme_path(&name),
-                template,
-            )
+            open_config_file(state, crate::config::paths::theme_path(&name), template)
         }
         OpenConfigDir => {
             let dir = crate::config::paths::config_dir();
@@ -369,7 +396,9 @@ pub fn apply<B: BioOps>(
                 let sel_before = active_selection(state);
                 let resp = dispatch_active(state, bio, other)?;
                 if let ViewerResponse::SearchResults { count, .. } = &resp {
-                    state.events.emit(AppEvent::SearchCompleted { hits: *count });
+                    state
+                        .events
+                        .emit(AppEvent::SearchCompleted { hits: *count });
                 }
                 emit_selection_diff(state, sel_before);
                 Ok(Some(resp))

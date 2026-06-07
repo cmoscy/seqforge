@@ -77,7 +77,9 @@ impl KeyContext {
     pub const TEXT_INPUT: &'static str = "TextInput";
 
     pub fn new() -> Self {
-        Self { stack: vec![Self::WORKSPACE] }
+        Self {
+            stack: vec![Self::WORKSPACE],
+        }
     }
 
     pub fn push(&mut self, tag: &'static str) {
@@ -129,7 +131,10 @@ pub struct FocusState {
 
 impl FocusState {
     pub fn new() -> Self {
-        let mut s = Self { scope: FocusScope::default(), context: KeyContext::new() };
+        let mut s = Self {
+            scope: FocusScope::default(),
+            context: KeyContext::new(),
+        };
         s.rebuild_base_context();
         s
     }

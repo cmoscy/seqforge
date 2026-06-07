@@ -120,6 +120,11 @@ impl Enzyme {
         self.recognition.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.recognition.is_empty()
+    }
+
     /// Overhang produced by this enzyme. Computed from `top_offset` vs
     /// `bottom_offset`; doesn't depend on the recognition site.
     pub fn overhang_kind(&self) -> OverhangKind {
@@ -127,7 +132,9 @@ impl Enzyme {
         match self.top_offset.cmp(&self.bottom_offset) {
             Ordering::Equal => OverhangKind::Blunt,
             Ordering::Less => OverhangKind::FivePrime((self.bottom_offset - self.top_offset) as u8),
-            Ordering::Greater => OverhangKind::ThreePrime((self.top_offset - self.bottom_offset) as u8),
+            Ordering::Greater => {
+                OverhangKind::ThreePrime((self.top_offset - self.bottom_offset) as u8)
+            }
         }
     }
 }

@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
 use crate::config::Config;
-use crate::minimap::MiniMap;
 use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::keymap;
+use crate::minimap::MiniMap;
 use crate::overlay::OverlayStack;
 use crate::persistence::{self, PersistedSession};
 #[cfg(unix)]
@@ -115,10 +115,7 @@ pub struct AppState {
     /// consumed when a file's `View` is first created (then dropped
     /// from the map). New saves capture the *current* view state, not
     /// this restore buffer.
-    pub pending_file_state: std::collections::HashMap<
-        PathBuf,
-        crate::persistence::FileState,
-    >,
+    pub pending_file_state: std::collections::HashMap<PathBuf, crate::persistence::FileState>,
     /// User configuration (settings + theme + key overrides). Loaded
     /// from disk in `SeqForgeApp::new`; can be re-read at runtime via
     /// the `ReloadConfig` command. Wrapped in `Arc` so widgets cheaply
@@ -172,7 +169,9 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
     state.recent_files = session.recent_files;
     state.pending_file_state = session.file_state;
 
-    let Some(snapshot) = session.layout else { return };
+    let Some(snapshot) = session.layout else {
+        return;
+    };
 
     // Build the dock skeleton (splits + Browser/Terminal/Welcome
     // placeholders for viewer leaves) and collect the per-leaf opens
@@ -207,8 +206,11 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
         }
         // Replace the Welcome placeholder in this leaf with the
         // freshly minted View tabs.
-        if let egui_dock::Node::Leaf { tabs, active: tab_active, .. } =
-            &mut state.dock_state[surface][node]
+        if let egui_dock::Node::Leaf {
+            tabs,
+            active: tab_active,
+            ..
+        } = &mut state.dock_state[surface][node]
         {
             *tabs = view_tabs.iter().copied().map(Tab::View).collect();
             *tab_active = egui_dock::TabIndex(active.min(tabs.len().saturating_sub(1)));
@@ -256,8 +258,12 @@ impl SeqForgeApp {
         for w in cfg_warnings {
             state.toasts.warning(w);
         }
-        state.minimap.browser_fraction =
-            state.config.settings.layout.minimap_browser_fraction.clamp(0.15, 0.85);
+        state.minimap.browser_fraction = state
+            .config
+            .settings
+            .layout
+            .minimap_browser_fraction
+            .clamp(0.15, 0.85);
         // If no saved session restores the layout below, rebuild the
         // default dock using the *user-configured* split fractions so a
         // first launch honours `[layout]` overrides.
@@ -289,8 +295,7 @@ impl SeqForgeApp {
             let socket_path = socket::socket_path();
             crate::terminal::install_pty_env(Some(&socket_path));
 
-            match socket::start_socket_listener(socket_path.clone(), cc.egui_ctx.clone())
-            {
+            match socket::start_socket_listener(socket_path.clone(), cc.egui_ctx.clone()) {
                 Ok(rx) => {
                     state.socket_rx = Some(rx);
                     state.socket_guard = Some(socket::SocketGuard::new(socket_path));
@@ -303,12 +308,10 @@ impl SeqForgeApp {
         #[cfg(not(unix))]
         crate::terminal::install_pty_env(None);
 
-        state.terminal = TerminalPane::new(
-            cc.egui_ctx.clone(),
-            &state.config.settings.terminal.shell,
-        )
-        .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
-        .ok();
+        state.terminal =
+            TerminalPane::new(cc.egui_ctx.clone(), &state.config.settings.terminal.shell)
+                .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
+                .ok();
 
         Self { state }
     }
@@ -343,10 +346,8 @@ impl eframe::App for SeqForgeApp {
         // Workspace base + generic pane tag + ViewKind-specific tag
         // (Stage 2.5d) + overlay tags. Drift-proof: the overlay stack
         // and the active view's kind are the sources of truth.
-        let active_view_kind =
-            self.state.workspace.active_view().map(|v| v.kind);
-        let overlay_tags: Vec<&'static str> =
-            self.state.overlays.context_tags().collect();
+        let active_view_kind = self.state.workspace.active_view().map(|v| v.kind);
+        let overlay_tags: Vec<&'static str> = self.state.overlays.context_tags().collect();
         self.state
             .focus
             .rebuild_context(active_view_kind, overlay_tags.into_iter());
@@ -382,7 +383,9 @@ impl eframe::App for SeqForgeApp {
             // pops the FileDialog from the stack. Both go through the
             // single applier.
             if matches!(cmd, AppCommand::OpenFile(_)) {
-                self.state.overlays.pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
+                self.state
+                    .overlays
+                    .pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
                 // Dialog was accepted — discard the saved focus
                 // snapshot. The `OpenFile` apply will move focus to
                 // the newly-opened view; restoring the pre-dialog
@@ -406,7 +409,10 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                     let can_close = command::is_enabled(&AppCommand::CloseDoc, &self.state);
-                    if ui.add_enabled(can_close, egui::Button::new("Close  ⌘W")).clicked() {
+                    if ui
+                        .add_enabled(can_close, egui::Button::new("Close  ⌘W"))
+                        .clicked()
+                    {
                         menu_cmds.push(AppCommand::CloseDoc);
                         ui.close_menu();
                     }
@@ -433,7 +439,10 @@ impl eframe::App for SeqForgeApp {
                 });
                 ui.menu_button("Edit", |ui| {
                     let can_find = command::is_enabled(&AppCommand::OpenFind, &self.state);
-                    if ui.add_enabled(can_find, egui::Button::new("Find…  ⌘F")).clicked() {
+                    if ui
+                        .add_enabled(can_find, egui::Button::new("Find…  ⌘F"))
+                        .clicked()
+                    {
                         menu_cmds.push(AppCommand::OpenFind);
                         ui.close_menu();
                     }
@@ -475,7 +484,10 @@ impl eframe::App for SeqForgeApp {
                 });
                 ui.menu_button("Navigate", |ui| {
                     let can_nav = command::is_enabled(&AppCommand::OpenGoTo, &self.state);
-                    if ui.add_enabled(can_nav, egui::Button::new("Go to Position…  ⌘G")).clicked() {
+                    if ui
+                        .add_enabled(can_nav, egui::Button::new("Go to Position…  ⌘G"))
+                        .clicked()
+                    {
                         menu_cmds.push(AppCommand::OpenGoTo);
                         ui.close_menu();
                     }
@@ -607,8 +619,7 @@ impl eframe::App for SeqForgeApp {
         // sanitizer should make ghost tabs impossible, but this guard
         // keeps the runtime resilient to drift from any future code
         // path that mutates the dock without updating the workspace.
-        if let Some((_rect, Tab::View(vid))) = self.state.dock_state.find_active_focused()
-        {
+        if let Some((_rect, Tab::View(vid))) = self.state.dock_state.find_active_focused() {
             let vid = *vid;
             if self.state.workspace.active_view != Some(vid)
                 && self.state.workspace.views.contains_key(&vid)

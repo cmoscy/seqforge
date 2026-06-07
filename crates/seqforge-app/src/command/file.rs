@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use egui_file_dialog::FileDialog;
 use seqforge_core::{BioOps, DispatchError, ViewId, ViewerResponse};
 
-use super::{
-    active_selection, emit_selection_diff, snapshot_focus_for_overlay, layout,
-};
+use super::{active_selection, emit_selection_diff, layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
 use crate::cli_install;
 use crate::event::AppEvent;
@@ -79,11 +77,11 @@ pub(super) fn apply_open_file<B: BioOps>(
     state.focus.set_scope(FocusScope::View(view_id));
 
     if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
-        state
-            .workspace
-            .buffers
-            .get(v.buffer_id)
-            .and_then(|arc| arc.read().ok().map(|b| (crate::workspace::display_name(&b), b.len())))
+        state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
+            arc.read()
+                .ok()
+                .map(|b| (crate::workspace::display_name(&b), b.len()))
+        })
     }) {
         state.events.emit(AppEvent::DocOpened { name, len });
     }

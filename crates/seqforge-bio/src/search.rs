@@ -63,7 +63,11 @@ pub fn find_iupac_matches(
     // spanning the origin are found in one pass.
     let extended: Vec<u8>;
     let search_seq: &[u8] = if circular && pat_len > 1 {
-        extended = seq.iter().chain(seq[..pat_len - 1].iter()).copied().collect();
+        extended = seq
+            .iter()
+            .chain(seq[..pat_len - 1].iter())
+            .copied()
+            .collect();
         &extended
     } else {
         seq
@@ -78,10 +82,18 @@ pub fn find_iupac_matches(
         let end = start + pat_len;
 
         if hamming_iupac(pattern, slice) <= mismatches {
-            hits.push(SearchHit { start, end, strand: Strand::Forward });
+            hits.push(SearchHit {
+                start,
+                end,
+                strand: Strand::Forward,
+            });
         }
         if search_rc && hamming_iupac(&rc_pat, slice) <= mismatches {
-            hits.push(SearchHit { start, end, strand: Strand::Reverse });
+            hits.push(SearchHit {
+                start,
+                end,
+                strand: Strand::Reverse,
+            });
         }
     }
 
@@ -187,7 +199,10 @@ mod tests {
         let seq = b"AATTCNNNNNNNNNNG"; // len 16, 'G' at pos 15
         let hits = find_iupac_matches(seq, ECORI_SITE, 0, true);
         let wrap = hits.iter().find(|h| h.start == 15);
-        assert!(wrap.is_some(), "should find wrap-around site; got: {hits:?}");
+        assert!(
+            wrap.is_some(),
+            "should find wrap-around site; got: {hits:?}"
+        );
     }
 
     #[test]
@@ -233,7 +248,7 @@ mod tests {
         let seq = b"AAAAAGGTCTCAAAAAAAAAAAAAAAAAAA";
         let sites = find_cut_sites(seq, &["BsaI"], false);
         assert_eq!(sites.len(), 1, "BsaI Type IIs should be found via bridge");
-        assert_eq!(sites[0].cut_pos, 12);    // 5 + 7
+        assert_eq!(sites[0].cut_pos, 12); // 5 + 7
         assert_eq!(sites[0].bottom_cut_pos, 16); // 5 + 11
     }
 }

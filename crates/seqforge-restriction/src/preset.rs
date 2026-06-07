@@ -57,7 +57,10 @@ pub fn resolve_preset(preset: Preset, seq: &[u8], circular: bool) -> PresetResul
                 .filter(|(_, c)| *c == 0)
                 .map(|(e, _)| e.name.to_string())
                 .collect();
-            PresetResult { enzymes: names, sites: Vec::new() }
+            PresetResult {
+                enzymes: names,
+                sites: Vec::new(),
+            }
         }
         Preset::TypeIIs => {
             let iis: Vec<&'static Enzyme> = lib
@@ -67,13 +70,13 @@ pub fn resolve_preset(preset: Preset, seq: &[u8], circular: bool) -> PresetResul
             let sites = find_all_sites(seq, &iis, circular);
             // Filter to enzymes that actually cut at least once — TypeIIs
             // preset is "show me Type IIs sites", not "list all Type IIs".
-            let mut names: Vec<String> = sites
-                .iter()
-                .map(|s| s.enzyme.to_string())
-                .collect();
+            let mut names: Vec<String> = sites.iter().map(|s| s.enzyme.to_string()).collect();
             names.sort();
             names.dedup();
-            PresetResult { enzymes: names, sites }
+            PresetResult {
+                enzymes: names,
+                sites,
+            }
         }
         Preset::GoldenGate => resolve_named_subset(seq, circular, GOLDEN_GATE_NAMES),
         Preset::MoClo => resolve_named_subset(seq, circular, MOCLO_NAMES),
@@ -94,7 +97,10 @@ fn filter_by_count(
         .collect();
     let names: Vec<String> = keep.iter().map(|e| e.name.to_string()).collect();
     let sites = find_all_sites(seq, &keep, circular);
-    PresetResult { enzymes: names, sites }
+    PresetResult {
+        enzymes: names,
+        sites,
+    }
 }
 
 fn resolve_named_subset(seq: &[u8], circular: bool, names: &[&str]) -> PresetResult {
@@ -104,5 +110,8 @@ fn resolve_named_subset(seq: &[u8], circular: bool, names: &[&str]) -> PresetRes
         .collect();
     let sites = find_all_sites(seq, &lib, circular);
     let actual_names: Vec<String> = lib.iter().map(|e| e.name.to_string()).collect();
-    PresetResult { enzymes: actual_names, sites }
+    PresetResult {
+        enzymes: actual_names,
+        sites,
+    }
 }

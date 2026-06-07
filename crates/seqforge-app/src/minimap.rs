@@ -106,7 +106,12 @@ fn build_circular_geom(
         });
     }
 
-    MinimapGeom { is_circular: true, seq_len, arcs, bars: vec![] }
+    MinimapGeom {
+        is_circular: true,
+        seq_len,
+        arcs,
+        bars: vec![],
+    }
 }
 
 /// Build bar geometry for a linear sequence.
@@ -153,7 +158,12 @@ fn build_linear_geom(
         });
     }
 
-    MinimapGeom { is_circular: false, seq_len, arcs: vec![], bars }
+    MinimapGeom {
+        is_circular: false,
+        seq_len,
+        arcs: vec![],
+        bars,
+    }
 }
 
 /// Convert a sequence position to an angle on the ring.
@@ -249,11 +259,12 @@ impl MiniMap {
         // ── Header label: name + bp count ────────────────────────────────────
         ui.add_space(4.0);
         ui.vertical_centered(|ui| {
-            let topology = if snap.is_circular { "circular" } else { "linear" };
-            ui.add(
-                egui::Label::new(egui::RichText::new(&snap.display_name).strong())
-                    .truncate(),
-            );
+            let topology = if snap.is_circular {
+                "circular"
+            } else {
+                "linear"
+            };
+            ui.add(egui::Label::new(egui::RichText::new(&snap.display_name).strong()).truncate());
             // Use the regular text colour at slight de-emphasis instead
             // of `weak_text_color`, which is too faded against the panel
             // background to read at a glance.
@@ -381,12 +392,14 @@ impl MiniMap {
                     let frac = ((angle / TAU) + 1.0) % 1.0;
                     ((frac * snap.seq_len as f32) as usize + 1).clamp(1, snap.seq_len)
                 } else {
-                    let frac =
-                        ((click.x - rect.min.x) / panel_w).clamp(0.0, 1.0);
+                    let frac = ((click.x - rect.min.x) / panel_w).clamp(0.0, 1.0);
                     ((frac * snap.seq_len as f32) as usize + 1).clamp(1, snap.seq_len)
                 };
                 cmds.push((
-                    AppCommand::Viewer(ViewerRequest::GoTo { position: seq_pos, view: None }),
+                    AppCommand::Viewer(ViewerRequest::GoTo {
+                        position: seq_pos,
+                        view: None,
+                    }),
                     None,
                 ));
             }
@@ -396,6 +409,7 @@ impl MiniMap {
 
 // ── Circular painter ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // render helper: rects, colors, fractions are all natural params
 fn paint_circular(
     painter: &egui::Painter,
     rect: Rect,
@@ -424,7 +438,12 @@ fn paint_circular(
     // Viewport highlight arc (behind features)
     if let Some((vs, ve)) = visible_range {
         paint_arc_range(
-            painter, center, radius, vs, ve, seq_len,
+            painter,
+            center,
+            radius,
+            vs,
+            ve,
+            seq_len,
             Stroke::new(spine_w + 8.0, theme.minimap.viewport.0),
         );
     }
@@ -447,7 +466,12 @@ fn paint_circular(
             let (s, e) = sel.ordered();
             let sel_color = theme.minimap.selection.0;
             paint_arc_range(
-                painter, center, radius + feat_w * 0.5, s, e, seq_len,
+                painter,
+                center,
+                radius + feat_w * 0.5,
+                s,
+                e,
+                seq_len,
                 Stroke::new(feat_w + 4.0, sel_color),
             );
         }
@@ -469,7 +493,10 @@ fn paint_circular(
     let cursor_a = angle_for_pos(cursor_pos, seq_len);
     let dir = Vec2::new(cursor_a.cos(), cursor_a.sin());
     painter.line_segment(
-        [center + dir * (radius - cursor_tick), center + dir * (radius + cursor_tick)],
+        [
+            center + dir * (radius - cursor_tick),
+            center + dir * (radius + cursor_tick),
+        ],
         Stroke::new(2.0, theme.minimap.cursor.0),
     );
 }
@@ -530,6 +557,7 @@ fn paint_arc_range(
 
 // ── Linear painter ────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // render helper: rects, colors, fractions are all natural params
 fn paint_linear(
     painter: &egui::Painter,
     rect: Rect,
@@ -553,10 +581,7 @@ fn paint_linear(
     if let Some((vs, ve)) = visible_range {
         let vx = origin.x + (vs as f32 / seq_len as f32) * panel_width;
         let vw = ((ve - vs) as f32 / seq_len as f32) * panel_width;
-        let vp_rect = Rect::from_min_size(
-            Pos2::new(vx, origin.y),
-            Vec2::new(vw.max(2.0), panel_h),
-        );
+        let vp_rect = Rect::from_min_size(Pos2::new(vx, origin.y), Vec2::new(vw.max(2.0), panel_h));
         painter.rect_filled(vp_rect, 0.0, theme.minimap.viewport.0);
         painter.rect_stroke(
             vp_rect,
@@ -576,7 +601,8 @@ fn paint_linear(
         painter.rect_filled(r, 1.0, bar.color);
         if Some(bar.feat_idx) == selected_feature {
             painter.rect_stroke(
-                r, 1.0,
+                r,
+                1.0,
                 Stroke::new(sel_feat_w, Color32::WHITE),
                 egui::StrokeKind::Inside,
             );

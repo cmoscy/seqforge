@@ -120,7 +120,11 @@ pub fn pick_contrast(bg: Color32, light: Color32, dark: Color32) -> Color32 {
 fn relative_luminance(c: Color32) -> f32 {
     let to_linear = |x: u8| {
         let v = x as f32 / 255.0;
-        if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
     0.2126 * to_linear(c.r()) + 0.7152 * to_linear(c.g()) + 0.0722 * to_linear(c.b())
 }

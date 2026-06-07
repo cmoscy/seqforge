@@ -10,6 +10,7 @@
 
 use crate::enzyme::{Enzyme, EnzymeType, Iupac};
 
+#[rustfmt::skip]
 pub const ENZYMES: &[Enzyme] = &[
     Enzyme { name: "AanI", recognition: &[Iupac::T, Iupac::T, Iupac::A, Iupac::T, Iupac::A, Iupac::A], top_offset: 3, bottom_offset: 3, enzyme_type: EnzymeType::TypeII },
     Enzyme { name: "AarI", recognition: &[Iupac::C, Iupac::A, Iupac::C, Iupac::C, Iupac::T, Iupac::G, Iupac::C], top_offset: 11, bottom_offset: 15, enzyme_type: EnzymeType::TypeIIs },

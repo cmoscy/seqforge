@@ -25,10 +25,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use seqforge_core::{Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind};
 use serde::{Deserialize, Serialize};
-use seqforge_core::{
-    Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind,
-};
 
 /// User-facing label for a buffer: the source file's basename when the
 /// buffer is backed by a file, otherwise the sequence name from the
@@ -96,11 +94,7 @@ impl BufferStore {
 
     /// Find or load a buffer for `path`. If a buffer is already loaded
     /// for this path, returns its id without re-reading the file.
-    pub fn open_path(
-        &mut self,
-        path: &Path,
-        bio: &dyn BioOps,
-    ) -> Result<BufferId, String> {
+    pub fn open_path(&mut self, path: &Path, bio: &dyn BioOps) -> Result<BufferId, String> {
         if let Some(existing) = self.by_path.get(path).copied() {
             return Ok(existing);
         }
@@ -248,11 +242,7 @@ impl Workspace {
 
     /// Open `path` and attach a new View. Buffer storage dedupes by
     /// path. Returns the new view's id; caller adds the dock tab.
-    pub fn open_path(
-        &mut self,
-        path: &Path,
-        bio: &dyn BioOps,
-    ) -> Result<ViewId, String> {
+    pub fn open_path(&mut self, path: &Path, bio: &dyn BioOps) -> Result<ViewId, String> {
         let buffer_id = self.buffers.open_path(path, bio)?;
         Ok(self.add_view(buffer_id, ViewKind::TextView))
     }
@@ -315,10 +305,7 @@ impl Workspace {
         let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
         let view = self.views.get_mut(&view_id).expect("located above");
         let seq_view = self.seq_views.entry(view_id).or_default();
-        let ann = self
-            .buffers
-            .annotations_mut(bid)
-            .expect("located above");
+        let ann = self.buffers.annotations_mut(bid).expect("located above");
         Ok(f(seq_view, view, &buf, ann))
     }
 
@@ -341,10 +328,7 @@ impl Workspace {
             .ok_or(DispatchError::ViewNotFound(view_id))?;
         let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
         let view = self.views.get_mut(&view_id).expect("located above");
-        let ann = self
-            .buffers
-            .annotations_mut(bid)
-            .expect("located above");
+        let ann = self.buffers.annotations_mut(bid).expect("located above");
         Ok(f(view, &buf, ann))
     }
 
@@ -366,10 +350,7 @@ impl Workspace {
             .ok_or(DispatchError::ViewNotFound(view_id))?;
         let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
         let view = self.views.get_mut(&view_id).expect("located above");
-        let ann = self
-            .buffers
-            .annotations_mut(bid)
-            .expect("located above");
+        let ann = self.buffers.annotations_mut(bid).expect("located above");
         Ok(f(view, &mut buf, ann))
     }
 
@@ -418,11 +399,9 @@ mod tests {
     fn buffer_store_dedupes_by_path() {
         let mut ws = Workspace::default();
         let path = PathBuf::from("/tmp/fake.gb");
-        let id = ws.buffers.insert_raw(
-            "fake".into(),
-            b"ATGC".to_vec(),
-            Topology::Linear,
-        );
+        let id = ws
+            .buffers
+            .insert_raw("fake".into(), b"ATGC".to_vec(), Topology::Linear);
         ws.buffers.by_path.insert(path.clone(), id);
 
         struct ExplodingBio;
@@ -439,12 +418,7 @@ mod tests {
             ) -> Vec<seqforge_core::SearchHit> {
                 vec![]
             }
-            fn find_cut_sites(
-                &self,
-                _: &[u8],
-                _: &[&str],
-                _: bool,
-            ) -> Vec<seqforge_core::CutSite> {
+            fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
                 vec![]
             }
             fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
@@ -459,7 +433,9 @@ mod tests {
     #[test]
     fn add_view_makes_it_active() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
         assert_eq!(ws.active_view, Some(vid));
         assert!(ws.views.contains_key(&vid));
@@ -469,7 +445,9 @@ mod tests {
     #[test]
     fn with_active_buffer_passes_correct_handles() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         let outcome = ws
@@ -486,7 +464,9 @@ mod tests {
     #[test]
     fn with_buffer_mut_allows_mutation() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         ws.with_buffer_mut(vid, |_view, buf, _ann| {
@@ -519,7 +499,9 @@ mod tests {
     #[test]
     fn close_view_drops_buffer_when_last_reference() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         assert!(ws.buffers.get(bid).is_some());
@@ -531,7 +513,9 @@ mod tests {
     #[test]
     fn close_view_keeps_buffer_when_another_view_holds_it() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
         let v1 = ws.add_view(bid, ViewKind::TextView);
         let v2 = ws.add_view(bid, ViewKind::TextView);
 
@@ -543,7 +527,9 @@ mod tests {
     #[test]
     fn two_views_can_share_a_buffer() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("shared".into(), b"ATGC".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("shared".into(), b"ATGC".to_vec(), Topology::Linear);
         let _v1 = ws.add_view(bid, ViewKind::TextView);
         let _v2 = ws.add_view(bid, ViewKind::TextView);
         let arc = ws.buffers.get(bid).unwrap();
@@ -553,7 +539,9 @@ mod tests {
     #[test]
     fn focus_view_sets_active() {
         let mut ws = Workspace::default();
-        let bid = ws.buffers.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
         let v1 = ws.add_view(bid, ViewKind::TextView);
         let v2 = ws.add_view(bid, ViewKind::TextView);
         ws.focus_view(v1);
@@ -568,7 +556,9 @@ mod tests {
     fn find_view_for_path_resolves_existing() {
         let mut ws = Workspace::default();
         let path = PathBuf::from("/tmp/q.gb");
-        let bid = ws.buffers.insert_raw("q".into(), b"AT".to_vec(), Topology::Linear);
+        let bid = ws
+            .buffers
+            .insert_raw("q".into(), b"AT".to_vec(), Topology::Linear);
         // Wire the buffer onto a path and onto a view.
         let arc = ws.buffers.get(bid).unwrap();
         arc.write().unwrap().source_path = Some(path.clone());

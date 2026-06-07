@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
 
 // ── Socket path lifecycle (Tier 1 hardening) ─────────────────────────────────
 
@@ -40,7 +40,10 @@ impl Drop for SocketGuard {
 
 /// What the socket thread sends to the app's drain loop: the request plus a
 /// one-shot sender the app uses to return the dispatch result.
-pub type SocketRequest = (ViewerRequest, mpsc::SyncSender<Result<ViewerResponse, DispatchError>>);
+pub type SocketRequest = (
+    ViewerRequest,
+    mpsc::SyncSender<Result<ViewerResponse, DispatchError>>,
+);
 
 // ── JSON-RPC 2.0 types ────────────────────────────────────────────────────────
 
@@ -79,7 +82,12 @@ const ERR_DISPATCH: i32 = -32000;
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn ok_response(id: Value, result: Value) -> JsonRpcResponse {
-    JsonRpcResponse { jsonrpc: "2.0", id, result: Some(result), error: None }
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(result),
+        error: None,
+    }
 }
 
 fn err_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResponse {
@@ -87,7 +95,10 @@ fn err_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResp
         jsonrpc: "2.0",
         id,
         result: None,
-        error: Some(JsonRpcError { code, message: message.into() }),
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+        }),
     }
 }
 
@@ -234,12 +245,10 @@ fn handle_rpc_line(
 
     // Block until the app's drain loop dispatches the request and sends back.
     match resp_rx.recv_timeout(DISPATCH_TIMEOUT) {
-        Ok(Ok(resp)) => {
-            match serde_json::to_value(&resp) {
-                Ok(v) => ok_response(id, v),
-                Err(e) => err_response(id, ERR_DISPATCH, format!("serialisation error: {e}")),
-            }
-        }
+        Ok(Ok(resp)) => match serde_json::to_value(&resp) {
+            Ok(v) => ok_response(id, v),
+            Err(e) => err_response(id, ERR_DISPATCH, format!("serialisation error: {e}")),
+        },
         Ok(Err(e)) => err_response(id, ERR_DISPATCH, e.to_string()),
         Err(_) => err_response(id, ERR_DISPATCH, "viewer did not respond within timeout"),
     }

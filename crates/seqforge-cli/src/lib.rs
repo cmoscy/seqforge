@@ -11,8 +11,8 @@ use std::os::unix::net::UnixStream;
 // ── File commands ─────────────────────────────────────────────────────────────
 
 pub fn run_info(path: &Path) -> anyhow::Result<()> {
-    let doc = seqforge_bio::load(path)
-        .with_context(|| format!("Failed to load {}", path.display()))?;
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
     let info = serde_json::json!({
         "kind": "document_info",
         "name": doc.name,
@@ -90,7 +90,10 @@ pub fn dispatch_viewer_cmd(req: ViewerRequest) -> anyhow::Result<()> {
         .context("invalid JSON-RPC response from SeqForge")?;
 
     if let Some(err) = response.get("error") {
-        let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        let msg = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
         anyhow::bail!("SeqForge rejected command: {msg}");
     }
 

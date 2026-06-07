@@ -78,7 +78,7 @@ fn linear_drops_off_end_sites_circular_keeps_them() {
     let ecori = enzyme_by_name("EcoRI").unwrap();
     //                  0         1
     //                  0123456789012345
-    let seq =         b"AATTCNNNNNNNNNNG"; // GAATTC spans pos 15 → wrap
+    let seq = b"AATTCNNNNNNNNNNG"; // GAATTC spans pos 15 → wrap
     assert_eq!(find_sites(seq, ecori, false).len(), 0);
     assert_eq!(find_sites(seq, ecori, true).len(), 1);
 }
@@ -102,8 +102,10 @@ fn count_per_enzyme_matches_find_sites() {
     // `find_sites` path for the same enzyme set.
     use seqforge_restriction::count_sites_per_enzyme;
     let seq = b"AAAGAATTCAAAGGATCCAAATTTAAGCTTAAA";
-    let enzymes: Vec<_> =
-        ["EcoRI", "BamHI", "HindIII"].iter().map(|n| enzyme_by_name(n).unwrap()).collect();
+    let enzymes: Vec<_> = ["EcoRI", "BamHI", "HindIII"]
+        .iter()
+        .map(|n| enzyme_by_name(n).unwrap())
+        .collect();
     let counted = count_sites_per_enzyme(seq, &enzymes, false);
     for (e, c) in &counted {
         let n = find_sites(seq, e, false).len();

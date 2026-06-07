@@ -45,7 +45,11 @@ pub struct FindBar {
 
 impl Default for FindBar {
     fn default() -> Self {
-        Self { pattern: String::new(), mismatches: 0, needs_focus: true }
+        Self {
+            pattern: String::new(),
+            mismatches: 0,
+            needs_focus: true,
+        }
     }
 }
 
@@ -56,7 +60,10 @@ pub struct GoToBar {
 
 impl Default for GoToBar {
     fn default() -> Self {
-        Self { input: String::new(), needs_focus: true }
+        Self {
+            input: String::new(),
+            needs_focus: true,
+        }
     }
 }
 
@@ -70,7 +77,11 @@ pub struct EnzymeBar {
 
 impl Default for EnzymeBar {
     fn default() -> Self {
-        Self { input: String::new(), needs_focus: true, expanded: HashSet::new() }
+        Self {
+            input: String::new(),
+            needs_focus: true,
+            expanded: HashSet::new(),
+        }
     }
 }
 
@@ -103,8 +114,10 @@ pub fn enzyme_rows(active_enzymes: &[String], cut_sites: &[CutSite]) -> Vec<Enzy
         .iter()
         .map(|name| {
             let group = by.get(name.as_str());
-            let recognition =
-                group.and_then(|v| v.first()).map(|s| s.recognition.clone()).unwrap_or_default();
+            let recognition = group
+                .and_then(|v| v.first())
+                .map(|s| s.recognition.clone())
+                .unwrap_or_default();
             let mut sites: Vec<EnzymeSite> = group
                 .map(|v| {
                     v.iter()
@@ -116,16 +129,27 @@ pub fn enzyme_rows(active_enzymes: &[String], cut_sites: &[CutSite]) -> Vec<Enzy
                 })
                 .unwrap_or_default();
             sites.sort_by_key(|s| s.recognition_start);
-            EnzymeRow { name: name.clone(), recognition, sites }
+            EnzymeRow {
+                name: name.clone(),
+                recognition,
+                sites,
+            }
         })
         .collect();
-    rows.sort_by(|a, b| (a.sites.is_empty()).cmp(&(b.sites.is_empty())).then(a.name.cmp(&b.name)));
+    rows.sort_by(|a, b| {
+        (a.sites.is_empty())
+            .cmp(&(b.sites.is_empty()))
+            .then(a.name.cmp(&b.name))
+    });
     rows
 }
 
 /// Command to select a site's recognition range and scroll it into view.
 fn reveal(s: &EnzymeSite) -> AppCommand {
-    AppCommand::RevealRange { start: s.recognition_start, end: s.recognition_end }
+    AppCommand::RevealRange {
+        start: s.recognition_start,
+        end: s.recognition_end,
+    }
 }
 
 /// Flip an enzyme's expansion state.
@@ -245,7 +269,9 @@ impl OverlayStack {
     /// Cheap, non-mutating check used by the renderer to skip building the
     /// enzyme results list when the bar isn't open.
     pub fn has_enzyme_bar(&self) -> bool {
-        self.overlays.iter().any(|o| matches!(o, Overlay::EnzymeBar(_)))
+        self.overlays
+            .iter()
+            .any(|o| matches!(o, Overlay::EnzymeBar(_)))
     }
 
     pub fn enzyme_bar_mut(&mut self) -> Option<&mut EnzymeBar> {

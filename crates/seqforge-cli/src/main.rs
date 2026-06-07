@@ -95,9 +95,15 @@ fn main() -> anyhow::Result<()> {
         Cmd::GoTo { position, view } => {
             seqforge_cli::dispatch_viewer_cmd(ViewerRequest::GoTo { position, view })
         }
-        Cmd::Find { pattern, mismatches, view } => seqforge_cli::dispatch_viewer_cmd(
-            ViewerRequest::Find { pattern, mismatches, view },
-        ),
+        Cmd::Find {
+            pattern,
+            mismatches,
+            view,
+        } => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Find {
+            pattern,
+            mismatches,
+            view,
+        }),
         Cmd::Enzymes { args, op, view } => {
             let query = args.join(" ");
             seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { query, op, view })

@@ -29,7 +29,10 @@ pub fn install_cli_to_path() -> Result<InstallResult, String> {
     std::os::unix::fs::symlink(&src, &target)
         .map_err(|e| format!("could not create symlink at {}: {e}", target.display()))?;
 
-    Ok(InstallResult { target, was_updated })
+    Ok(InstallResult {
+        target,
+        was_updated,
+    })
 }
 
 /// Check whether a symlink already exists at the default install location.
@@ -43,8 +46,7 @@ pub fn is_installed() -> bool {
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 fn find_bundled_binary() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot locate app binary: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate app binary: {e}"))?;
     let dir = exe.parent().ok_or("app binary has no parent directory")?;
     let candidate = dir.join("seqforge");
     if candidate.exists() {

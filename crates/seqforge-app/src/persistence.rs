@@ -31,9 +31,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use egui_dock::{DockState, NodeIndex, Node, Split, SurfaceIndex};
-use serde::{Deserialize, Serialize};
+use egui_dock::{DockState, Node, NodeIndex, Split, SurfaceIndex};
 use seqforge_core::Selection;
+use serde::{Deserialize, Serialize};
 
 use crate::tabs::Tab;
 use crate::workspace::Workspace;
@@ -138,10 +138,7 @@ impl LayoutSnapshot {
 /// buffer's `source_path` via the workspace; tabs whose buffer has no
 /// path (scratch buffers, post-MVP) are omitted from the saved layout
 /// — they wouldn't be reopenable anyway.
-pub fn capture_layout(
-    dock: &DockState<Tab>,
-    workspace: &Workspace,
-) -> Option<LayoutSnapshot> {
+pub fn capture_layout(dock: &DockState<Tab>, workspace: &Workspace) -> Option<LayoutSnapshot> {
     let main = dock.main_surface();
     // The main surface is a Tree<Tab> with nodes stored in a heap-
     // indexed Vec. NodeIndex(0) is the root.
@@ -182,11 +179,7 @@ fn capture_node(
     }
 }
 
-fn capture_leaf(
-    tabs: &[Tab],
-    active: egui_dock::TabIndex,
-    workspace: &Workspace,
-) -> LeafSnapshot {
+fn capture_leaf(tabs: &[Tab], active: egui_dock::TabIndex, workspace: &Workspace) -> LeafSnapshot {
     // A leaf can hold any mix of tabs but in practice only one kind
     // — Browser / Terminal / Welcome / View(_) — appears per leaf.
     // For mixed leaves (unlikely), the *first* tab decides the
@@ -216,7 +209,10 @@ fn capture_leaf(
             }
         }
     }
-    LeafSnapshot::Viewer { paths, active: active_idx }
+    LeafSnapshot::Viewer {
+        paths,
+        active: active_idx,
+    }
 }
 
 // ── Save: per-view state → FileState map ─────────────────────────────────────
@@ -227,9 +223,13 @@ fn capture_leaf(
 pub fn capture_file_state(workspace: &Workspace) -> HashMap<PathBuf, FileState> {
     let mut out = HashMap::new();
     for view in workspace.views.values() {
-        let Some(arc) = workspace.buffers.get(view.buffer_id) else { continue };
+        let Some(arc) = workspace.buffers.get(view.buffer_id) else {
+            continue;
+        };
         let Ok(buf) = arc.read() else { continue };
-        let Some(path) = buf.source_path.clone() else { continue };
+        let Some(path) = buf.source_path.clone() else {
+            continue;
+        };
         out.entry(path).or_insert(FileState {
             selection: view.selection,
             scroll_pos: view.scroll_pos,
@@ -254,7 +254,13 @@ pub fn rebuild_dock(snapshot: &LayoutSnapshot) -> (DockState<Tab>, PendingOpens)
     // Seed with a placeholder so we have a single root leaf to split
     // against. The recursive walk overwrites it.
     let mut dock = DockState::new(vec![Tab::Welcome]);
-    install_node(&mut dock, snapshot, SurfaceIndex::main(), NodeIndex::root(), &mut pending);
+    install_node(
+        &mut dock,
+        snapshot,
+        SurfaceIndex::main(),
+        NodeIndex::root(),
+        &mut pending,
+    );
     (dock, pending)
 }
 
@@ -329,7 +335,12 @@ fn install_leaf(
             }
         }
     };
-    if let egui_dock::Node::Leaf { tabs: existing, active, .. } = &mut dock[surface][node] {
+    if let egui_dock::Node::Leaf {
+        tabs: existing,
+        active,
+        ..
+    } = &mut dock[surface][node]
+    {
         *existing = tabs;
         *active = egui_dock::TabIndex(0);
     }

@@ -11,8 +11,15 @@ use seqforge_restriction::{
 #[test]
 fn library_loaded_and_nonempty() {
     let lib = all_enzymes();
-    assert!(lib.len() > 100, "expected hundreds of enzymes, got {}", lib.len());
-    let n_iis = lib.iter().filter(|e| e.enzyme_type == EnzymeType::TypeIIs).count();
+    assert!(
+        lib.len() > 100,
+        "expected hundreds of enzymes, got {}",
+        lib.len()
+    );
+    let n_iis = lib
+        .iter()
+        .filter(|e| e.enzyme_type == EnzymeType::TypeIIs)
+        .count();
     assert!(n_iis >= 50, "expected many Type IIs enzymes, got {n_iis}");
 }
 
@@ -58,7 +65,7 @@ fn bsai_type_iis_geometry() {
     let e = enzyme_by_name("BsaI").expect("BsaI in library");
     assert_eq!(e.enzyme_type, EnzymeType::TypeIIs);
     assert_eq!(e.recognition.len(), 6);
-    assert_eq!(e.top_offset, 7);    // 6 + 1
+    assert_eq!(e.top_offset, 7); // 6 + 1
     assert_eq!(e.bottom_offset, 11); // 6 + 5
     assert_eq!(e.overhang_kind(), OverhangKind::FivePrime(4));
 }
@@ -78,7 +85,7 @@ fn sapi_type_iis_geometry() {
     let e = enzyme_by_name("SapI").expect("SapI in library");
     assert_eq!(e.enzyme_type, EnzymeType::TypeIIs);
     assert_eq!(e.recognition.len(), 7);
-    assert_eq!(e.top_offset, 8);    // 7 + 1
+    assert_eq!(e.top_offset, 8); // 7 + 1
     assert_eq!(e.bottom_offset, 11); // 7 + 4
     assert_eq!(e.overhang_kind(), OverhangKind::FivePrime(3));
 }
@@ -124,7 +131,7 @@ fn bsai_reverse_strand() {
     // cut upstream by 1.
     //                       0         1
     //                       0123456789012345
-    let seq =              b"NNNNNNNNNGAGACCN";
+    let seq = b"NNNNNNNNNGAGACCN";
     let sites = find_sites(seq, enzyme_by_name("BsaI").unwrap(), false);
     assert_eq!(sites.len(), 1, "expected one reverse-strand hit: {sites:?}");
     let s = &sites[0];
@@ -134,7 +141,10 @@ fn bsai_reverse_strand() {
     //                                = 9 + (6 - 11) = 9 - 5 = 4
     // bottom_cut = rec_start + (rec_len - top_offset) = 9 + (6 - 7) = 8
     assert_eq!(s.top_cut, 4, "top cut should be 5 bases upstream of GAGACC");
-    assert_eq!(s.bottom_cut, 8, "bottom cut should be 1 base upstream of GAGACC");
+    assert_eq!(
+        s.bottom_cut, 8,
+        "bottom cut should be 1 base upstream of GAGACC"
+    );
 }
 
 #[test]
@@ -153,7 +163,7 @@ fn iupac_ambiguity_in_recognition_matches() {
         // in the gap.
         //              0         1
         //              0123456789012345678
-        let seq =     b"AAAGACAAAAAAGTCAAAA";
+        let seq = b"AAAGACAAAAAAGTCAAAA";
         let sites = find_sites(seq, drdi, false);
         assert!(
             !sites.is_empty(),
@@ -170,7 +180,7 @@ fn circular_wrap_around() {
     // EcoRI site spanning the origin: last 5 bases + first base = GAATTC.
     //                       0         1
     //                       0123456789012345
-    let seq =              b"AATTCNNNNNNNNNNG"; // len 16, 'G' at pos 15
+    let seq = b"AATTCNNNNNNNNNNG"; // len 16, 'G' at pos 15
     let ecori = enzyme_by_name("EcoRI").unwrap();
     let linear = find_sites(seq, ecori, false);
     let circular = find_sites(seq, ecori, true);
