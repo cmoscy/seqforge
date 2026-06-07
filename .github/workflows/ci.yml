@@ -38,14 +38,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: cargo check
-        run: cargo check --all-targets
-
-      - name: cargo test
-        run: cargo test --all
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
-
+      # Ordered cheapest-first for fast feedback: formatting needs no
+      # compile; clippy --all-targets compiles every target (so a separate
+      # `cargo check` would be redundant) and gates on warnings; tests last.
       - name: cargo fmt
         run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
