@@ -2,7 +2,7 @@
 //!
 //! Unpublished workspace crate. The public API is intentionally concrete:
 //! no traits, no extension points, no `Box<dyn …>`. Stabilises through
-//! real SeqForge use before any crates.io extraction (see RESTRICTION_PLAN.md).
+//! real SeqForge use before any crates.io extraction (see plans/restriction.md).
 //!
 //! ## Quick tour
 //!

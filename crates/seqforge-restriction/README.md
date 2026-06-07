@@ -3,7 +3,7 @@
 REBASE-derived restriction enzyme database + scanner for SeqForge. Concrete
 API, no traits, no `Box<dyn …>`, **no non-std dependencies**. Unpublished
 workspace crate; stabilises through real SeqForge use before any crates.io
-extraction (see `../../RESTRICTION_PLAN.md`).
+extraction (see `../../plans/restriction.md`).
 
 ## What ships vs. what doesn't
 

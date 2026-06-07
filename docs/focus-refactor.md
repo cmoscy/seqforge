@@ -2,7 +2,7 @@
 
 Status: **active** — all six stages landed. This document is the binding architecture reference; the staged checklist below records how we got here and what each commit changed.
 
-This document is the durable reference for SeqForge's keyboard-focus, command-dispatch, and event architecture. It supersedes the "Keyboard focus model" sketch in `PLAN.md` (which now links here).
+This document is the durable reference for SeqForge's keyboard-focus, command-dispatch, and event architecture. It is the **canonical** copy: a near-verbatim duplicate that had been pasted into the old `PLAN.md` was removed during the doc reorg, and the roadmap/track plans now link here instead.
 
 If you're adding a feature — a new hotkey, a new pane, a new modal, a new agent action — start at [How to add X](#how-to-add-x). The earlier sections explain *why* the architecture looks the way it does so you can judge edge cases instead of guessing.
 
@@ -121,18 +121,24 @@ pub enum AppCommand {
     Viewer(ViewerRequest),
 }
 
-/// The single place where state mutates. Emits zero or more AppEvents.
-pub fn apply(
+/// The single place where state mutates. Emits zero or more AppEvents
+/// through the `EventSink` that lives on `AppState` (not a separate arg).
+pub fn apply<B: BioOps>(
     cmd: AppCommand,
     state: &mut AppState,
-    bio: &dyn BioOps,
-    events: &EventSink,
-) -> Result<Option<ViewerResponse>, AppError>;
+    bio: &B,
+) -> Result<Option<ViewerResponse>, DispatchError>;
 
 /// Is this command currently allowed? Used to grey menu items, gate keymap,
 /// and reject agent requests with a clear error.
 pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool;
 ```
+
+> **Matches the shipped code** (`command/mod.rs`): `apply` is generic over
+> `B: BioOps` (not `&dyn`), takes no `events` argument (events are emitted via
+> `state`'s `EventSink`), and returns `DispatchError` (not `AppError`). Earlier
+> drafts of this block showed the `&dyn BioOps` + `events` + `AppError` shape,
+> which never shipped.
 
 `is_enabled` replaces every ad-hoc `if open_doc.is_some()` check at hotkey + menu + bar call sites.
 

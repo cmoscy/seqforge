@@ -2,7 +2,7 @@
 //! refactor. These types are not yet wired into `AppState` or `dispatch`;
 //! the migration happens in subsequent sub-commits.
 //!
-//! Hierarchy (see `PLAN.md` Tier 2.5 for the full design):
+//! Hierarchy (see `plans/refactor.md` Tier 2.5 for the full design):
 //!
 //! - [`Buffer`] — the editable sequence + identity. Shareable across views
 //!   via `Arc<RwLock<Buffer>>` (in `seqforge-app`). One per loaded file.

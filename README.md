@@ -2,7 +2,7 @@
 
 A Rust-based sequence viewer for molecular cloning workflows, with an embedded terminal and a unified command layer — every operation is invokable from both the GUI menu and the terminal.
 
-> **Status:** MVP in progress — read-only viewer, file browser, embedded terminal, restriction-site detection (Phase 7), and search are the current targets. See [PLAN.md](PLAN.md) for the full roadmap.
+> **Status:** v0.1 read-only viewer shipped (file browser, embedded terminal, restriction-site detection, search); editor (v0.2) is next. See [ROADMAP.md](ROADMAP.md) for status across all tracks.
 
 ---
 
@@ -123,7 +123,7 @@ The workspace has five crates:
 |-------|------|
 | `seqforge-core` | `Document`, `ViewerState`, `ViewerCommand`, `dispatch_*` — no GUI deps |
 | `seqforge-bio` | GenBank/FASTA loading, DNA utilities, sequence/cut-site search; wraps `gb-io`, `bio`, and `seqforge-restriction` |
-| `seqforge-restriction` | REBASE-derived restriction enzyme database + scanner + presets (Type IIs, Golden Gate, MoClo). Unpublished; see [RESTRICTION_PLAN.md](RESTRICTION_PLAN.md) |
+| `seqforge-restriction` | REBASE-derived restriction enzyme database + scanner + presets (Type IIs, Golden Gate, MoClo). Unpublished; see [plans/restriction.md](plans/restriction.md) |
 | `seqforge-app` | `eframe` + `egui_dock` + `egui_term` GUI shell |
 | `seqforge-cli` | Standalone `seqforge` binary |
 

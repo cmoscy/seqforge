@@ -1,5 +1,9 @@
 # `seqforge-restriction`: REBASE-Backed Enzyme + Cloning Crate
 
+> Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md). The crate
+> boundary contract is in [`../docs/architecture.md`](../docs/architecture.md)
+> ("Restriction backend boundary").
+
 > **Status — Tier 1 COMPLETE.** The crate is a workspace member with the REBASE
 > table (`enzymes_generated.rs`), scanner (`find_sites`/`find_all_sites`),
 > presets (`Unique`, `UniqueOrDual`, `NonCutters`, `TypeIIs`, `GoldenGate`,

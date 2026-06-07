@@ -1,8 +1,15 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
+> **Status: NOT STARTED** (Phase 10 is next). Canonical cross-track status lives
+> in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a single
+> **`Splice` forward primitive** (§1) reached through the **one execution path**
+> (GUI keystroke / terminal / agent all lower to it, §4), with **snapshot-based
+> undo** on `Vec<u8>` (§3) — this supersedes the rope/anchor/transaction path in
+> [`refactor.md`](refactor.md) Tier 3.
+
 ## Context
 
-PLAN.md locked v0.1 as a read-only viewer. Phases 0–8 of that plan are complete; Phase 9 (v0.1.0 tag + verification) remains but does not block editor work. v0.2 is where SeqForge becomes an editor: bases can be inserted, deleted, replaced, and the document saved back to disk.
+The viewer track ([`viewer.md`](viewer.md)) locked v0.1 as a read-only viewer. Phases 0–8 of that plan are complete; Phase 9 (v0.1.0 tag + verification) remains but does not block editor work. v0.2 is where SeqForge becomes an editor: bases can be inserted, deleted, replaced, and the document saved back to disk.
 
 The original EDITOR_PLAN.md was written before Stages 2.5a–e landed. Those stages refactored the entire state model — splitting `Document` into `Buffer + Annotations`, introducing `BufferStore`, `Workspace`, `Cache<K,V>`, `PersistedSession`, the `with_buffer_mut` locking helper, and splitting the command module into subfiles. Every section below has been updated to reflect what actually exists in the codebase rather than what was assumed when the plan was first drafted.
 
@@ -44,23 +51,48 @@ AppState {
 
 Consequences for the editor — all positive:
 
-1. **`with_buffer_mut` already exists.** `Workspace::with_active_buffer_mut(|view, &mut buf, &mut ann| {...})` acquires the write lock, gives the closure all three mutable handles, and releases it at the end. Mutation functions never touch `RwLock` directly.
+| Original plan assumed | What's actually there | What it buys |
+|---|---|---|
+| Mutations call `doc.sequence.splice(...)` directly | `workspace.with_active_buffer_mut(\|view, buf, ann\| {...})` acquires/releases the write lock | No manual lock management in mutation code |
+| History lives on `ViewerState` | History in `BufferStore` alongside `annotations` | Shared correctly across views; GC'd with the buffer |
+| Cache invalidation is ad-hoc per field | `buf.version += 1` → all `Cache<K,V>` caches recompute next frame | Zero extra invalidation code |
+| `dispatch` signature changes needed | `with_buffer_mut` already passes `(&mut View, &mut Buffer, &mut Annotations)` | Signature already correct |
+| Editor commands need a new enum | Add to existing `ViewerRequest`; route to new `command/edit.rs` | No new type; socket/CLI surface unchanged |
+| Save takes `&Document` | `save(buf, ann, path)` | Cleaner bio/core boundary |
 
-2. **`Buffer::version` + `Cache<K,V>` make cache invalidation free.** Every per-view render cache (feature stacking, cut-label stacking) already keys on `(buffer_id, buffer.version, ...)` via the `Cache` helper. Bumping `buf.version += 1` inside any mutation is all that's needed — caches recompute on the next paint automatically.
-
-3. **History belongs on `Buffer`, not on any view.** Multiple views of the same buffer must share one undo stack — closing the second view must not erase the undo history the first view still uses. The original plan's "history on ViewerState" would break this. History lives as a parallel slot in `BufferStore` alongside `annotations`.
-
-4. **Editor commands go in `command/edit.rs`.** The command module is already split into `{mod, file, nav, layout}.rs`, each under 250 lines. Adding `edit.rs` for mutation commands is the natural next file.
-
-5. **Save reads from `Buffer + Annotations`, not `Document`.** `Document` continues to exist as a load intermediary (returned by `BioOps::load`, converted into a `Buffer + Annotations` pair by `BufferStore::open_path`). The save path is the reverse: assemble a `Document`-shaped value from `Buffer + Annotations` just long enough to pass to the writer, or add writer functions that accept them directly. Either approach avoids re-coupling the model.
+`Document` survives only as a load/save intermediary (via `BioOps::load` and the writer) — the `Buffer`/`Annotations` model is not re-coupled to it.
 
 ---
 
 ## Resolved design decisions
 
-### 1. Mutation primitives — `Vec<u8>` + `splice`/`drain`
+### 1. Mutation primitives — one `Splice` over `Vec<u8>`
 
-`Buffer.text` stays `Vec<u8>` (rope is Tier 3b, after the editor is stable). Insertions via `text.splice(p..p, bases.iter().copied())`; deletions via `text.drain(start..end)`. Fast enough for plasmid sizes. Rope revisited only if a profiler points here.
+**Every sequence edit is a splice:** replace the content in `[start, end)` with new
+bytes. The four user-facing ops are reductions of that one primitive:
+
+```
+Insert(p, bases)     = splice(p..p,       bases)      // empty range
+Delete(start, end)   = splice(start..end, [])         // empty replacement
+Replace(s, e, bases) = splice(s..e,       bases)
+RevComp(start, end)  = splice(start..end, rc(slice))  // a replace
+```
+
+So `seqforge-core::mutations` exposes a **single** `apply_splice(buf, ann, range, new_bytes)`;
+`apply_insert/delete/replace/revcomp` are thin wrappers (or just call sites). The
+feature-shift policy (§2) is the *one* place that logic lives — inside `apply_splice` —
+and it bumps `buf.version += 1` and sets `buf.dirty = true`. This keeps the forward
+operation elegant and serializable (it doubles as the op-log / agent-replay entry, §4)
+without duplicating shift logic across three functions.
+
+**Backing store stays `Vec<u8>`** (`apply_splice` is `text.splice(range, new_bytes)`).
+The primitive is store-agnostic, so this is an internal detail, not a commitment. We keep
+`Vec<u8>` for the **read path**: galleys rebuild every frame and enzyme/search/complement
+scans run constantly, all wanting contiguous zero-cost slices — rope would tax the hottest
+code for a benefit only seen at genome scale. Rope is therefore **deferred, on-evidence**
+(see [`refactor.md`](refactor.md) Tier 3, superseded); if ever needed the swap touches only
+`Buffer::text`, `apply_splice`, and the scan/render readers, and makes snapshots *cheaper*,
+not obsolete.
 
 ### 2. Feature shift policy — Benchling convention
 
@@ -79,11 +111,57 @@ When `apply_delete(buf, ann, start, end)` (region length `n = end - start`):
 
 `apply_replace(buf, ann, start, end, bases)` is a single operation (not two) so feature shift fires once. Length delta `δ = bases.len() - (end - start)`. Same Delete case-analysis on the removed region, then fully-right features shift by `δ`.
 
-All three functions are in `seqforge-core::mutations`. Each bumps `buf.version += 1` and sets `buf.dirty = true`. Ten tests (one per shift-policy bullet) against synthetic 100-bp sequences.
+This case-analysis is the body of the single `apply_splice` (§1) — insert is the
+zero-length-range case, delete the empty-replacement case, replace/revcomp the general
+case. It bumps `buf.version += 1` and sets `buf.dirty = true`. Ten tests (one per
+shift-policy bullet) against synthetic 100-bp sequences.
 
 ### 3. Undo/redo — per-buffer snapshot stack
 
 Snapshots of `(Buffer, Annotations)` pairs, not a reverse-op log. Snapshot-based undo sidesteps the complexity of recording feature-shift deltas alongside byte deltas.
+
+> **Decision: undo model — snapshot, not inverse-op transactions.**
+> *(Supersedes [`refactor.md`](refactor.md) Tier 3's rope+anchors+transactions path.)*
+>
+> Most edits *look* trivially invertible — an `Insert`'s inverse is a `Delete` of the
+> range, with features shifted back. But that only holds for **non-destructive** ops.
+> A `Delete`/`Replace` can *remove* a feature (fully inside the cut) or *clamp* one
+> (straddling the boundary); the geometric inverse restores the bytes but **cannot
+> reconstruct a destroyed feature** — that data is gone. To make destructive ops
+> invertible you must *capture* what they destroyed, at which point an "inverse op with
+> captured data" is just a region-scoped snapshot. So inverse-op and snapshot are the
+> same idea at different granularities; there is no magic inverse that avoids capturing
+> data.
+>
+> We therefore **separate the two directions**: the *forward* op is the elegant `Splice`
+> primitive (§1); the *reverse* is a whole-buffer snapshot taken at the single
+> `apply` choke point. We do **not** make `Splice` self-inverting — that would force the
+> correct-feature-destruction-partition logic that snapshots make disappear. Snapshots
+> capture *everything* rather than enumerate what changed, so nothing can be missed,
+> regardless of which op fired or whether it came from a keystroke, the terminal, or an
+> agent. At plasmid/BAC scale the whole-buffer clone is imperceptible (see §1 on why
+> `Vec<u8>` + clone is fine here; rope, if ever adopted, makes the clone O(log n)).
+
+**Mutation + undo flow (one choke point for every source):**
+
+```mermaid
+flowchart TD
+    k[GUI keystroke] --> req
+    t["terminal: seqforge insert …"] --> req
+    a[agent over socket] --> req
+    req["ViewerRequest (Insert/Delete/Replace/RC)"] --> apply["command::apply"]
+    apply --> edit["workspace.edit(view, kind, |buf, ann| …)"]
+    subgraph choke["single choke point — runs in order"]
+        s1["1 · history.record(buf, ann, kind)<br/>snapshot (coalesce check)"]
+        s2["2 · apply_splice(buf, ann, range, new)<br/>feature-shift policy · version += 1 · dirty"]
+        s3["3 · emit AppEvent → op-log / panels"]
+        s1 --> s2 --> s3
+    end
+    edit --> choke
+    undo["Undo / Redo<br/>(ViewerRequest, pure history op)"] --> apply
+    undo -.->|pop/push snapshot, no new snapshot| hist[("per-buffer History<br/>past / future")]
+    s1 --> hist
+```
 
 ```rust
 // in seqforge-core::history
@@ -114,9 +192,9 @@ Coalescing: consecutive `Insert` edits within 500 ms collapse into the same snap
 workspace.with_active_buffer_mut(|view, buf, ann| {
     // push snapshot before the mutation
     history.record(buf, ann, edit_kind);
-    apply_insert(buf, ann, pos, bases);
+    apply_splice(buf, ann, range, new_bytes);
     // update cursor
-    view.selection = Some(Selection::cursor(pos + bases.len()));
+    view.selection = Some(Selection::cursor(range.start + new_bytes.len()));
 })
 ```
 
@@ -156,6 +234,21 @@ ViewerRequest::Save => edit::apply_save(state),
 ```
 
 `command/edit.rs` calls `workspace.with_active_buffer_mut` (or the history-recording wrapper) and emits `SideEffect`-style results via `AppCommand` for things like save-to-disk (see §5 below) and clipboard (see §6).
+
+### 4a. CLI/agent parity + undo scoping
+
+Editor ops being `ViewerRequest` variants is what gives the project its defining property: **every edit is reachable from the GUI, the embedded terminal, and an external agent through one execution path, and the editor never mutates state directly.**
+
+- **The editor is a renderer + resolver, never a mutator.** A keystroke in `viewer.rs` does not edit the buffer; it resolves the active view's cursor/selection into a position-explicit `ViewerRequest` (e.g. `Insert{pos, bases}`) and pushes it through `apply`. The same request shape is what `seqforge insert --pos 100 ATG` produces in the terminal and what an agent sends over the socket. All three converge on `apply` → `command/edit.rs` → `apply_splice`.
+- **Ops are position-explicit and view-targetable.** The canonical op carries `pos`/`start`/`end`/`bases` (not an implicit cursor); the GUI fills those in. Editor variants take the same optional `view: Option<ViewId>` field added in Stage 2.5d for `goto`/`find`/`enzymes`, so an agent can target a specific buffer/view; GUI defaults to active.
+
+**Undo scoping that follows from the single path:**
+
+- **Per-buffer, source-agnostic.** History lives on the buffer (`BufferStore.histories`), shared across all views *and* all command sources. A terminal `seqforge insert` and a GUI keystroke into the same buffer push onto the same stack; `seqforge undo`, agent undo, and ⌘Z all reverse the last edit regardless of who made it.
+- **Coalescing is intent-based, not purely wall-clock.** Interactive typing coalesces (consecutive `Insert`s within ~500 ms = one undo unit); a `ViewerRequest` edit arriving from the terminal/socket defaults to **its own** undo unit (don't collapse scripted edits just because they're fast).
+- **`Undo`/`Redo` are pure history ops.** They are `ViewerRequest`s (so they're CLI/agent-reachable) but they move within the existing stack — they never take a new snapshot.
+- **Future, not now — a batch/transaction primitive.** The one place the command stream helps undo is *grouping*: a script/agent/macro could wrap N ops so one snapshot is taken at the batch start and undo reverses the whole batch. Left as a clean future addition; the single channel makes it natural.
+- **Op-log for free.** The forward `Splice` stream (via the existing `AppEvent` bus) is the audit / agent-transparency / session-replay artifact — separate from, and not competing with, snapshot undo.
 
 ### 5. Save — `seqforge-bio::save` + `SideEffect` via `AppCommand`
 
@@ -204,14 +297,14 @@ Non-IUPAC characters silently ignored. Paste with whitespace: strip it, accept v
 
 ### 8. Dirty state + save UX
 
-- `Buffer.dirty: bool` — set true by `apply_insert/delete/replace`; cleared by the save handler in `command/file.rs`. Already initialized false on load.
+- Add `Buffer.dirty: bool` (init false on load) — set true by `apply_splice`; cleared by the save handler in `command/file.rs`.
 - Title bar shows `*name` when the active buffer is dirty (`ctx.send_viewport_cmd(ViewportCommand::Title(...))` checked once per frame when dirty changes).
 - `File → Close` on a dirty buffer → modal: `Save / Discard / Cancel`. Implemented as `Overlay::DirtyCloseConfirm { view_id }` following the existing `OverlayStack` pattern.
 - App quit on any dirty buffer → same modal, intercept via `eframe::App::on_close_event`.
 - `File → Save As…` uses `egui-file-dialog::save_file()`, suggested filename = `buf.name + ".gb"`.
 - `Cmd/Ctrl+S` accelerator registered at the app menu level (fires regardless of focus) — not just viewer-focus-scoped.
 
-### 9. Feature provenance + forward-positioning types
+### 9. Feature provenance
 
 **Feature.provenance.** Add `Feature.provenance: Option<Provenance>`:
 
@@ -223,26 +316,16 @@ pub struct Provenance {
 }
 ```
 
-Round-trip via `/seqforge_provenance="<json>"` qualifier (stored as `Option<String>` under that key in the qualifiers map). Unlocks lineage tracing for future cloning workflows.
+Round-trip via `/seqforge_provenance="<json>"` qualifier (stored as `Option<String>` under that key in the qualifiers map). Cheap single optional field, editor-adjacent (lineage survives a round-trip), and it forward-supports cloning later without committing to any cloning shape now.
 
-**Fragment.** Declare in `seqforge-core::document` now to prevent `Buffer`-only assumptions from baking into dispatch/IPC before cloning workflows land:
-
-```rust
-pub enum Overhang { Blunt, FivePrime(Vec<u8>), ThreePrime(Vec<u8>) }
-pub struct Fragment {
-    pub sequence: Vec<u8>,
-    pub five_prime_overhang: Overhang,
-    pub three_prime_overhang: Overhang,
-    pub features: Vec<Feature>,
-}
-impl Fragment {
-    pub fn from_buffer(buf: &Buffer, ann: &Annotations) -> Self { /* blunt both ends */ }
-}
-```
-
-Nothing in v0.2 produces or consumes `Fragment`. The declaration alone prevents downstream assumptions.
-
-**WorkflowCommand placeholder.** Add `pub enum WorkflowCommand {}` to `seqforge-core::commands`. Cloning operations (`Digest`, `GoldenGate`, `Ligate`) are not viewer mutations and not file-only — they get their own command axis to avoid cramming into either existing enum.
+> **Cloning types (`Fragment`, `Overhang`, `WorkflowCommand`) are NOT declared in
+> Phase 10.** Earlier drafts forward-declared them here "to prevent Buffer-only
+> assumptions." With cloning deferred until the editor works, the *recorded design
+> direction* protects against conflicting wiring better than unused stub types — see
+> [`../ROADMAP.md`](../ROADMAP.md) "Decisions of record / future direction" for the
+> agreed shape (two-types-bridged `Fragment`; `Overhang` as `kind + length`, sequence
+> derived; assembly as a pure function over blunt parts + recipe; overhangs never
+> persisted). They get declared when the cloning track actually starts.
 
 ### 10. Multi-doc — deferred to v0.3
 
@@ -258,11 +341,10 @@ seqforge/
     ├── seqforge-core/
     │   ├── src/document.rs      # +Feature.raw_kind, +qualifiers Option<String>,
     │   │                        # +Feature.provenance, +Provenance,
-    │   │                        # +Fragment + Overhang, +FeatureKind as classify()
-    │   ├── src/mutations.rs (NEW) # apply_insert, apply_delete, apply_replace
+    │   │                        # +FeatureKind as classify()
+    │   ├── src/mutations.rs (NEW) # apply_splice (+ insert/delete/replace/revcomp wrappers)
     │   ├── src/history.rs   (NEW) # Snapshot, History, EditKind
-    │   └── src/commands.rs      # +editor ViewerRequest variants;
-    │                            # +WorkflowCommand placeholder
+    │   └── src/commands.rs      # +editor ViewerRequest variants
     ├── seqforge-bio/
     │   ├── src/lib.rs           # +save(buf, ann, path)
     │   ├── src/genbank.rs       # +write(); map_feature updated for raw_kind + Option qualifiers
@@ -285,19 +367,6 @@ seqforge/
 
 ---
 
-## How the 2.5 model makes each phase cleaner
-
-| Original plan assumption | What's actually there | Improvement |
-|---|---|---|
-| Mutations call `doc.sequence.splice(...)` directly | `workspace.with_active_buffer_mut(\|view, buf, ann\| {...})` acquires/releases write lock | No manual lock management in mutation code |
-| History lives on `ViewerState` | History lives in `BufferStore` alongside `annotations` | Shared correctly across views; GC'd with buffer |
-| Cache invalidation is ad-hoc per field | `buf.version += 1` → all `Cache<K,V>` caches recompute automatically next frame | Zero extra invalidation code |
-| `dispatch` signature changes needed | `with_buffer_mut` closure already passes `(&mut View, &mut Buffer, &mut Annotations)` | Dispatch function signature already correct |
-| Editor commands add to a new `ViewerCommand` enum | Add to existing `ViewerRequest`; route to new `command/edit.rs` | No new type; socket/CLI surface unchanged |
-| Save takes `&Document` | `save(buf, ann, path)` — no `Document` reconstruction needed | Cleaner bio/core boundary |
-
----
-
 ## Implementation phases
 
 Each phase independently testable. Don't start N+1 until N's "done" check passes.
@@ -306,21 +375,21 @@ Each phase independently testable. Don't start N+1 until N's "done" check passes
 
 ### Phase 10 — Feature model + save round-trip *(2 days)*
 
-**Goal:** `Feature` round-trips through disk without data loss; mutation primitives in place; forward-positioning types declared.
+**Goal:** `Feature` round-trips through disk without data loss; the `apply_splice` mutation primitive is in place.
 
 - [ ] `Feature.raw_kind: String` — add the field; change `qualifiers: BTreeMap<String, Option<String>>`.
 - [ ] `FeatureKind` becomes `fn classify(raw_kind: &str) -> FeatureKind`; drop the `kind` field from `Feature`. Update `viewer.rs::feature_color` call site from `f.kind` to `classify(&f.raw_kind)`.
 - [ ] `genbank.rs::map_feature`: preserve `raw_kind = f.kind.to_string()`; keep `None`-valued qualifiers (flag-style).
 - [ ] `Feature.provenance: Option<Provenance>`; GenBank round-trip via `/seqforge_provenance="<json>"`.
-- [ ] Declare `Fragment`, `Overhang`, `Fragment::from_buffer` in `seqforge-core::document`.
-- [ ] Declare `pub enum WorkflowCommand {}` in `seqforge-core::commands`.
-- [ ] `seqforge-core::mutations::{apply_insert, apply_delete, apply_replace}` taking `(&mut Buffer, &mut Annotations)`. Each applies the feature shift policy from §2, bumps `buf.version`, sets `buf.dirty = true`.
+- [ ] `seqforge-core::mutations::apply_splice(&mut Buffer, &mut Annotations, range, new_bytes)` — the single primitive applying the §2 feature-shift policy, bumping `buf.version`, setting `buf.dirty`. Add `apply_insert/delete/replace/revcomp` as thin wrappers.
 - [ ] `seqforge-bio::save(buf, ann, path)` → `genbank::write` / `fasta::write`. Add `BioError::Write(String)`.
 - [ ] `genbank::write`: build `gb_io::seq::Seq` from `Buffer + Annotations` (raw_kind, Option qualifiers, provenance).
 - [ ] `fasta::write`: hand-rolled, header from `buf.name`, 80-column wrap.
-- [ ] Tests: 10 mutation cases (one per shift-policy bullet); 3 round-trip tests against existing fixtures; 1 provenance round-trip; 1 `Fragment::from_buffer` smoke test.
+- [ ] Tests: 10 splice cases (one per shift-policy bullet, exercised through `apply_splice`); 3 round-trip tests against existing fixtures; 1 provenance round-trip.
 
 **Done when:** `cargo test -p seqforge-core mutations` + `cargo test -p seqforge-bio roundtrip` green. No UI changes.
+
+> Cloning types (`Fragment`/`Overhang`/`WorkflowCommand`) are intentionally **not** in Phase 10 — see §9 and the recorded direction in [`../ROADMAP.md`](../ROADMAP.md).
 
 ---
 
@@ -436,9 +505,9 @@ Phase 9 (v0.1.0 tag) runs in parallel and does not block this plan.
 
 ---
 
-## Conventions (additions to PLAN.md)
+## Conventions (additions to [`viewer.md`](viewer.md))
 
-- **Mutations:** call `workspace.edit(view_id, edit_kind, |view, buf, ann| {...})`. Never call `apply_insert` / `apply_delete` / `apply_replace` outside `command/edit.rs`.
+- **Mutations:** call `workspace.edit(view_id, edit_kind, |view, buf, ann| {...})`. Never call `apply_splice` (or its insert/delete/replace/revcomp wrappers) outside `command/edit.rs`.
 - **History:** always go through `workspace.edit(...)`. Direct `apply_*` calls bypass undo.
 - **Dirty flag:** set inside `apply_*`; cleared only by the save handler in `command/file.rs`.
 - **Version bump:** any function that mutates `buf.text` OR `ann.features` must call `buf.version += 1`. This is the cache invalidation contract for all `Cache<K,V>` entries keyed on version.

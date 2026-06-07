@@ -1,8 +1,86 @@
 # SeqForge architecture notes
 
 Cross-cutting design notes that don't belong inside a single source
-file. Per-feature design rationale lives in `PLAN.md`; this document
-is for **contracts that span modules and tiers**.
+file. Status + sequencing live in [`../ROADMAP.md`](../ROADMAP.md);
+per-track design lives in [`../plans/`](../plans/); this document is for
+**contracts that span modules and tiers**.
+
+## Crate dependency graph
+
+The workspace is layered so the typed command core never touches GUI or
+heavy bio deps, and the restriction/thermo crates stay extractable.
+
+```mermaid
+flowchart TD
+    app["seqforge-app<br/><i>egui/eframe GUI</i>"]
+    cli["seqforge-cli<br/><i>standalone tool</i>"]
+    core["seqforge-core<br/><i>Buffer · Annotations · View<br/>ViewerRequest · dispatch · BioOps</i><br/><b>no GUI, no bio deps</b>"]
+    bio["seqforge-bio<br/><i>gb-io/FASTA parse · search<br/>impl BioOps</i>"]
+    restr["seqforge-restriction<br/><i>REBASE table · scanner · presets</i><br/><b>zero workspace deps</b>"]
+    thermo["seqforge-thermo (planned)<br/><i>Tm · GC · hairpin · dimer</i><br/><b>pure, zero-dep</b>"]
+
+    app --> core
+    cli --> core
+    app -.->|"impl BioOps (AppBio)"| bio
+    cli -.-> bio
+    bio --> core
+    bio --> restr
+    bio -.->|planned| thermo
+
+    classDef pure fill:#def,stroke:#06a,color:#000;
+    classDef planned stroke-dasharray:4 3;
+    class core,restr,thermo pure;
+    class thermo planned;
+```
+
+**Invariants the arrows encode:**
+
+- **`seqforge-core` has no GUI and no bio dependency.** It defines the
+  data model + typed command surface; it reaches sequence logic only
+  through the `BioOps` trait, implemented in `seqforge-app`/`-cli`. This
+  is what lets dispatch back a headless CLI, tests, or a future WASM
+  worker unchanged.
+- **`seqforge-restriction` is reachable only via `seqforge-bio`** (see
+  "Restriction backend boundary" below) and carries no workspace deps —
+  the constraint that keeps a crates.io extraction a one-file change.
+- **`seqforge-thermo` (planned)** is pure and sequence-agnostic; `core`
+  never depends on it (Tm is *derived*, never stored). See
+  [`../plans/primers.md`](../plans/primers.md).
+
+## Command pipeline (CLI / GUI / agent parity)
+
+SeqForge's defining goal: every action — menu click, hotkey, embedded-
+terminal `seqforge` invocation, or external agent over the socket —
+converges on **one typed command layer**. There is exactly one place
+that mutates state.
+
+```mermaid
+flowchart LR
+    menu[Menu click]
+    key[Hotkey<br/>keymap dispatch]
+    bar[Find/GoTo bar submit]
+    sock[CLI / agent<br/>over JSON-RPC socket]
+
+    menu --> q
+    key --> q
+    bar --> q
+    sock --> q
+
+    q["pending_commands<br/><i>AppCommand queue</i>"] --> apply["command::apply()<br/><b>the only mutation site</b>"]
+    apply --> disp["core::dispatch(view, buffer, ann, bio, req)"]
+    disp --> bioops["BioOps<br/>(seqforge-bio)"]
+    apply --> state[("AppState")]
+    apply --> events["AppEvent bus"]
+    state --> render["egui render pass"]
+    render --> key
+```
+
+The same `ViewerRequest` variants serve the GUI menu, the embedded
+terminal, and external agents — so any operation reachable in the UI has
+a CLI equivalent with structured output. Per-frame ordering (drain
+inputs → dispatch keys → render → apply) is detailed in
+[`focus-refactor.md`](focus-refactor.md) §2; this diagram shows the
+*convergence + crate boundary*, that one shows the *frame lifecycle*.
 
 ## Single-applier mutation pattern
 
@@ -182,7 +260,7 @@ Contract rules:
 - `seqforge-bio` is the **only** crate that depends on
   `seqforge-restriction`. `seqforge-core`, `-app`, and `-cli` never name it
   directly — they speak `core::CutSite`. This keeps the future crates.io
-  extraction (RESTRICTION_PLAN.md Tier 4) a one-file change.
+  extraction ([`../plans/restriction.md`](../plans/restriction.md) Tier 4) a one-file change.
 - The bridge is `search::site_to_cutsite` (`restriction::Site → core::CutSite`)
   and the grammar mapper in `enzyme_query.rs` (`EnzymePreset → restriction::Preset`).
   `CutSite` is deliberately a lossy projection of `Site` — it currently drops
