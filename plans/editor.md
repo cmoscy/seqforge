@@ -103,7 +103,7 @@ code for a benefit only seen at genome scale. Rope is therefore **deferred, on-e
 `Buffer::text`, `apply_splice`, and the scan/render readers, and makes snapshots *cheaper*,
 not obsolete.
 
-### 2. Feature shift policy — Benchling convention
+### 2. Feature shift policy
 
 When `apply_insert(buf, ann, pos, bases)` is applied (length `n`), for each `Feature` in `ann.features`:
 - `feat.range.end <= pos` → untouched (left of edit).
@@ -285,7 +285,7 @@ This is a `seqforge-core::document.rs` change. `viewer.rs` calls `feature_color(
 
 Add `BioError::Write(String)` variant.
 
-### 6. Keyboard input — always editable, Benchling style
+### 6. Keyboard input — always editable
 
 No modal "enter edit mode" toggle. When `SequenceView` has focus and `view.selection` is a cursor, typed IUPAC characters push `ViewerRequest::Insert`. With a range selection, typing replaces: `ViewerRequest::Replace { start, end, bases: one_char }`.
 
@@ -399,15 +399,15 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 
 **Goal:** `Feature` round-trips through disk without data loss; the `apply_splice` mutation primitive is in place.
 
-- [ ] `Feature.raw_kind: String` — add the field; change `qualifiers: BTreeMap<String, Option<String>>`.
-- [ ] `FeatureKind` becomes `fn classify(raw_kind: &str) -> FeatureKind`; drop the `kind` field from `Feature`. Update `viewer.rs::feature_color` call site from `f.kind` to `classify(&f.raw_kind)`.
-- [ ] `genbank.rs::map_feature`: preserve `raw_kind = f.kind.to_string()`; keep `None`-valued qualifiers (flag-style).
-- [ ] `Feature.provenance: Option<Provenance>`; GenBank round-trip via `/seqforge_provenance="<json>"`.
-- [ ] `seqforge-core::mutations::apply_splice(&mut Buffer, &mut Annotations, range, new_bytes)` — the single primitive applying the §2 feature-shift policy, bumping `buf.version`, setting `buf.dirty`. Add `apply_insert/delete/replace` as thin wrappers (all content-given, no biology). **`apply_revcomp` is deferred to Phase 12** as a composed command (`bio::reverse_complement` + `apply_splice`) — see §1.
-- [ ] `seqforge-bio::save(buf, ann, path)` → `genbank::write` / `fasta::write`. Add `BioError::Write(String)`.
-- [ ] `genbank::write`: build `gb_io::seq::Seq` from `Buffer + Annotations` (raw_kind, Option qualifiers, provenance).
-- [ ] `fasta::write`: hand-rolled, header from `buf.name`, 80-column wrap.
-- [ ] Tests: 10 splice cases (one per shift-policy bullet, exercised through `apply_splice`); 3 round-trip tests against existing fixtures; 1 provenance round-trip.
+- [x] `Feature.raw_kind: String` — add the field; change `qualifiers: BTreeMap<String, Option<String>>`.
+- [x] `FeatureKind` becomes `fn classify(raw_kind: &str) -> FeatureKind`; drop the `kind` field from `Feature`. Update `viewer.rs::feature_color` call site from `f.kind` to `classify(&f.raw_kind)`.
+- [x] `genbank.rs::map_feature`: preserve `raw_kind = f.kind.to_string()`; keep `None`-valued qualifiers (flag-style).
+- [x] `Feature.provenance: Option<Provenance>`; GenBank round-trip via `/seqforge_provenance="<json>"`.
+- [x] `seqforge-core::mutations::apply_splice(&mut Buffer, &mut Annotations, range, new_bytes)` — the single primitive applying the §2 feature-shift policy, bumping `buf.version`, setting `buf.dirty`. Add `apply_insert/delete/replace` as thin wrappers (all content-given, no biology). **`apply_revcomp` is deferred to Phase 12** as a composed command (`bio::reverse_complement` + `apply_splice`) — see §1.
+- [x] `seqforge-bio::save(buf, ann, path)` → `genbank::write` / `fasta::write`. Add `BioError::Write(String)`.
+- [x] `genbank::write`: build `gb_io::seq::Seq` from `Buffer + Annotations` (raw_kind, Option qualifiers, provenance).
+- [x] `fasta::write`: hand-rolled, header from `buf.name`, 80-column wrap.
+- [x] Tests: 10 splice cases (one per shift-policy bullet, exercised through `apply_splice`); 3 round-trip tests against existing fixtures; 1 provenance round-trip.
 
 **Done when:** `cargo test -p seqforge-core mutations` + `cargo test -p seqforge-bio roundtrip` green. No UI changes.
 
@@ -449,7 +449,7 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 
 ### Phase 13 — Keyboard input in the viewer *(1 day)*
 
-**Goal:** Type into the sequence; Benchling-style always-editable.
+**Goal:** Type into the sequence; always-editable (no modal edit mode).
 
 - [ ] `SequenceView::show` calls `response.request_focus()` on click.
 - [ ] When `response.has_focus()`, consume `ui.input(|i| i.events.iter()...)` for `Event::Text` (filter IUPAC), `Event::Key { Backspace | Delete }`, and modifier shortcuts from §6.

@@ -1,5 +1,5 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, text::LayoutJob};
-use seqforge_core::{Annotations, Buffer, CutSite, Feature, Selection, Strand, View};
+use seqforge_core::{Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View};
 
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::{Config, LabelOverflow};
@@ -631,7 +631,12 @@ impl SequenceView {
                         annot_row_h,
                     ) {
                         let is_selected = view.selected_feature == Some(feat_idx);
-                        painter.rect_filled(bar, 2.0, cfg.theme.feature_color(feat.kind));
+                        painter.rect_filled(
+                            bar,
+                            2.0,
+                            cfg.theme
+                                .feature_color(FeatureKind::classify(&feat.raw_kind)),
+                        );
                         if is_selected {
                             painter.rect_stroke(
                                 bar,
@@ -641,7 +646,9 @@ impl SequenceView {
                             );
                         }
                         if !feat.label.is_empty() {
-                            let swatch = cfg.theme.feature_color(feat.kind);
+                            let swatch = cfg
+                                .theme
+                                .feature_color(FeatureKind::classify(&feat.raw_kind));
                             let fg = crate::config::theme::pick_contrast(
                                 swatch,
                                 label_text_light,

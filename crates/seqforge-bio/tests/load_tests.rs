@@ -28,7 +28,12 @@ fn loads_genbank_circular() {
     let non_source = doc
         .features
         .iter()
-        .filter(|f| !matches!(f.kind, seqforge_core::FeatureKind::Source))
+        .filter(|f| {
+            !matches!(
+                seqforge_core::FeatureKind::classify(&f.raw_kind),
+                seqforge_core::FeatureKind::Source
+            )
+        })
         .count();
     assert!(
         non_source >= 2,

@@ -13,7 +13,7 @@
 use std::f32::consts::{PI, TAU};
 
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use seqforge_core::{Annotations, BufferId, Strand, ViewerRequest};
+use seqforge_core::{Annotations, BufferId, FeatureKind, Strand, ViewerRequest};
 
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
@@ -100,7 +100,7 @@ fn build_circular_geom(
 
         arcs.push(PaintArc {
             points,
-            color: theme.feature_color(feat.kind),
+            color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
             feat_idx,
             strand: feat.strand,
         });
@@ -152,7 +152,7 @@ fn build_linear_geom(
                     settings.linear_feature_row_height,
                 ),
             ),
-            color: theme.feature_color(feat.kind),
+            color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
             feat_idx,
             strand: feat.strand,
         });

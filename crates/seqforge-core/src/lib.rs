@@ -13,10 +13,13 @@
 pub mod commands;
 pub mod document;
 pub mod model;
+pub mod mutations;
 
 pub use commands::{
     BioOps, DispatchError, EnzymeOp, FileCommand, Selection, ViewerRequest, ViewerResponse,
     dispatch, dispatch_file,
 };
-pub use document::{CutSite, Document, Feature, FeatureKind, SearchHit, Strand, Topology};
+pub use document::{
+    CutSite, Document, Feature, FeatureKind, Provenance, SearchHit, Strand, Topology,
+};
 pub use model::{Annotations, Buffer, BufferId, View, ViewId, ViewKind};

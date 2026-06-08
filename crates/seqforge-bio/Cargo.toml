@@ -9,3 +9,4 @@ seqforge-restriction = { path = "../seqforge-restriction" }
 thiserror = { workspace = true }
 gb-io = { workspace = true }
 bio = { workspace = true }
+serde_json = { workspace = true }

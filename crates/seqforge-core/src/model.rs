@@ -86,6 +86,11 @@ pub struct Buffer {
     /// Monotonically increasing version; bumped by every mutation. The
     /// invalidation key for all per-view caches.
     pub version: u64,
+    /// Unsaved-changes flag. Set by `mutations::apply_splice`; cleared by
+    /// the save handler. Transient — a freshly loaded buffer is clean, so
+    /// it is not persisted.
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl Buffer {
@@ -106,6 +111,7 @@ impl Buffer {
             text,
             topology,
             version: 0,
+            dirty: false,
         }
     }
 

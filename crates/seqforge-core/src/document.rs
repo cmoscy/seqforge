@@ -58,13 +58,47 @@ pub enum FeatureKind {
     Other,
 }
 
+impl FeatureKind {
+    /// Classify a verbatim GenBank feature-type string into a display kind.
+    ///
+    /// The authoritative type is `Feature.raw_kind` (the exact string from
+    /// the file, e.g. `"CDS"`, `"rep_origin"`); this derives the coloring/
+    /// display variant on the fly so no information is lost on round-trip.
+    pub fn classify(raw_kind: &str) -> FeatureKind {
+        match raw_kind {
+            "gene" => FeatureKind::Gene,
+            "CDS" => FeatureKind::Cds,
+            "promoter" => FeatureKind::Promoter,
+            "terminator" => FeatureKind::Terminator,
+            "rep_origin" => FeatureKind::Rep,
+            "source" => FeatureKind::Source,
+            "misc_feature" | "misc_binding" => FeatureKind::Misc,
+            _ => FeatureKind::Other,
+        }
+    }
+}
+
+/// Lineage of a feature across edits / cloning operations. Round-trips
+/// through GenBank as a single JSON-valued `/seqforge_provenance` qualifier
+/// so it survives save/reload without committing to any cloning shape now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provenance {
+    pub source_doc: String,
+    pub source_range: Range<usize>,
+    pub operation: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
     pub range: Range<usize>,
-    pub kind: FeatureKind,
+    /// Verbatim GenBank feature-type string (the authoritative type).
+    /// Display kind is derived via [`FeatureKind::classify`].
+    pub raw_kind: String,
     pub label: String,
     pub strand: Strand,
-    pub qualifiers: BTreeMap<String, String>,
+    /// `None` value encodes a flag-style qualifier (`/pseudo`, `/partial`).
+    pub qualifiers: BTreeMap<String, Option<String>>,
+    pub provenance: Option<Provenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

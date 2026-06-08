@@ -3568,6 +3568,7 @@ dependencies = [
  "gb-io",
  "seqforge-core",
  "seqforge-restriction",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
