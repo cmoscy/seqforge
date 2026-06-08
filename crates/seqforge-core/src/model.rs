@@ -67,9 +67,13 @@ id_newtype!(ViewId);
 /// The editable sequence and its identity.
 ///
 /// In Tier 2.5a this is structurally a renamed [`crate::Document`] minus
-/// `features` (which moved to [`Annotations`]) plus a [`version`] counter.
-/// Future tiers evolve `text` from `Vec<u8>` to a rope (3b), add anchor
-/// + history fields (3c, 3d), and make `complement` lazy.
+/// `features` (which moved to [`Annotations`]). Future tiers evolve `text`
+/// from `Vec<u8>` to a rope (3b) and add anchor + history fields (3c, 3d).
+///
+/// The complement strand is **not** stored here: it is a pure function of
+/// `text` and is derived on demand (by `seqforge-bio` for operations, and
+/// inline at render for the viewport). See `docs/architecture.md` —
+/// "derived sequence data is computed, never stored on core."
 ///
 /// [`version`]: Buffer::version
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,42 +82,28 @@ pub struct Buffer {
     pub source_path: Option<PathBuf>,
     /// Raw ASCII bytes. Becomes a `Rope` in Tier 3b.
     pub text: Vec<u8>,
-    /// Per-base complement of `text`. Cache; recomputed when text changes.
-    /// Lives on Buffer rather than View because it's a pure function of
-    /// the sequence — sharing across views (post-split-view) avoids
-    /// duplicating up to 150 KB for a BAC-sized plasmid.
-    pub complement: Vec<u8>,
     pub topology: Topology,
     /// Monotonically increasing version; bumped by every mutation. The
-    /// invalidation key for all per-view caches. Tier 3a will start
-    /// bumping it; today it stays at 0.
+    /// invalidation key for all per-view caches.
     pub version: u64,
 }
 
 impl Buffer {
-    /// Build a Buffer from raw sequence bytes, pre-computed complement,
-    /// and identity. The complement is supplied by the caller (typically
-    /// via `seqforge_bio::complement`) so `seqforge-core` doesn't need to
-    /// depend on `seqforge-bio`.
+    /// Build a Buffer from raw sequence bytes and identity. The complement
+    /// strand is derived on demand, not stored, so `seqforge-core` needs no
+    /// dependency on `seqforge-bio`.
     ///
-    /// Future Tier 3b: text → Rope, complement → lazy / chunked.
+    /// Future Tier 3b: text → Rope.
     pub fn new(
         name: String,
         source_path: Option<PathBuf>,
         text: Vec<u8>,
-        complement: Vec<u8>,
         topology: Topology,
     ) -> Self {
-        debug_assert_eq!(
-            text.len(),
-            complement.len(),
-            "complement length must match text length"
-        );
         Self {
             name,
             source_path,
             text,
-            complement,
             topology,
             version: 0,
         }
@@ -254,15 +244,8 @@ mod tests {
 
     #[test]
     fn buffer_new_stores_fields() {
-        let b = Buffer::new(
-            "test".into(),
-            None,
-            b"ATGC".to_vec(),
-            b"TACG".to_vec(),
-            Topology::Linear,
-        );
+        let b = Buffer::new("test".into(), None, b"ATGC".to_vec(), Topology::Linear);
         assert_eq!(b.text, b"ATGC");
-        assert_eq!(b.complement, b"TACG");
         assert_eq!(b.version, 0);
         assert_eq!(b.len(), 4);
         assert!(!b.is_empty());
@@ -271,13 +254,7 @@ mod tests {
 
     #[test]
     fn buffer_circular_topology() {
-        let b = Buffer::new(
-            "p".into(),
-            None,
-            b"AAAA".to_vec(),
-            b"TTTT".to_vec(),
-            Topology::Circular,
-        );
+        let b = Buffer::new("p".into(), None, b"AAAA".to_vec(), Topology::Circular);
         assert!(b.is_circular());
     }
 

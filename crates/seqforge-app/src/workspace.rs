@@ -99,12 +99,10 @@ impl BufferStore {
             return Ok(existing);
         }
         let doc = bio.load(path)?;
-        let complement = pure_complement(&doc.sequence);
         let buffer = Buffer::new(
             doc.name.clone(),
             doc.source_path.clone(),
             doc.sequence,
-            complement,
             doc.topology,
         );
         let annotations = Annotations::new(doc.features);
@@ -124,8 +122,7 @@ impl BufferStore {
         text: Vec<u8>,
         topology: seqforge_core::Topology,
     ) -> BufferId {
-        let complement = pure_complement(&text);
-        let buffer = Buffer::new(name, None, text, complement, topology);
+        let buffer = Buffer::new(name, None, text, topology);
         let id = self.alloc_id();
         self.buffers.insert(id, Arc::new(RwLock::new(buffer)));
         self.annotations.insert(id, Annotations::default());
@@ -139,11 +136,6 @@ impl BufferStore {
     pub fn is_empty(&self) -> bool {
         self.buffers.is_empty()
     }
-}
-
-/// Local IUPAC complement.
-fn pure_complement(seq: &[u8]) -> Vec<u8> {
-    seqforge_bio::complement(seq)
 }
 
 // ── Workspace ────────────────────────────────────────────────────────────────

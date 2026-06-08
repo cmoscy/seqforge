@@ -47,6 +47,56 @@ flowchart TD
   never depends on it (Tm is *derived*, never stored). See
   [`../plans/primers.md`](../plans/primers.md).
 
+## Derived sequence data: computed, never stored on `core`
+
+A general rule that the dependency arrows above only hint at:
+
+> **Anything that is a pure function of `Buffer.text` is derived on
+> demand — never persisted as authoritative state on `core`.**
+
+The reverse complement strand is the canonical case (normalized in
+Stage 2.6): `Buffer` stores `text` only. The complement is computed
+where it's needed — by `seqforge-bio::complement` for operations, and
+inline over the visible block at render (`viewer.rs`) for the dual-strand
+view. It is **not** a field on `Buffer`. This matches the convention in
+the field (e.g. BioPython's `Seq` is single-strand; `reverse_complement`
+returns a new value, never stored) and removes the `text`/`complement`
+sync invariant entirely.
+
+The same rule governs overhangs (decision 7: derived from sequence +
+enzyme, never persisted), Tm (decision 3), and every future derived
+track (translation, GC, secondary structure). If a derivation is ever
+hot enough to need caching, use the version-keyed [`Cache`](#cache-pattern-stage-25e)
+— a *cache-aside* over the single source of truth, not a second
+authoritative copy. Don't reach for that until a profile demands it.
+
+Consequence: `core` never needs a biology dependency to maintain a
+derived field, because it stores no derived fields. This is what keeps
+`core ◄── bio` (and the forbidden `core ──► bio` cycle) a non-issue.
+
+## Edit operations: primitive (`core`) vs composed (command layer)
+
+Editing splits into two tiers, placed by what they depend on:
+
+- **Primitive edits live in `core`.** `mutations::apply_splice` (and its
+  content-given reductions `insert` / `delete` / `replace`) take only
+  positions + bytes. They splice `text`, apply the feature-shift policy,
+  and bump `version` / `dirty`. They are the model's own mutation methods,
+  enforcing the `Buffer`/`Annotations` invariants — and they need **no
+  biology**. (DDD: mutation belongs with the aggregate that owns the
+  invariants, not an external service.)
+- **Composed edits live at the command layer** (`command/edit.rs`, reached
+  via `ViewerRequest`). These *derive bytes via `bio`, then call the
+  primitive*. Reverse-complement is the first: `bio::reverse_complement`
+  of the range → `apply_splice`. The whole cloning/primer roadmap is
+  composed edits (digest+religate, Golden Gate, codon-optimize,
+  primer-based mutagenesis) — all "`bio` derives bytes → `apply_splice` /
+  new `Buffer`", riding the single mutation path so undo/dirty/version
+  apply uniformly.
+
+This is why `apply_revcomp` is **not** a `core` wrapper: it would force
+`core ──► bio`. It belongs where both crates are already in scope.
+
 ## Command pipeline (CLI / GUI / agent parity)
 
 SeqForge's defining goal: every action — menu click, hotkey, embedded-

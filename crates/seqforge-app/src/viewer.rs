@@ -237,8 +237,6 @@ impl SequenceView {
         let label_text_dark = cfg.theme.ui.label_text_alt.0;
         let label_overflow = cfg.settings.editor.label_overflow;
 
-        let comp = &buffer.complement;
-
         let font_id = FontId::monospace(font_size);
         let small_font = FontId::proportional(label_size);
         let ruler_font = FontId::proportional(ruler_size);
@@ -611,13 +609,12 @@ impl SequenceView {
                 );
                 painter.galley(Pos2::new(seq_x0, top_y), top_galley, text_color);
 
-                let bot_galley = build_strand_galley(
-                    ui,
-                    &comp[block_start..block_end],
-                    &font_id,
-                    0.65,
-                    &cfg.theme,
-                );
+                // Bottom strand is the complement of the visible block,
+                // derived on demand — never stored on the buffer (see
+                // docs/architecture.md: derived sequence data is computed,
+                // not persisted).
+                let block_comp = seqforge_bio::complement(&seq[block_start..block_end]);
+                let bot_galley = build_strand_galley(ui, &block_comp, &font_id, 0.65, &cfg.theme);
                 painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
 
                 // ── Annotation bars (below strands) ───────────────────────

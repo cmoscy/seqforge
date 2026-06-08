@@ -361,7 +361,6 @@ mod tests {
             "test".into(),
             None,
             b"ATGCATGC".to_vec(),
-            b"TACGTACG".to_vec(),
             crate::Topology::Linear,
         );
         let view = View::new(ViewId(1), BufferId(1), ViewKind::TextView);

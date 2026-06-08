@@ -79,11 +79,20 @@ RevComp(start, end)  = splice(start..end, rc(slice))  // a replace
 ```
 
 So `seqforge-core::mutations` exposes a **single** `apply_splice(buf, ann, range, new_bytes)`;
-`apply_insert/delete/replace/revcomp` are thin wrappers (or just call sites). The
-feature-shift policy (§2) is the *one* place that logic lives — inside `apply_splice` —
-and it bumps `buf.version += 1` and sets `buf.dirty = true`. This keeps the forward
-operation elegant and serializable (it doubles as the op-log / agent-replay entry, §4)
-without duplicating shift logic across three functions.
+`apply_insert/delete/replace` are thin wrappers (or just call sites) — all *content-given*,
+needing no biology, so they live in `core` with the model. The feature-shift policy (§2)
+is the *one* place that logic lives — inside `apply_splice` — and it bumps `buf.version += 1`
+and sets `buf.dirty = true`. This keeps the forward operation elegant and serializable (it
+doubles as the op-log / agent-replay entry, §4) without duplicating shift logic.
+
+**`revcomp` is the exception — it is a *composed* edit, not a `core` wrapper.** RC is still a
+reduction of splice (`splice(start..end, rc(slice))`, decision 1), but its bytes are *derived*
+by `seqforge-bio::reverse_complement`, which `core` may not depend on (cycle). So revcomp lands
+at the command layer (`command/edit.rs`, Phase 12): bio derives the bytes → `apply_splice`
+installs them. This is the **primitive-vs-composed** split — see
+[`../docs/architecture.md`](../docs/architecture.md) "Edit operations" — and it's the rail the
+whole cloning/primer roadmap rides (digest+religate, Golden Gate, mutagenesis are all
+"bio derives bytes → `apply_splice`").
 
 **Backing store stays `Vec<u8>`** (`apply_splice` is `text.splice(range, new_bytes)`).
 The primitive is store-agnostic, so this is an internal detail, not a commitment. We keep
@@ -339,10 +348,11 @@ v0.2 is still single-buffer-at-a-time from the *editor* perspective (open one pl
 seqforge/
 └── crates/
     ├── seqforge-core/
+    │   ├── src/model.rs         # (Stage 2.6) −Buffer.complement; Buffer::new drops complement arg
     │   ├── src/document.rs      # +Feature.raw_kind, +qualifiers Option<String>,
     │   │                        # +Feature.provenance, +Provenance,
     │   │                        # +FeatureKind as classify()
-    │   ├── src/mutations.rs (NEW) # apply_splice (+ insert/delete/replace/revcomp wrappers)
+    │   ├── src/mutations.rs (NEW) # apply_splice (+ insert/delete/replace wrappers; revcomp is Phase 12)
     │   ├── src/history.rs   (NEW) # Snapshot, History, EditKind
     │   └── src/commands.rs      # +editor ViewerRequest variants
     ├── seqforge-bio/
@@ -356,7 +366,8 @@ seqforge/
         ├── src/command/mod.rs   # +AppCommand::SaveDocument, +AppCommand::OpenSaveAs;
         │                        # +editor variants in Viewer(req) arm → edit.rs
         ├── src/command/file.rs  # +apply_save_document (IO); +dirty-close modal flow
-        ├── src/viewer.rs        # +keyboard input; +request_focus on click; +cursor blink
+        ├── src/viewer.rs        # (Stage 2.6) bottom strand derived inline via bio::complement;
+        │                        # +keyboard input; +request_focus on click; +cursor blink
         ├── src/overlay.rs       # +Overlay::DirtyCloseConfirm { view_id }
         ├── src/workspace.rs     # +with_history_mut; +record_snapshot helper;
         │                        # BufferStore +histories: HashMap<BufferId, History>
@@ -373,6 +384,17 @@ Each phase independently testable. Don't start N+1 until N's "done" check passes
 
 ---
 
+### Stage 2.6 — Normalize the strand model *(prerequisite — ✅ done)*
+
+Landed before Phase 10 as its own commit. Removed the stored complement
+strand so `apply_splice` is born into a model with no derived field to
+maintain (see [`../docs/architecture.md`](../docs/architecture.md)
+"Derived sequence data"):
+
+- [x] Drop `Buffer.complement`; `Buffer::new(name, source_path, text, topology)` (no complement arg).
+- [x] Delete the app's `pure_complement` helper; `viewer.rs` derives the bottom strand inline per visible block via `seqforge_bio::complement`.
+- [x] Update `Buffer::new` call sites + tests. Build + tests + clippy/fmt green.
+
 ### Phase 10 — Feature model + save round-trip *(2 days)*
 
 **Goal:** `Feature` round-trips through disk without data loss; the `apply_splice` mutation primitive is in place.
@@ -381,7 +403,7 @@ Each phase independently testable. Don't start N+1 until N's "done" check passes
 - [ ] `FeatureKind` becomes `fn classify(raw_kind: &str) -> FeatureKind`; drop the `kind` field from `Feature`. Update `viewer.rs::feature_color` call site from `f.kind` to `classify(&f.raw_kind)`.
 - [ ] `genbank.rs::map_feature`: preserve `raw_kind = f.kind.to_string()`; keep `None`-valued qualifiers (flag-style).
 - [ ] `Feature.provenance: Option<Provenance>`; GenBank round-trip via `/seqforge_provenance="<json>"`.
-- [ ] `seqforge-core::mutations::apply_splice(&mut Buffer, &mut Annotations, range, new_bytes)` — the single primitive applying the §2 feature-shift policy, bumping `buf.version`, setting `buf.dirty`. Add `apply_insert/delete/replace/revcomp` as thin wrappers.
+- [ ] `seqforge-core::mutations::apply_splice(&mut Buffer, &mut Annotations, range, new_bytes)` — the single primitive applying the §2 feature-shift policy, bumping `buf.version`, setting `buf.dirty`. Add `apply_insert/delete/replace` as thin wrappers (all content-given, no biology). **`apply_revcomp` is deferred to Phase 12** as a composed command (`bio::reverse_complement` + `apply_splice`) — see §1.
 - [ ] `seqforge-bio::save(buf, ann, path)` → `genbank::write` / `fasta::write`. Add `BioError::Write(String)`.
 - [ ] `genbank::write`: build `gb_io::seq::Seq` from `Buffer + Annotations` (raw_kind, Option qualifiers, provenance).
 - [ ] `fasta::write`: hand-rolled, header from `buf.name`, 80-column wrap.
@@ -414,6 +436,7 @@ Each phase independently testable. Don't start N+1 until N's "done" check passes
 
 - [ ] Add v0.2 `ViewerRequest` variants from §4.
 - [ ] `command/edit.rs` with one `apply_*` function per variant. Each calls `workspace.edit(...)` (Phase 11 helper). `Save`/`SaveAs` push `AppCommand::SaveDocument { path }` / `AppCommand::OpenSaveAs`. `Undo`/`Redo` are pure history ops. Cut/Copy/Paste use `state.clipboard`; app layer also mirrors to arboard.
+- [ ] `apply_reverse_complement` is the first **composed edit**: read the range, `bio::reverse_complement(slice)`, then `core::apply_splice`. Lives here (not `core::mutations`) because it derives bytes via `bio` — see §1 and [`../docs/architecture.md`](../docs/architecture.md) "Edit operations".
 - [ ] Route editor `ViewerRequest` variants in `command/mod.rs` `Viewer(req)` arm to `edit::*` instead of `dispatch_active`.
 - [ ] `AppCommand::SaveDocument { path }` handled in `command/file.rs`: calls `seqforge-bio::save`, clears `buf.dirty`, shows toast on success/failure.
 - [ ] `AppCommand::OpenSaveAs` handled in `command/file.rs`: pushes `Overlay::FileDialog` in save mode; on pick, pushes `AppCommand::SaveDocument { path }`.
@@ -512,5 +535,7 @@ Phase 9 (v0.1.0 tag) runs in parallel and does not block this plan.
 - **Dirty flag:** set inside `apply_*`; cleared only by the save handler in `command/file.rs`.
 - **Version bump:** any function that mutates `buf.text` OR `ann.features` must call `buf.version += 1`. This is the cache invalidation contract for all `Cache<K,V>` entries keyed on version.
 - **No GUI deps in `seqforge-core`:** arboard, egui-notify, eframe stay in `seqforge-app`. `seqforge-core::history` and `seqforge-core::mutations` have zero GUI deps.
+- **Derived sequence data is computed, never stored on `core`:** the complement strand (and future translation/GC/structure tracks) are derived on demand, not persisted as `Buffer` fields. Cache only via the version-keyed `Cache`, and only on profiling evidence. See [`../docs/architecture.md`](../docs/architecture.md) "Derived sequence data".
+- **Primitive vs composed edits:** content-given edits (`apply_splice` + insert/delete/replace) live in `core`; edits whose bytes are *derived by `bio`* (revcomp, all cloning/primer ops) compose in `command/edit.rs`. Keeping `apply_*` byte-derivation out of `core` is what prevents a `core ──► bio` cycle.
 - **CLI surface:** every new `ViewerRequest` variant must have doc comments that read as CLI help text (`/// Insert bases at a position`).
 - **Feature kind:** always set `raw_kind` to the GenBank vocabulary string when creating features; use `classify(&raw_kind)` for display/coloring. Never store a bare `FeatureKind` variant as the authoritative kind.
