@@ -125,31 +125,41 @@ zero-length-range case, delete the empty-replacement case, replace/revcomp the g
 case. It bumps `buf.version += 1` and sets `buf.dirty = true`. Ten tests (one per
 shift-policy bullet) against synthetic 100-bp sequences.
 
-### 3. Undo/redo — per-buffer snapshot stack
+### 3. Undo/redo — per-buffer history (text reverse-delta + annotation snapshot)
 
-Snapshots of `(Buffer, Annotations)` pairs, not a reverse-op log. Snapshot-based undo sidesteps the complexity of recording feature-shift deltas alongside byte deltas.
+Each history entry stores a **reverse-splice delta for the text** (the operands
+`apply_splice` already has) plus a **full clone of the annotations**, *not* a
+whole-buffer snapshot. This is the long-run representation (decided after the
+Stage 2.6 / Phase 10 discussion); it supersedes the original whole-buffer-snapshot
+wording below while keeping its correctness intent.
 
-> **Decision: undo model — snapshot, not inverse-op transactions.**
-> *(Supersedes [`refactor.md`](refactor.md) Tier 3's rope+anchors+transactions path.)*
+> **Decision: undo model — text reverse-delta + annotation snapshot.**
+> *(Refines the earlier "whole-buffer snapshot" decision; supersedes
+> [`refactor.md`](refactor.md) Tier 3's rope+anchors+transactions path.)*
 >
 > Most edits *look* trivially invertible — an `Insert`'s inverse is a `Delete` of the
 > range, with features shifted back. But that only holds for **non-destructive** ops.
 > A `Delete`/`Replace` can *remove* a feature (fully inside the cut) or *clamp* one
 > (straddling the boundary); the geometric inverse restores the bytes but **cannot
-> reconstruct a destroyed feature** — that data is gone. To make destructive ops
-> invertible you must *capture* what they destroyed, at which point an "inverse op with
-> captured data" is just a region-scoped snapshot. So inverse-op and snapshot are the
-> same idea at different granularities; there is no magic inverse that avoids capturing
-> data.
+> reconstruct a destroyed feature** — that data is gone.
 >
-> We therefore **separate the two directions**: the *forward* op is the elegant `Splice`
-> primitive (§1); the *reverse* is a whole-buffer snapshot taken at the single
-> `apply` choke point. We do **not** make `Splice` self-inverting — that would force the
-> correct-feature-destruction-partition logic that snapshots make disappear. Snapshots
-> capture *everything* rather than enumerate what changed, so nothing can be missed,
-> regardless of which op fired or whether it came from a keystroke, the terminal, or an
-> agent. At plasmid/BAC scale the whole-buffer clone is imperceptible (see §1 on why
-> `Vec<u8>` + clone is fine here; rope, if ever adopted, makes the clone O(log n)).
+> So we **split the entry by what's cheap-and-invertible vs. hard:**
+> - **Text → reverse-splice delta.** A splice's inverse is a splice: to undo
+>   `splice(start..start+new_len, new_bytes)` you `splice(start..start+new_len, old_bytes)`.
+>   The entry stores `{ start, old_bytes, new_len }` — **O(edit size), not O(sequence)**.
+>   The operands are already in hand at the `apply_splice` choke point, so capture is free.
+> - **Annotations → full clone.** Features are small relative to the sequence and the
+>   *hard* part (a destroyed/clamped feature can't be inverse-reconstructed), so we
+>   **snapshot them** — capture everything, nothing missed. "Snapshot what's hard, delta
+>   what's easy."
+>
+> Undo applies the inverse splice + swaps the annotations; redo re-applies the forward
+> splice + swaps. This relies on the **single execution path** guaranteeing that the live
+> buffer is exactly the post-last-edit state (only one mutation channel exists), which is
+> a core invariant of the repo, not an assumption. Cost is strictly ≤ whole-buffer
+> snapshots across every edit profile (equal only for a whole-buffer replace, which never
+> happens — assembly produces a *new* buffer). A future rope (deferred, on-evidence) is
+> orthogonal: deltas stay deltas.
 
 **Mutation + undo flow (one choke point for every source):**
 
@@ -161,46 +171,65 @@ flowchart TD
     req["ViewerRequest (Insert/Delete/Replace/RC)"] --> apply["command::apply"]
     apply --> edit["workspace.edit(view, kind, |buf, ann| …)"]
     subgraph choke["single choke point — runs in order"]
-        s1["1 · history.record(buf, ann, kind)<br/>snapshot (coalesce check)"]
+        s1["1 · history.record(start, old_bytes, new_len, ann, kind)<br/>reverse delta + annotation clone (coalesce check)"]
         s2["2 · apply_splice(buf, ann, range, new)<br/>feature-shift policy · version += 1 · dirty"]
         s3["3 · emit AppEvent → op-log / panels"]
         s1 --> s2 --> s3
     end
     edit --> choke
     undo["Undo / Redo<br/>(ViewerRequest, pure history op)"] --> apply
-    undo -.->|pop/push snapshot, no new snapshot| hist[("per-buffer History<br/>past / future")]
+    undo -.->|apply inverse/forward delta, swap ann; no new entry| hist[("per-buffer History<br/>past / future")]
     s1 --> hist
 ```
 
 ```rust
 // in seqforge-core::history
 pub struct History {
-    past: VecDeque<Snapshot>,   // capped at 50
-    future: Vec<Snapshot>,      // cleared on any non-undo mutation
+    past: VecDeque<HistoryEntry>,   // bounded by a byte budget (below)
+    future: Vec<HistoryEntry>,      // cleared on any non-undo mutation
+    bytes: usize,                   // running total of past+future entry sizes
     last_edit_kind: Option<EditKind>,
     last_edit_at: std::time::Instant,
 }
 
-pub struct Snapshot {
-    pub text: Vec<u8>,
-    pub annotations: Annotations,
+pub struct HistoryEntry {
+    pub start: usize,
+    pub old_bytes: Vec<u8>,   // removed slice — restores on undo
+    pub new_len: usize,       // inserted length — locates the forward splice for redo
+    pub annotations: Annotations, // full clone (small; the un-invertible part)
 }
 
 pub enum EditKind { Insert, Delete, Other }
 ```
 
-At ~15 kb plasmids and 50-snapshot cap, comfortably under 1 MB resident.
+**Bounding — by bytes, not count.** Because deltas are variable-size (a point edit is
+tens of bytes; a fragment paste is kilobytes), a count cap is a false guard — the thing
+that overflows is *total bytes*. Each `History` self-bounds on a **per-buffer byte
+budget (default ~16 MB, configurable)**, with a ~2000-entry backstop purely for
+data-structure hygiene. **No global/cross-buffer cap** — total across buffers is
+user-controlled (you chose to open them), and a global LRU would add cross-buffer
+coordination for a risk the user already owns. At ~16 MB of deltas, normal editing has
+effectively unlimited depth.
 
-Coalescing: consecutive `Insert` edits within 500 ms collapse into the same snapshot (no new push per keystroke). Any other edit kind, or any Insert after the 500 ms window, forces a new snapshot.
+Eviction is **silent, oldest-first** (FIFO from `past`): you keep recent undo depth and
+lose only the ability to go *far* back — standard bounded-undo behavior, and a no-op for
+realistic sessions. No base snapshot is needed: in-session undo walks reverse deltas from
+the live state, so dropping the oldest entry costs nothing. (A once-per-buffer "history
+limit reached → Settings" hint is optional Phase 15 polish; Phase 11 just evicts.)
+
+Coalescing: consecutive `Insert` edits within 500 ms **merge into the last delta** (extend
+its `new_len`; no new entry per keystroke). Any other edit kind, or any Insert after the
+500 ms window, starts a new entry.
 
 **Placement:** `BufferStore` grows a parallel `histories: HashMap<BufferId, History>` slot alongside `annotations`. The same accessors pattern (`history_mut(bid)`) follows what `annotations_mut` already does. This gives every buffer its own undo stack, shared across all views into that buffer, and garbage-collected when the buffer is dropped.
 
-`Workspace` exposes convenience methods `with_history_mut(view_id, f)` and a `record_snapshot(view_id, edit_kind)` helper. The mutation entry point is always:
+`Workspace` exposes `with_history_mut(view_id, f)` and a `record_edit(view_id, edit_kind)` helper. The reverse delta is captured *around* the splice — `old_bytes` from the range before it runs, `new_len` after — so the entry can invert it later. The mutation entry point is always:
 
 ```rust
 workspace.with_active_buffer_mut(|view, buf, ann| {
-    // push snapshot before the mutation
-    history.record(buf, ann, edit_kind);
+    // capture the reverse delta + annotation snapshot, then mutate
+    let old_bytes = buf.text[range.clone()].to_vec();
+    history.record(range.start, old_bytes, new_bytes.len(), ann, edit_kind);
     apply_splice(buf, ann, range, new_bytes);
     // update cursor
     view.selection = Some(Selection::cursor(range.start + new_bytes.len()));
@@ -417,16 +446,17 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 
 ### Phase 11 — Per-buffer history *(1 day)*
 
-**Goal:** Snapshot-based undo/redo with typing coalescence, shared correctly across views.
+**Goal:** Delta-based undo/redo (text reverse-delta + annotation snapshot) with typing coalescence, byte-budget bounded, shared correctly across views.
 
-- [ ] `seqforge-core::history::{Snapshot, History, EditKind}` per §3.
-- [ ] `BufferStore.histories: HashMap<BufferId, History>` + `history_mut(bid)` accessor.
-- [ ] `Workspace::record_snapshot(view_id, edit_kind)` convenience method — resolves the buffer id, snapshots `(text.clone(), annotations.clone())` into the history before any mutation.
-- [ ] `Workspace::with_active_buffer_mut` gains a companion `with_history_mut` that combines snapshot + mutation in one call: `workspace.edit(view_id, edit_kind, |view, buf, ann| {...})`.
+- [ ] `seqforge-core::history::{HistoryEntry, History, EditKind}` per §3 — `undo(buf, ann)` applies the inverse splice + swaps annotations; `redo(buf, ann)` re-applies forward + swaps. `record(start, old_bytes, new_len, ann, kind)` pushes onto `past`, clears `future`, updates the byte total.
+- [ ] Byte-budget bounding: per-buffer default ~16 MB (configurable via editor settings) + ~2000-entry backstop; silent oldest-first (FIFO) eviction; account `past` + `future`.
+- [ ] Coalescing: consecutive `Insert`s within 500 ms merge into the last entry (extend `new_len`); other kinds / past-window start a new entry.
+- [ ] `BufferStore.histories: HashMap<BufferId, History>` + `history_mut(bid)` accessor; GC'd with the buffer.
+- [ ] `Workspace::record_edit(view_id, edit_kind)` + `with_history_mut`; an `edit(view_id, edit_kind, |view, buf, ann| {...})` helper that captures the reverse delta around the splice (§3).
 - [ ] No command wiring yet — Phase 12 does that.
-- [ ] Tests: 5 consecutive Inserts → 1 snapshot; Insert/Delete mix → 2 snapshots; undo restores bytes + features; redo restores; non-undo command after undo clears future.
+- [ ] Tests: 5 consecutive Inserts → 1 entry; Insert/Delete mix → 2 entries; undo restores bytes **and** features (incl. a delete that destroys a feature); redo restores; non-undo edit after undo clears `future`; byte-budget eviction drops oldest while keeping recent undo correct.
 
-**Done when:** History is unit-tested end-to-end against synthetic buffers.
+**Done when:** History is unit-tested end-to-end against synthetic buffers (incl. a destructive-delete round-trip and an eviction case).
 
 ---
 
@@ -481,8 +511,11 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 - [ ] `Overlay::DirtyCloseConfirm { view_id }` modal (`Save / Discard / Cancel`); wired to `AppCommand::CloseTab` and `on_close_event`.
 - [ ] `Cmd/Ctrl+S` accelerator registered at the menu level (fires regardless of focus).
 - [ ] Toast on save success/failure (egui-notify, pull forward from Phase 8 polish if not already landed).
+- [ ] **Reset to file** (`File → Revert`): reloads from disk, discarding buffer + annotations + history and picking up external changes. Distinct from undo-all (which walks the in-session stack). Confirm dialog; enabled only when `source_path` is `Some`; routes through the single path (Open-onto-self).
+- [ ] **External-change guard:** store a content hash of the file as loaded (in memory on the buffer — no format involvement). On save, re-read disk and compare; if changed → GUI modal `Overwrite / Reload / Cancel`. For socket/CLI `Save`, return a structured **conflict** error unless `--force` (non-interactive override, so automation isn't blocked by a prompt). Doesn't impede the normal CLI/agent path — that mutates the in-memory buffer through the app, not the file on disk; the guard only fires on a genuine *external* change.
+- [ ] *(Optional polish)* once-per-buffer-per-session "undo history limit reached → Settings" toast when a buffer first hits its byte budget (see §3). Low priority; eviction itself stays silent.
 
-**Done when:** Can't accidentally lose work by closing the window.
+**Done when:** Can't accidentally lose work by closing the window; can't silently clobber an externally-changed file; can revert to disk state.
 
 ---
 
