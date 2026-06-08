@@ -25,7 +25,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use seqforge_core::{Annotations, BioOps, Buffer, BufferId, DispatchError, View, ViewId, ViewKind};
+use std::ops::Range;
+
+use seqforge_core::{
+    Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Selection, View,
+    ViewId, ViewKind, mutations,
+};
 use serde::{Deserialize, Serialize};
 
 /// User-facing label for a buffer: the source file's basename when the
@@ -55,6 +60,9 @@ use crate::viewer::SequenceView;
 pub struct BufferStore {
     buffers: HashMap<BufferId, Arc<RwLock<Buffer>>>,
     annotations: HashMap<BufferId, Annotations>,
+    /// Per-buffer undo/redo history, shared across all views into the buffer
+    /// and dropped with it. Lazily created on first edit.
+    histories: HashMap<BufferId, History>,
     by_path: HashMap<PathBuf, BufferId>,
     next_id: u64,
 }
@@ -81,11 +89,31 @@ impl BufferStore {
         self.annotations.get_mut(&id)
     }
 
+    /// The buffer's undo/redo history, created on first access.
+    pub fn history_mut(&mut self, id: BufferId) -> &mut History {
+        self.histories.entry(id).or_default()
+    }
+
+    pub fn history(&self, id: BufferId) -> Option<&History> {
+        self.histories.get(&id)
+    }
+
+    /// Mutable access to a buffer's annotations and history together. Both
+    /// live in `BufferStore` as separate maps, so this hands out disjoint
+    /// borrows the edit/undo path needs in one call. Returns `None` if the
+    /// buffer's annotations are missing (history is created on demand).
+    fn ann_and_history_mut(&mut self, id: BufferId) -> Option<(&mut Annotations, &mut History)> {
+        let ann = self.annotations.get_mut(&id)?;
+        let history = self.histories.entry(id).or_default();
+        Some((ann, history))
+    }
+
     /// Drop a buffer + its annotations and forget any path alias.
     /// Returns the strong-count of the Arc just before drop.
     pub fn remove(&mut self, id: BufferId) -> Option<usize> {
         let buf = self.buffers.remove(&id)?;
         self.annotations.remove(&id);
+        self.histories.remove(&id);
         self.by_path.retain(|_, v| *v != id);
         let count = Arc::strong_count(&buf);
         drop(buf);
@@ -362,6 +390,87 @@ impl Workspace {
         self.with_buffer_mut(id, f)
     }
 
+    /// The single edit entry point: record a reverse delta into the buffer's
+    /// history, then apply the splice. Every editor mutation (Phase 12's
+    /// `command/edit.rs`, from GUI / terminal / agent) routes through here so
+    /// undo, dirty, and version stay consistent regardless of source.
+    ///
+    /// Bounds are validated here (command-layer policy) so `apply_splice`'s
+    /// precondition holds; the editing view's cursor is moved past the edit.
+    pub fn edit(
+        &mut self,
+        view_id: ViewId,
+        kind: EditKind,
+        range: Range<usize>,
+        new_bytes: &[u8],
+    ) -> Result<(), DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+
+        if range.start > range.end || range.end > buf.text.len() {
+            return Err(DispatchError::OutOfRange {
+                position: range.end,
+                seq_len: buf.text.len(),
+            });
+        }
+
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let old_bytes = buf.text[range.clone()].to_vec();
+        history.record(range.start, old_bytes, new_bytes.to_vec(), ann, kind);
+        mutations::apply_splice(&mut buf, ann, range.clone(), new_bytes);
+        let cursor = range.start + new_bytes.len();
+        drop(buf);
+
+        if let Some(view) = self.views.get_mut(&view_id) {
+            view.selection = Some(Selection::cursor(cursor));
+        }
+        Ok(())
+    }
+
+    /// Undo the last edit on the view's buffer. Returns whether anything was
+    /// undone. Pure history op — takes no new snapshot.
+    pub fn undo(&mut self, view_id: ViewId) -> Result<bool, DispatchError> {
+        self.history_step(view_id, true)
+    }
+
+    /// Redo the last undone edit on the view's buffer.
+    pub fn redo(&mut self, view_id: ViewId) -> Result<bool, DispatchError> {
+        self.history_step(view_id, false)
+    }
+
+    fn history_step(&mut self, view_id: ViewId, undo: bool) -> Result<bool, DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        Ok(if undo {
+            history.undo(&mut buf, ann)
+        } else {
+            history.redo(&mut buf, ann)
+        })
+    }
+
     /// Reset every per-view render cache. Called by command arms
     /// (Open, Close, GoTo, etc.) that previously reset the single
     /// `seq_view` on `AppState`.
@@ -479,6 +588,72 @@ mod tests {
         let mut ws = Workspace::default();
         let err = ws.with_active_buffer(|_, _, _| ()).unwrap_err();
         assert!(matches!(err, DispatchError::NoActiveView));
+    }
+
+    #[test]
+    fn edit_records_history_and_undo_redo_round_trip() {
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+
+        // insert "TT" at pos 2
+        ws.edit(vid, EditKind::Insert, 2..2, b"TT").unwrap();
+        ws.with_active_buffer(|view, buf, _| {
+            assert_eq!(buf.text, b"ATTTGC");
+            assert!(buf.dirty);
+            assert_eq!(buf.version, 1);
+            // cursor moved past the insert
+            assert_eq!(view.selection.unwrap().focus, 4);
+        })
+        .unwrap();
+
+        assert!(ws.undo(vid).unwrap());
+        ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATGC"))
+            .unwrap();
+
+        assert!(ws.redo(vid).unwrap());
+        ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATTTGC"))
+            .unwrap();
+
+        // nothing left to redo
+        assert!(!ws.redo(vid).unwrap());
+    }
+
+    #[test]
+    fn edit_out_of_range_errors_and_does_not_mutate() {
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+
+        let err = ws.edit(vid, EditKind::Insert, 0..99, b"X").unwrap_err();
+        assert!(matches!(err, DispatchError::OutOfRange { .. }));
+        ws.with_active_buffer(|_, buf, _| {
+            assert_eq!(buf.text, b"ATGC");
+            assert!(!buf.dirty);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn history_is_shared_across_views_of_one_buffer() {
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+        let v1 = ws.add_view(bid, ViewKind::TextView);
+        let v2 = ws.add_view(bid, ViewKind::TextView);
+
+        // edit through v1, undo through v2 — same buffer, same history
+        ws.edit(v1, EditKind::Insert, 4..4, b"GG").unwrap();
+        ws.with_buffer_mut(v2, |_, buf, _| assert_eq!(buf.text, b"ATGCGG"))
+            .unwrap();
+        assert!(ws.undo(v2).unwrap());
+        ws.with_buffer_mut(v1, |_, buf, _| assert_eq!(buf.text, b"ATGC"))
+            .unwrap();
     }
 
     #[test]

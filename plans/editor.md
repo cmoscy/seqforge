@@ -1,11 +1,11 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: NOT STARTED** (Phase 10 is next). Canonical cross-track status lives
-> in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a single
-> **`Splice` forward primitive** (§1) reached through the **one execution path**
-> (GUI keystroke / terminal / agent all lower to it, §4), with **snapshot-based
-> undo** on `Vec<u8>` (§3) — this supersedes the rope/anchor/transaction path in
-> [`refactor.md`](refactor.md) Tier 3.
+> **Status: Stage 2.6 + Phases 10–11 done** (Phase 12 next). Canonical cross-track
+> status lives in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a
+> single **`Splice` forward primitive** (§1) reached through the **one execution path**
+> (GUI keystroke / terminal / agent all lower to it, §4), with **delta-based undo**
+> (text reverse-delta + annotation snapshot, §3) — this supersedes the
+> rope/anchor/transaction path in [`refactor.md`](refactor.md) Tier 3.
 
 ## Context
 
@@ -448,13 +448,13 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 
 **Goal:** Delta-based undo/redo (text reverse-delta + annotation snapshot) with typing coalescence, byte-budget bounded, shared correctly across views.
 
-- [ ] `seqforge-core::history::{HistoryEntry, History, EditKind}` per §3 — `undo(buf, ann)` applies the inverse splice + swaps annotations; `redo(buf, ann)` re-applies forward + swaps. `record(start, old_bytes, new_len, ann, kind)` pushes onto `past`, clears `future`, updates the byte total.
-- [ ] Byte-budget bounding: per-buffer default ~16 MB (configurable via editor settings) + ~2000-entry backstop; silent oldest-first (FIFO) eviction; account `past` + `future`.
-- [ ] Coalescing: consecutive `Insert`s within 500 ms merge into the last entry (extend `new_len`); other kinds / past-window start a new entry.
-- [ ] `BufferStore.histories: HashMap<BufferId, History>` + `history_mut(bid)` accessor; GC'd with the buffer.
-- [ ] `Workspace::record_edit(view_id, edit_kind)` + `with_history_mut`; an `edit(view_id, edit_kind, |view, buf, ann| {...})` helper that captures the reverse delta around the splice (§3).
-- [ ] No command wiring yet — Phase 12 does that.
-- [ ] Tests: 5 consecutive Inserts → 1 entry; Insert/Delete mix → 2 entries; undo restores bytes **and** features (incl. a delete that destroys a feature); redo restores; non-undo edit after undo clears `future`; byte-budget eviction drops oldest while keeping recent undo correct.
+- [x] `seqforge-core::history::{HistoryEntry, History, EditKind}` per §3 — `undo(buf, ann)` applies the inverse splice + swaps annotations; `redo(buf, ann)` re-applies forward + swaps. `record(start, old_bytes, new_len, ann, kind)` pushes onto `past`, clears `future`, updates the byte total.
+- [x] Byte-budget bounding: per-buffer default ~16 MB (configurable via editor settings) + ~2000-entry backstop; silent oldest-first (FIFO) eviction; account `past` + `future`.
+- [x] Coalescing: consecutive `Insert`s within 500 ms merge into the last entry (extend `new_len`); other kinds / past-window start a new entry.
+- [x] `BufferStore.histories: HashMap<BufferId, History>` + `history_mut(bid)` accessor; GC'd with the buffer.
+- [x] `Workspace::record_edit(view_id, edit_kind)` + `with_history_mut`; an `edit(view_id, edit_kind, |view, buf, ann| {...})` helper that captures the reverse delta around the splice (§3).
+- [x] No command wiring yet — Phase 12 does that.
+- [x] Tests: 5 consecutive Inserts → 1 entry; Insert/Delete mix → 2 entries; undo restores bytes **and** features (incl. a delete that destroys a feature); redo restores; non-undo edit after undo clears `future`; byte-budget eviction drops oldest while keeping recent undo correct.
 
 **Done when:** History is unit-tested end-to-end against synthetic buffers (incl. a destructive-delete round-trip and an eviction case).
 
