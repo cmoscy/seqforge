@@ -5,7 +5,7 @@ use egui::{
 };
 use seqforge_core::{
     Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View, ViewId,
-    ViewerRequest,
+    ViewerRequest, mutations::apply_splice,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -14,6 +14,13 @@ use crate::config::{Config, LabelOverflow};
 /// Cursor blink half-period (ms): the cursor toggles visible/hidden each
 /// interval while the viewer has focus.
 const BLINK_MS: u64 = 500;
+
+/// Track-changes diff washes for the realized staged-edit preview (Phase 13.6).
+/// A faint background channel painted *behind* the per-base glyphs so the
+/// A/C/G/T foreground colours (`theme.bases.for_base`) stay legible — the diff
+/// never recolours the bases.
+const DIFF_ADD_BG: Color32 = Color32::from_rgba_premultiplied(40, 120, 75, 70); // added
+const DIFF_DEL_BG: Color32 = Color32::from_rgba_premultiplied(120, 45, 45, 70); // removed
 
 /// IUPAC nucleotide alphabet (DNA + ambiguity codes). Typed characters outside
 /// it are silently dropped (plan §6) so junk keystrokes never reach the edit
@@ -76,6 +83,82 @@ impl PendingEdit {
                 view: Some(view),
             }),
         }
+    }
+}
+
+/// Memoized speculative render of the staged edit (Phase 13.6 — realized diff
+/// preview). Built by cloning the committed text + annotations and running the
+/// real `apply_splice` for `Insert`/`Replace` (so the preview is *provably
+/// identical* to the post-commit state — one code path, zero divergence);
+/// `Delete` keeps the committed bytes and marks the region struck in place.
+///
+/// **Transient render-only artifact:** building it never bumps `buf.version`
+/// or touches any `Cache<K,V>` — those stay anchored to the committed buffer.
+/// Rebuilt only when the fingerprint (`version`, `pending`) changes — never per
+/// frame.
+#[derive(Debug)]
+struct Preview {
+    /// Committed `buffer.version` this was built from (half the fingerprint).
+    version: u64,
+    /// The pending edit that produced it (the other half of the fingerprint).
+    pending: PendingEdit,
+    /// Speculative sequence bytes to render (== committed text for `Delete`).
+    text: Vec<u8>,
+    /// Speculative annotations — features reflowed for `Insert`/`Replace`,
+    /// untouched for `Delete` (deletions mark in place until commit).
+    annotations: Annotations,
+    /// `[start, end)` columns of newly added bases (green wash), in render
+    /// (preview) coordinates.
+    added: Option<(usize, usize)>,
+    /// `[start, end)` columns being removed, kept visible + struck (red), in
+    /// render coordinates (committed == render for `Delete`).
+    deleted: Option<(usize, usize)>,
+}
+
+impl Preview {
+    /// Build the speculative preview for `pending` over the committed buffer.
+    fn build(buffer: &Buffer, annotations: &Annotations, pending: &PendingEdit) -> Preview {
+        let version = buffer.version;
+        // Clone the committed state and run the *real* mutation primitive so
+        // the preview can never diverge from what commit produces.
+        let mut buf = buffer.clone();
+        let mut ann = annotations.clone();
+        let (added, deleted) = match pending {
+            PendingEdit::Insert { pos, staged } => {
+                let bytes = staged.as_bytes();
+                apply_splice(&mut buf, &mut ann, *pos..*pos, bytes);
+                (Some((*pos, *pos + bytes.len())), None)
+            }
+            PendingEdit::Replace { start, end, staged } => {
+                let bytes = staged.as_bytes();
+                apply_splice(&mut buf, &mut ann, *start..*end, bytes);
+                (Some((*start, *start + bytes.len())), None)
+            }
+            // Delete keeps the committed bytes (no virtual buffer): the range
+            // is rendered struck-through in place so the user verifies what's
+            // leaving. Commit removes it.
+            PendingEdit::Delete { start, end } => (None, Some((*start, *end))),
+        };
+        Preview {
+            version,
+            pending: pending.clone(),
+            text: buf.text,
+            annotations: ann,
+            added,
+            deleted,
+        }
+    }
+
+    /// One-line footer summary naming the op and its size.
+    fn summary(&self) -> String {
+        let body = match &self.pending {
+            PendingEdit::Insert { staged, .. } => format!("Insert {} bp", staged.len()),
+            PendingEdit::Replace { start, end, staged } => {
+                format!("Replace {}→{} bp", end - start, staged.len())
+            }
+            PendingEdit::Delete { start, end } => format!("Delete {} bp", end - start),
+        };
+        format!("{body} · ⏎ commit · esc cancel")
     }
 }
 
@@ -453,6 +536,9 @@ pub struct SequenceView {
     /// In-canvas staged edit (§6 / ROADMAP decision 10). `None` when not
     /// editing. The buffer is never touched until this commits on `Enter`.
     pending: Option<PendingEdit>,
+    /// Memoized realized-diff preview (Phase 13.6), rebuilt only when
+    /// `pending` (or the committed version) changes. `None` when not staging.
+    preview: Option<Preview>,
 }
 
 impl SequenceView {
@@ -460,6 +546,23 @@ impl SequenceView {
     pub fn reset(&mut self) {
         self.drag_start = None;
         self.pending = None;
+        self.preview = None;
+    }
+
+    /// Rebuild the memoized preview iff the fingerprint changed. Keyed on the
+    /// committed `version` + the `pending` edit, so it recomputes ~once per
+    /// keystroke (when `pending` mutates), never per frame.
+    fn refresh_preview(&mut self, buffer: &Buffer, annotations: &Annotations) {
+        let Some(pending) = self.pending.clone() else {
+            self.preview = None;
+            return;
+        };
+        if let Some(p) = &self.preview {
+            if p.version == buffer.version && p.pending == pending {
+                return; // fingerprint unchanged — keep the memo.
+            }
+        }
+        self.preview = Some(Preview::build(buffer, annotations, &pending));
     }
 
     /// Render the sequence viewer. Caller must have already resolved an
@@ -488,13 +591,45 @@ impl SequenceView {
         // custom painter doesn't persist reliably across frames.
         focused: bool,
     ) {
-        let seq = &buffer.text;
+        // ── Drive in-canvas staging from the keyboard, *before* layout ──
+        // Editing must run before sizing so the realized diff preview (a buffer
+        // that may be longer/shorter than the committed text) drives block
+        // layout this same frame — otherwise an insert's extra bases would be
+        // laid out against the stale committed length. Focus is the app-level
+        // pane focus (`focused`), the same signal the terminal uses; losing it
+        // abandons an uncommitted stage. Menus / CLI / agent post directly —
+        // staging is in-canvas only (ROADMAP decision 10).
+        if focused {
+            handle_keyboard(&mut self.pending, ui, view, buffer.text.len(), cmds);
+            ui.ctx()
+                .request_repaint_after(Duration::from_millis(BLINK_MS));
+        } else {
+            self.pending = None;
+        }
+
+        // Rebuild the memoized realized-diff preview iff the fingerprint
+        // changed (≈ once per keystroke), then take it out as an owned local so
+        // the render closure can freely mutate `self` (drag_start / pending)
+        // without aliasing the borrow.
+        self.refresh_preview(buffer, annotations);
+        let preview = self.preview.take();
+        let staging = preview.is_some();
+        // Render source: the speculative preview while staging, else the
+        // committed buffer. Derived overlays (cut sites / search) are suppressed
+        // while staging — they're anchored to committed coordinates and would
+        // otherwise need a re-scan over the virtual sequence each keystroke.
+        let (seq, render_ann): (&[u8], &Annotations) = match &preview {
+            Some(p) => (p.text.as_slice(), &p.annotations),
+            None => (buffer.text.as_slice(), annotations),
+        };
+        let cut_sites: &[CutSite] = if staging { &[] } else { &view.cut_sites };
         let seq_len = seq.len();
 
         if seq_len == 0 {
             ui.centered_and_justified(|ui| {
                 ui.label("Empty sequence.");
             });
+            self.preview = preview;
             return;
         }
 
@@ -547,8 +682,8 @@ impl SequenceView {
         // `block_offsets[i]` is the y-coord (within the allocated rect) of
         // the top of block i; `block_offsets[n_blocks]` is the total height.
         let (block_layouts, block_offsets) = build_block_layouts(
-            &annotations.features,
-            &view.cut_sites,
+            &render_ann.features,
+            cut_sites,
             seq_len,
             line_width,
             char_width,
@@ -614,7 +749,7 @@ impl SequenceView {
                 let annot_base_y = bot_y + strand_h;
 
                 for &(feat_idx, row) in &layout.feat_rows {
-                    let feat = &annotations.features[feat_idx];
+                    let feat = &render_ann.features[feat_idx];
                     let bar_row_y = annot_base_y + row as f32 * annot_row_h;
                     if let Some(r) = annot_bar_rect(
                         feat,
@@ -628,26 +763,29 @@ impl SequenceView {
                         annot_hits.push((r, feat_idx));
                     }
                 }
-                for (hit_idx, hit) in view.search_hits.iter().enumerate() {
-                    let vis_s = hit.start.max(block_start).min(block_end);
-                    let vis_e = hit.end.min(block_end);
-                    if vis_s < vis_e && vis_e > block_start {
-                        let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
-                        let sw = (vis_e - vis_s) as f32 * char_width;
-                        search_hit_rects.push((
-                            Rect::from_min_size(
-                                Pos2::new(sx, top_y),
-                                Vec2::new(sw, strand_h * 2.0),
-                            ),
-                            hit_idx,
-                        ));
+                if !staging {
+                    for (hit_idx, hit) in view.search_hits.iter().enumerate() {
+                        let vis_s = hit.start.max(block_start).min(block_end);
+                        let vis_e = hit.end.min(block_end);
+                        if vis_s < vis_e && vis_e > block_start {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            search_hit_rects.push((
+                                Rect::from_min_size(
+                                    Pos2::new(sx, top_y),
+                                    Vec2::new(sw, strand_h * 2.0),
+                                ),
+                                hit_idx,
+                            ));
+                        }
                     }
                 }
                 // Click target is the label only — not the staple line through the
                 // strands. Clicking the strand near a cut site places a cursor as
                 // expected; only the label is the intentional selection handle.
+                // (`cut_sites` is empty while staging, so this loop is inert then.)
                 for &(site_idx, row) in &layout.cut_rows {
-                    let site = &view.cut_sites[site_idx];
+                    let site = &cut_sites[site_idx];
                     let cx = seq_x0 + (site.cut_pos - block_start) as f32 * char_width;
                     let label_w = site.enzyme.len() as f32 * label_char_w + 8.0;
                     cut_site_rects.push((
@@ -705,7 +843,7 @@ impl SequenceView {
                     } else if let Some(&(_, feat_idx)) =
                         annot_hits.iter().find(|(r, _)| r.contains(pos))
                     {
-                        let feat = &annotations.features[feat_idx];
+                        let feat = &render_ann.features[feat_idx];
                         push_sel(
                             cmds,
                             Some(Selection::range(feat.range.start, feat.range.end)),
@@ -720,7 +858,7 @@ impl SequenceView {
                     } else if let Some(&(_, site_idx)) =
                         cut_site_rects.iter().find(|(r, _)| r.contains(pos))
                     {
-                        let site = &view.cut_sites[site_idx];
+                        let site = &cut_sites[site_idx];
                         push_sel(
                             cmds,
                             Some(Selection::range(
@@ -764,26 +902,12 @@ impl SequenceView {
             }
 
             // ── In-canvas editing (Phase 13, staged §6) ───────────────────
-            // Focus is the app-level pane focus (`focused`, passed in) — the
-            // same signal the terminal uses — not egui widget-focus, which
-            // doesn't persist across frames on a custom painter. Clicking moves
-            // the cursor, so it cancels any in-progress staging. While focused,
-            // `handle_keyboard` drives the staged `PendingEdit`; nothing reaches
-            // the buffer until it commits on Enter. Menus / CLI / agent post
-            // directly — staging is in-canvas only (ROADMAP decision 10).
+            // Keyboard staging + preview were processed before layout (above);
+            // here we only cancel staging on a click (the click also moves the
+            // cursor). The realized diff is rendered from `preview` in pass 2.
             if response.clicked() {
                 self.pending = None;
             }
-            if focused {
-                handle_keyboard(&mut self.pending, ui, view, seq_len, cmds);
-                // Drive the cursor blink while focused.
-                ui.ctx()
-                    .request_repaint_after(Duration::from_millis(BLINK_MS));
-            } else {
-                // Losing pane focus abandons an uncommitted staged edit.
-                self.pending = None;
-            }
-            let pending = self.pending.clone();
             // Cursor is solid when unfocused, blinks (~2 Hz) when focused.
             let blink_on =
                 !focused || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
@@ -827,28 +951,41 @@ impl SequenceView {
                 let annot_base_y = bot_y + strand_h;
 
                 // ── Search hit highlights (behind selection and text) ──────
-                for hit in &view.search_hits {
-                    let vis_s = hit.start.max(block_start).min(block_end);
-                    let vis_e = hit.end.min(block_end); // clamp wrap-arounds
-                    if vis_s < vis_e && vis_e > block_start {
-                        let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
-                        let sw = (vis_e - vis_s) as f32 * char_width;
-                        let color = search_hit_color(&cfg.theme, hit.strand);
-                        painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
-                            2.0,
-                            color,
-                        );
-                        painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
-                            2.0,
-                            color,
-                        );
+                // Suppressed while staging — derived overlays are anchored to
+                // committed coordinates and refresh on commit.
+                if !staging {
+                    for hit in &view.search_hits {
+                        let vis_s = hit.start.max(block_start).min(block_end);
+                        let vis_e = hit.end.min(block_end); // clamp wrap-arounds
+                        if vis_s < vis_e && vis_e > block_start {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            let color = search_hit_color(&cfg.theme, hit.strand);
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(sx, top_y),
+                                    Vec2::new(sw, char_height),
+                                ),
+                                2.0,
+                                color,
+                            );
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(sx, bot_y),
+                                    Vec2::new(sw, char_height),
+                                ),
+                                2.0,
+                                color,
+                            );
+                        }
                     }
                 }
 
                 // ── Selection highlight / cursor (behind text) ────────────
-                if let Some(sel) = view.selection {
+                // Suppressed while staging — the realized diff wash (below) is
+                // the active visual; selection coords are committed-space and
+                // would mislead against the speculative buffer.
+                if let Some(sel) = view.selection.filter(|_| !staging) {
                     if sel.is_cursor() {
                         // Thin vertical line between bases spanning both strands.
                         let pos = sel.anchor;
@@ -890,19 +1027,14 @@ impl SequenceView {
                     }
                 }
 
-                // ── Staged edit preview (Phase 13) ────────────────────────
-                // Shows the pending change before it commits on Enter. Reads
-                // `pending` only — the buffer is untouched until commit.
-                if let Some(pe) = &pending {
-                    let add_col = Color32::from_rgb(60, 179, 113); // bases to add
-                    let del_col = Color32::from_rgba_unmultiplied(208, 80, 80, 110); // to remove
-                    // Range marker for Delete / Replace.
-                    let region = match pe {
-                        PendingEdit::Delete { start, end }
-                        | PendingEdit::Replace { start, end, .. } => Some((*start, *end)),
-                        PendingEdit::Insert { .. } => None,
-                    };
-                    if let Some((rs, re)) = region {
+                // ── Realized diff wash (Phase 13.6) ───────────────────────
+                // The diff is drawn over the *preview* bytes (this block is
+                // already laid out against them), behind the strand glyphs so
+                // the per-base A/C/G/T colours stay legible. `added`/`deleted`
+                // are render-space column ranges on the preview. Strikethrough
+                // on deleted bases lands in 13.6b.
+                if let Some(p) = &preview {
+                    if let Some((rs, re)) = p.added {
                         let vis_s = rs.max(block_start);
                         let vis_e = re.min(block_end);
                         if vis_s < vis_e {
@@ -914,41 +1046,23 @@ impl SequenceView {
                                     Vec2::new(sw, strand_h * 2.0),
                                 ),
                                 0.0,
-                                del_col,
+                                DIFF_ADD_BG,
                             );
                         }
                     }
-                    // Staged bases float above the anchor for Insert / Replace.
-                    let staged = match pe {
-                        PendingEdit::Insert { pos, staged } => Some((*pos, staged)),
-                        PendingEdit::Replace { start, staged, .. } => Some((*start, staged)),
-                        PendingEdit::Delete { .. } => None,
-                    };
-                    if let Some((anchor, txt)) = staged {
-                        if !txt.is_empty() && anchor >= block_start && anchor <= block_end {
-                            let cx = seq_x0 + (anchor - block_start) as f32 * char_width;
-                            let gy = top_y - char_height;
-                            let gw = txt.len() as f32 * char_width;
-                            painter.rect_filled(
-                                Rect::from_min_size(Pos2::new(cx, gy), Vec2::new(gw, char_height)),
-                                2.0,
-                                add_col.gamma_multiply(0.25),
-                            );
-                            painter.text(
-                                Pos2::new(cx, gy),
-                                Align2::LEFT_TOP,
-                                txt,
-                                font_id.clone(),
-                                add_col,
-                            );
-                            // Insertion caret at the anchor.
+                    if let Some((rs, re)) = p.deleted {
+                        let vis_s = rs.max(block_start);
+                        let vis_e = re.min(block_end);
+                        if vis_s < vis_e {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
                             painter.rect_filled(
                                 Rect::from_min_size(
-                                    Pos2::new(cx - 0.75, top_y),
-                                    Vec2::new(1.5, strand_h * 2.0),
+                                    Pos2::new(sx, top_y),
+                                    Vec2::new(sw, strand_h * 2.0),
                                 ),
                                 0.0,
-                                add_col,
+                                DIFF_DEL_BG,
                             );
                         }
                     }
@@ -992,7 +1106,7 @@ impl SequenceView {
 
                 // ── Annotation bars (below strands) ───────────────────────
                 for &(feat_idx, row) in &layout.feat_rows {
-                    let feat = &annotations.features[feat_idx];
+                    let feat = &render_ann.features[feat_idx];
                     let bar_row_y = annot_base_y + row as f32 * annot_row_h;
                     if let Some(bar) = annot_bar_rect(
                         feat,
@@ -1176,13 +1290,14 @@ impl SequenceView {
                 }
             }
 
-            // ── Staged-edit footer hint ── pinned to the bottom of the visible
-            // area so it's always seen while an edit is pending.
-            if pending.is_some() {
+            // ── Staged-edit footer summary ── pinned to the bottom of the
+            // visible area so it's always seen while an edit is pending. Names
+            // the op + size (e.g. "Insert 6 bp · ⏎ commit · esc cancel").
+            if let Some(p) = &preview {
                 painter.text(
                     Pos2::new(clip.min.x + 8.0, clip.max.y - char_height - 4.0),
                     Align2::LEFT_TOP,
-                    "⏎ commit · esc cancel",
+                    p.summary(),
                     ruler_font.clone(),
                     text_color.gamma_multiply(0.7),
                 );
@@ -1203,6 +1318,10 @@ impl SequenceView {
             ));
         });
         view.visible_range = computed_visible;
+        // Put the memoized preview back (taken out above so the render closure
+        // could mutate `self`). A click that cancelled `pending` this frame
+        // leaves it stale; next frame's `refresh_preview` clears it.
+        self.preview = preview;
     }
 }
 
@@ -1519,5 +1638,100 @@ mod tests {
                 .to_request(v)
                 .is_none()
         );
+    }
+
+    // ── Realized diff preview (Phase 13.6) ───────────────────────────────────
+
+    use super::{Preview, SequenceView, apply_splice};
+    use seqforge_core::{Annotations, Buffer, Topology};
+
+    fn buf(bytes: &[u8]) -> Buffer {
+        Buffer::new("t".into(), None, bytes.to_vec(), Topology::Linear)
+    }
+
+    /// Insert/Replace previews are built by the *same* `apply_splice` commit
+    /// runs, so the speculative text is provably identical to the result.
+    #[test]
+    fn insert_preview_is_identical_to_commit() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let pe = PendingEdit::Insert {
+            pos: 4,
+            staged: "GGG".into(),
+        };
+        let p = Preview::build(&b, &ann, &pe);
+        // Same transform commit will run:
+        let mut committed = b.clone();
+        let mut cann = ann.clone();
+        apply_splice(&mut committed, &mut cann, 4..4, b"GGG");
+        assert_eq!(p.text, committed.text);
+        assert_eq!(p.text, b"AAAAGGGAAAAAA");
+        assert_eq!(p.added, Some((4, 7)));
+        assert_eq!(p.deleted, None);
+    }
+
+    #[test]
+    fn replace_preview_is_identical_to_commit() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let pe = PendingEdit::Replace {
+            start: 2,
+            end: 6,
+            staged: "CC".into(),
+        };
+        let p = Preview::build(&b, &ann, &pe);
+        let mut committed = b.clone();
+        let mut cann = ann.clone();
+        apply_splice(&mut committed, &mut cann, 2..6, b"CC");
+        assert_eq!(p.text, committed.text);
+        assert_eq!(p.text, b"AACCAAAA");
+        // green wash covers the new bases, not the old range
+        assert_eq!(p.added, Some((2, 4)));
+        assert_eq!(p.deleted, None);
+    }
+
+    /// Delete keeps the committed bytes (no virtual buffer) and marks the range
+    /// struck in place; the bytes only leave on commit.
+    #[test]
+    fn delete_preview_keeps_committed_bytes() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let pe = PendingEdit::Delete { start: 3, end: 7 };
+        let p = Preview::build(&b, &ann, &pe);
+        assert_eq!(p.text, b.text); // unchanged — bases stay visible
+        assert_eq!(p.deleted, Some((3, 7)));
+        assert_eq!(p.added, None);
+    }
+
+    /// The memo rebuilds only when the fingerprint (version + pending) changes,
+    /// never per frame: a tampered cached preview survives a same-fingerprint
+    /// refresh and is discarded once the pending edit changes.
+    #[test]
+    fn refresh_preview_is_memoized_on_fingerprint() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let mut view = SequenceView {
+            pending: Some(PendingEdit::Insert {
+                pos: 0,
+                staged: "G".into(),
+            }),
+            ..Default::default()
+        };
+        view.refresh_preview(&b, &ann);
+        // Tamper the cache; a same-fingerprint refresh must NOT rebuild it.
+        view.preview.as_mut().unwrap().text = b"SENTINEL".to_vec();
+        view.refresh_preview(&b, &ann);
+        assert_eq!(view.preview.as_ref().unwrap().text, b"SENTINEL");
+        // Changing the pending edit changes the fingerprint → rebuild.
+        view.pending = Some(PendingEdit::Insert {
+            pos: 0,
+            staged: "GG".into(),
+        });
+        view.refresh_preview(&b, &ann);
+        assert_eq!(view.preview.as_ref().unwrap().text, b"GGAAAAAAAAAA");
+        // Clearing pending drops the preview.
+        view.pending = None;
+        view.refresh_preview(&b, &ann);
+        assert!(view.preview.is_none());
     }
 }
