@@ -1,11 +1,11 @@
 //! File / document commands: Open, Close, recents, CLI install.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui_file_dialog::FileDialog;
 use seqforge_core::{BioOps, DispatchError, ViewId, ViewerResponse};
 
-use super::{active_selection, emit_selection_diff, layout, snapshot_focus_for_overlay};
+use super::{active_selection, edit, emit_selection_diff, layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
 use crate::cli_install;
 use crate::event::AppEvent;
@@ -154,6 +154,66 @@ pub(super) fn apply_close_view(
     }
     emit_selection_diff(state, sel_before);
     Ok(Some(ViewerResponse::Ok))
+}
+
+// ── Editor save (Phase 12e) ────────────────────────────────────────────────--
+
+/// Write `vid`'s buffer + annotations to `path` via `seqforge-bio::save`,
+/// clear `dirty` on success, and toast either way. The synchronous core shared
+/// by `edit::apply_save` (path known) and the Save-As dialog follow-up.
+pub(super) fn save_buffer(
+    state: &mut AppState,
+    vid: ViewId,
+    path: &Path,
+) -> Result<(), DispatchError> {
+    let result = state.workspace.with_buffer_mut(vid, |_, buf, ann| {
+        let r = seqforge_bio::save(buf, ann, path);
+        if r.is_ok() {
+            buf.dirty = false;
+        }
+        r
+    })?;
+    match result {
+        Ok(()) => {
+            state.toasts.success(format!("Saved {}", path.display()));
+            Ok(())
+        }
+        Err(e) => {
+            state.toasts.error(format!("Save failed: {e}"));
+            Err(DispatchError::BioError(e.to_string()))
+        }
+    }
+}
+
+/// Handle `AppCommand::SaveDocument`: resolve the view and save to `path`.
+pub(super) fn apply_save_document(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    path: PathBuf,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = edit::resolve_target(state, view)?;
+    save_buffer(state, vid, &path)?;
+    Ok(Some(ViewerResponse::Ok))
+}
+
+/// Handle `AppCommand::OpenSaveAs`: open the file dialog in save mode, tagging
+/// `pending_save_as` so the pick handler routes to `SaveDocument` (not Open).
+pub(super) fn apply_open_save_as(
+    state: &mut AppState,
+    view: Option<ViewId>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = edit::resolve_target(state, view)?;
+    let mut dialog = FileDialog::new();
+    dialog.save_file();
+    state.pending_save_as = Some(vid);
+    snapshot_focus_for_overlay(state);
+    if let Some(tag) = state
+        .overlays
+        .push_unique(Overlay::FileDialog(Box::new(dialog)))
+    {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+    Ok(None)
 }
 
 pub(super) fn apply_dismiss_cli_status(

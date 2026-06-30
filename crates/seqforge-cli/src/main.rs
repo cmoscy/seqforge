@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use seqforge_core::{EnzymeOp, ViewId, ViewerRequest};
+use seqforge_core::ViewerRequest;
 
 #[derive(Parser)]
 #[command(name = "seqforge", about = "SeqForge sequence tool")]
@@ -15,11 +15,18 @@ struct Cli {
 /// **File commands** (always run locally; no GUI required):
 ///   info, digest, annotate
 ///
-/// **Viewer commands** (require a running SeqForge instance; use SEQFORGE_SOCKET):
-///   open, close, goto, find, enzymes
+/// **Viewer / editor commands** (require a running SeqForge instance via
+/// `SEQFORGE_SOCKET`): open, close, goto, find, enzymes, and all v0.2 editor
+/// ops (insert, delete, replace, reverse-complement / rc, cut, copy, paste,
+/// add-feature, remove-feature, rename-feature, save, save-as, undo, redo).
+///
+/// The viewer/editor surface is **flattened directly from
+/// [`ViewerRequest`]** — its `clap::Subcommand` derive is the single source of
+/// truth shared with the socket wire format (serde). Adding a `ViewerRequest`
+/// variant gives it CLI + embedded-terminal reach with no second edit here.
 #[derive(clap::Subcommand)]
 enum Cmd {
-    // ── File commands ─────────────────────────────────────────────────────────
+    // ── File commands (always run locally; no GUI required) ───────────────────
     /// Print info about a sequence file
     Info { input: PathBuf },
     /// Digest a sequence file with restriction enzymes (post-MVP)
@@ -37,47 +44,13 @@ enum Cmd {
         output: PathBuf,
     },
 
-    // ── Viewer commands (forwarded as JSON-RPC to the running GUI) ────────────
+    // ── Viewer / editor commands (forwarded as JSON-RPC to the running GUI) ───
     //
-    // View-scoped commands (goto/find/enzymes) accept `--view <ID>` for
-    // explicit targeting. Omitted, they operate on the active view.
-    // Stage 2.5d.
-    /// Open a sequence file in the viewer
-    Open { path: PathBuf },
-    /// Close the current document
-    Close,
-    /// Navigate to a sequence position (1-based)
-    #[command(name = "goto")]
-    GoTo {
-        position: usize,
-        /// Target view id (omit to operate on the active view)
-        #[arg(long)]
-        view: Option<ViewId>,
-    },
-    /// Search for a sequence pattern (IUPAC)
-    Find {
-        pattern: String,
-        #[arg(short, long, default_value = "0")]
-        mismatches: u8,
-        /// Target view id (omit to operate on the active view)
-        #[arg(long)]
-        view: Option<ViewId>,
-    },
-    /// Show restriction sites.
-    ///
-    /// `args` is a free-text query: a preset (`unique`, `unique and dual`,
-    /// `non-cutters`), `all`, `none`/`clear` (or empty) to drop sites, or a
-    /// whitespace/comma-separated list of enzyme names (e.g. `EcoRI BamHI`).
-    Enzymes {
-        /// Query tokens; joined with single spaces. Empty clears (with `set`).
-        args: Vec<String>,
-        /// set (replace, default), add, or remove against the active set.
-        #[arg(long, value_enum, default_value_t = EnzymeOp::Set)]
-        op: EnzymeOp,
-        /// Target view id (omit to operate on the active view)
-        #[arg(long)]
-        view: Option<ViewId>,
-    },
+    // Flattened from `ViewerRequest`: each variant becomes a top-level
+    // subcommand. View-scoped variants accept `--view <ID>` for explicit
+    // targeting; omitted, they operate on the active view (Stage 2.5d).
+    #[command(flatten)]
+    Viewer(ViewerRequest),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -89,24 +62,8 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("not yet implemented (post-MVP)")
         }
 
-        // ── Viewer commands (via JSON-RPC socket) ─────────────────────────────
-        Cmd::Open { path } => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Open { path }),
-        Cmd::Close => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Close),
-        Cmd::GoTo { position, view } => {
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::GoTo { position, view })
-        }
-        Cmd::Find {
-            pattern,
-            mismatches,
-            view,
-        } => seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Find {
-            pattern,
-            mismatches,
-            view,
-        }),
-        Cmd::Enzymes { args, op, view } => {
-            let query = args.join(" ");
-            seqforge_cli::dispatch_viewer_cmd(ViewerRequest::Enzymes { query, op, view })
-        }
+        // ── Viewer / editor commands (via JSON-RPC socket) ────────────────────
+        // One arm for the whole forwarded surface — no per-variant mapping.
+        Cmd::Viewer(req) => seqforge_cli::dispatch_viewer_cmd(req),
     }
 }

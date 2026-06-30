@@ -462,18 +462,53 @@ maintain (see [`../docs/architecture.md`](../docs/architecture.md)
 
 ### Phase 12 — Editor commands in dispatcher *(2 days)*
 
-**Goal:** Every editor action expressible as a `ViewerRequest`, routed identically from menu/keyboard/terminal/socket.
+**Goal:** Every editor action expressible as a `ViewerRequest`, routed identically from menu/keyboard/terminal/socket — onto the Phase 11 write path.
 
-- [ ] Add v0.2 `ViewerRequest` variants from §4.
-- [ ] `command/edit.rs` with one `apply_*` function per variant. Each calls `workspace.edit(...)` (Phase 11 helper). `Save`/`SaveAs` push `AppCommand::SaveDocument { path }` / `AppCommand::OpenSaveAs`. `Undo`/`Redo` are pure history ops. Cut/Copy/Paste use `state.clipboard`; app layer also mirrors to arboard.
-- [ ] `apply_reverse_complement` is the first **composed edit**: read the range, `bio::reverse_complement(slice)`, then `core::apply_splice`. Lives here (not `core::mutations`) because it derives bytes via `bio` — see §1 and [`../docs/architecture.md`](../docs/architecture.md) "Edit operations".
-- [ ] Route editor `ViewerRequest` variants in `command/mod.rs` `Viewer(req)` arm to `edit::*` instead of `dispatch_active`.
-- [ ] `AppCommand::SaveDocument { path }` handled in `command/file.rs`: calls `seqforge-bio::save`, clears `buf.dirty`, shows toast on success/failure.
-- [ ] `AppCommand::OpenSaveAs` handled in `command/file.rs`: pushes `Overlay::FileDialog` in save mode; on pick, pushes `AppCommand::SaveDocument { path }`.
-- [ ] Menu: `Edit → Undo/Redo/Cut/Copy/Paste/Delete`, `Edit → Reverse Complement Selection`, `File → Save/Save As…`. Enable/disable via `is_enabled` using `view.selection`, history state, `buf.dirty`.
-- [ ] CLI surface: verify `seqforge insert --pos 10 ATG` over socket against a running GUI.
+> **Pattern decision (sniff-tested against the landed code, do not deviate):**
+> editor write-ops are **`ViewerRequest` variants intercepted in the app's
+> `Viewer(req)` arm**, exactly like `Open`/`Close`. They do **not** flow through
+> `core::dispatch` (which read-locks and can't touch history). This is the only
+> pattern that preserves CLI/terminal/agent/GUI parity (decision #5) and it reuses
+> the precedent already in the tree. Rejected alternatives: editor ops as
+> `AppCommand` (kills socket/CLI parity); widening `core::dispatch` to `&mut Buffer`
+> (history/coalescing need `BufferStore`, not a single buffer).
+>
+> **Phase 11 already shipped the write path** — `workspace.edit(view, kind, range,
+> bytes)`, `workspace.undo/redo(view)` validate bounds, record the reverse delta,
+> and move the cursor. Phase 12 is **routing onto these**, not building mutation
+> machinery.
+>
+> **CLI surface = `ViewerRequest` flattened (landed in 12a).** The `seqforge-cli`
+> `Cmd` enum was hand-mirroring every viewer variant + hand-mapping it; that
+> mirror is deleted. `Cmd` now flattens `ViewerRequest` directly
+> (`#[command(flatten)] Viewer(ViewerRequest)`), making its `clap::Subcommand`
+> derive the **single source of truth** shared with the socket wire format
+> (serde) — so every editor op (and every future cloning/primer op) gets CLI +
+> embedded-terminal reach with **no second edit**. The embedded terminal is a
+> real PTY: `seqforge insert …` runs the same binary and forwards JSON-RPC over
+> `SEQFORGE_SOCKET` (there is no separate `:command` parser — `:insert` in older
+> notes == `seqforge insert`). One UX change: `enzymes` is now a single quoted
+> arg (`seqforge enzymes "EcoRI BamHI"`), since `query` is a `String` on the wire.
 
-**Done when:** All v0.2 `ViewerRequest` variants work from the `:command` terminal. Unit tests for each `apply_*` arm.
+Six refinements the surrounding code forces (each folded into a sub-step below):
+- **A** · `core::dispatch`'s match is exhaustive → new variants need `unreachable!` arms mirroring `Open`/`Close`; fix the stale "will become `&mut`" doc comment in `commands.rs`.
+- **B** · extract `resolve_target(state, req_view) -> Result<ViewId>` from `dispatch_active` (`workspace.edit` needs a concrete `ViewId`).
+- **C** · add a `ViewerResponse` edit variant (`Edited { len }`) or reuse `Ok` — decide in 12a.
+- **D** · `is_enabled`'s `Viewer(_) => true` is too coarse → break editor variants out for menu greying.
+- **E** · coalescing can't see the source at `edit.rs` → map each variant to its natural `EditKind` now; revisit source-aware coalescing in Phase 13.
+- **F** · keep the `SaveDocument` indirection — `SaveAs`'s async dialog requires it; `Save` reuses it (DRY, not premature).
+
+**Sub-ordering — commit-sized, dependency-linear. Don't start a step until the prior compiles + tests green.**
+
+- [x] **12a — types (core) + CLI flatten.** Added the v0.2 `ViewerRequest` variants from §4, each with `view: Option<ViewId>` and doc comments that read as CLI help. Added `target_view()` arms; `unreachable!` arms in `core::dispatch` (**A**); `ViewerResponse::Edited { len, changed }` (**C**); refreshed the stale `dispatch` doc comment; 6 serde round-trip tests. **Also flattened `ViewerRequest` into the CLI `Cmd` enum** (deleted the per-variant mirror + map) — see the CLI-surface note above. *Done: workspace compiles, `dispatch` exhaustive, tests + clippy green, `seqforge --help` lists all 14 editor ops with the `rc` alias.*
+- [x] **12b — content-given ops (`command/edit.rs`).** `apply_insert/delete/replace` → `workspace.edit(...)`; `apply_undo/redo` → `workspace.undo/redo`. Extracted `resolve_target` (**B**, shared with `file.rs`); mapped variants to `EditKind` (**E**: Insert→Insert, Delete→Delete, Replace/RC/Paste→Other). Added `parse_bases` (IUPAC validate + whitespace-strip, `InvalidInput` on bad base). 19 headless unit tests. *Done.*
+- [x] **12c — composed + clipboard.** `apply_reverse_complement` — first **composed edit**: `read_slice` → `seqforge_bio::reverse_complement` → `workspace.edit`. `apply_cut/copy/paste` via `state.clipboard: Option<Vec<u8>>` (new `AppState` field; copy is read-only, no history; paste is `Other` so it never coalesces with typing). **arboard OS-clipboard mirror deferred** to Phase 13 — in-memory clipboard covers terminal/CLI/test now. *Done.*
+- [x] **12d — feature ops.** `apply_add_feature/remove_feature/rename_feature` via `with_buffer_mut`; bump `buf.version`; `AddFeature` validates `start < end <= len`. **Not yet undoable** (annotation-only edits don't record history) — feature-op undo is Phase 14. *Done.*
+- [x] **12e — routing + save side-effects.** Editor variants routed in `command/mod.rs` `Viewer(req)` arm → `edit::*` (read-scoped GoTo/Find/Enzymes still fall through to `dispatch_active`). Added `AppCommand::{SaveDocument { view, path }, OpenSaveAs { view }}`. `file::save_buffer` is the synchronous core (→ `seqforge_bio::save`, clear `dirty`, toast); `apply_save` calls it directly when `source_path` is `Some` (immediate CLI feedback — **F** refined: only Save-As *needs* the dialog round-trip), else routes to Save-As. Save-As opens a save-mode `FileDialog`; new `AppState.pending_save_as: Option<ViewId>` discriminates it in the shared pick handler (`app.rs`) → enqueues `SaveDocument`. *Done: workspace builds, 160 tests + clippy + fmt green; CLI exposes save/save-as/undo/redo.* **Awaiting manual end-to-end test** (terminal walk).
+- [ ] **12f — menu + `is_enabled`.** `Edit → Undo/Redo/Cut/Copy/Paste/Delete`, `Edit → Reverse Complement Selection`, `File → Save/Save As…`. Break editor variants out of `is_enabled` (**D**): Undo/Redo→`can_undo`/`can_redo`, Save→`dirty`, Cut/Copy→range selection, Paste→clipboard non-empty. *Done: menu items grey out correctly.*
+- [ ] **12g — CLI/socket verification.** `seqforge insert 10 ATG` over the socket against a running GUI; `delete`, `rc`, `undo`, `save` from the embedded terminal (same binary, forwarded). CLI variants already exist via the 12a flatten — this step is end-to-end verification, not wiring.
+
+**Done when:** All v0.2 `ViewerRequest` variants work from the `:command` terminal and the external CLI. Unit tests for each `apply_*` arm (12b–12d).
 
 ---
 

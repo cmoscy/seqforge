@@ -92,6 +92,11 @@ pub enum DispatchError {
     Unimplemented(&'static str),
     #[error("bio operation failed: {0}")]
     BioError(String),
+    /// A command argument was malformed (e.g. a non-IUPAC base, an empty
+    /// paste, a feature index past the end). Distinct from `OutOfRange`
+    /// (sequence-position bounds) and `BioError` (a bio op that ran but failed).
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // ── Typed request/response schema ─────────────────────────────────────────────
@@ -167,6 +172,135 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+
+    // ── Editor write-ops (v0.2) ────────────────────────────────────────────
+    //
+    // These are **workspace/write-scoped**, like `Open`/`Close`: they are
+    // intercepted in the app's `command::apply` `Viewer(req)` arm and routed to
+    // `command/edit.rs` → `workspace.edit/undo/redo` (the Phase 11 write path).
+    // They never flow through `core::dispatch` (read-lock only); `dispatch`
+    // `unreachable!`s on them. Every variant carries an optional `view` so an
+    // agent can target a specific buffer; GUI / CLI default to the active view.
+    /// Insert bases at a position (0-based).
+    Insert {
+        pos: usize,
+        bases: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Delete the bases in the half-open range `[start, end)`.
+    Delete {
+        start: usize,
+        end: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Replace the bases in `[start, end)` with new bases.
+    Replace {
+        start: usize,
+        end: usize,
+        bases: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Reverse-complement the bases in `[start, end)` in place.
+    #[command(visible_alias = "rc")]
+    ReverseComplement {
+        start: usize,
+        end: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Cut (copy then delete) the bases in `[start, end)`.
+    Cut {
+        start: usize,
+        end: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Copy the bases in `[start, end)` to the clipboard.
+    Copy {
+        start: usize,
+        end: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Paste the clipboard contents at a position (0-based).
+    Paste {
+        pos: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Add a feature over the half-open range `[start, end)`.
+    AddFeature {
+        start: usize,
+        end: usize,
+        /// GenBank feature-type string (e.g. `CDS`, `misc_feature`).
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        label: String,
+        /// `+`, `-`, or `.` (unstranded).
+        #[arg(long, default_value = "+")]
+        #[serde(default = "default_strand")]
+        strand: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Remove the feature at `index` in the annotation list.
+    RemoveFeature {
+        index: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Rename the feature at `index`.
+    RenameFeature {
+        index: usize,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Save the active buffer to its source path.
+    Save {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Save the active buffer to a new path.
+    SaveAs {
+        path: PathBuf,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Undo the last edit on the active buffer.
+    Undo {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Redo the last undone edit on the active buffer.
+    Redo {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+}
+
+/// Serde default for `AddFeature.strand` (clap supplies it via `default_value`).
+fn default_strand() -> String {
+    "+".to_string()
 }
 
 impl ViewerRequest {
@@ -178,6 +312,20 @@ impl ViewerRequest {
             ViewerRequest::GoTo { view, .. } => *view,
             ViewerRequest::Find { view, .. } => *view,
             ViewerRequest::Enzymes { view, .. } => *view,
+            ViewerRequest::Insert { view, .. } => *view,
+            ViewerRequest::Delete { view, .. } => *view,
+            ViewerRequest::Replace { view, .. } => *view,
+            ViewerRequest::ReverseComplement { view, .. } => *view,
+            ViewerRequest::Cut { view, .. } => *view,
+            ViewerRequest::Copy { view, .. } => *view,
+            ViewerRequest::Paste { view, .. } => *view,
+            ViewerRequest::AddFeature { view, .. } => *view,
+            ViewerRequest::RemoveFeature { view, .. } => *view,
+            ViewerRequest::RenameFeature { view, .. } => *view,
+            ViewerRequest::Save { view, .. } => *view,
+            ViewerRequest::SaveAs { view, .. } => *view,
+            ViewerRequest::Undo { view, .. } => *view,
+            ViewerRequest::Redo { view, .. } => *view,
             ViewerRequest::Open { .. } | ViewerRequest::Close => None,
         }
     }
@@ -196,6 +344,11 @@ pub enum ViewerResponse {
     SearchResults { count: usize, hits: Vec<SearchHit> },
     /// Enzymes — all cut sites found (empty when the enzyme list was cleared).
     CutSites { count: usize, sites: Vec<CutSite> },
+    /// An editor write-op (insert/delete/replace/RC/cut/paste/undo/redo/feature)
+    /// succeeded; `len` is the buffer length after the edit. `changed` is false
+    /// for a no-op Undo/Redo (empty history) so callers can report "nothing to
+    /// undo" without it being an error.
+    Edited { len: usize, changed: bool },
 }
 
 // ── BioOps trait ─────────────────────────────────────────────────────────────
@@ -250,14 +403,19 @@ fn difference_names(base: &[String], remove: &[String]) -> Vec<String> {
 /// Dispatch a **view-scoped** `ViewerRequest` against a mutable [`View`],
 /// a read-only [`Buffer`], and mutable [`Annotations`].
 ///
-/// `Open` and `Close` are **workspace-scoped** — they create or destroy
-/// views/buffers — and are handled by the caller before invoking
-/// `dispatch`. Calling this with `Open` / `Close` panics with a clear
-/// message; that path is unreachable when called from `command::apply`.
+/// `Open`/`Close` and the **editor write-ops** (`Insert`, `Delete`,
+/// `Replace`, `ReverseComplement`, `Cut`, `Copy`, `Paste`, `AddFeature`,
+/// `RemoveFeature`, `RenameFeature`, `Save`, `SaveAs`, `Undo`, `Redo`) are
+/// **workspace/write-scoped** — they allocate/free views or mutate the buffer
+/// through history — and are handled by the caller (`command::apply`'s
+/// `Viewer(req)` arm → `command/edit.rs` → `workspace.edit/undo/redo`) before
+/// invoking `dispatch`. Calling `dispatch` with any of them panics with a
+/// clear message; that path is unreachable from `command::apply`.
 ///
-/// Buffer is `&Buffer` (read-only) because nothing in MVP scope mutates
-/// the underlying sequence here; Tier 3d (transactional edits) will
-/// switch this signature to `&mut Buffer` once the rope and history land.
+/// Buffer stays `&Buffer` (read-only): the read-scoped requests handled here
+/// (`GoTo`/`Find`/`Enzymes`) never mutate the sequence. Editor mutation does
+/// not widen this signature — it lives on the Phase 11 `workspace.edit` path
+/// (which owns the `BufferStore` history), not here.
 pub fn dispatch<B: BioOps>(
     view: &mut View,
     buffer: &Buffer,
@@ -270,6 +428,31 @@ pub fn dispatch<B: BioOps>(
             unreachable!(
                 "Open/Close are workspace-scoped; the caller must handle them \
                  before invoking dispatch (see command::apply)"
+            )
+        }
+
+        // Editor write-ops are intercepted in `command::apply`'s `Viewer(req)`
+        // arm and routed to `command/edit.rs` (the Phase 11 write path); they
+        // never reach `core::dispatch`. Listed explicitly so adding a future
+        // write-op forces a compile error here rather than silently falling
+        // through.
+        ViewerRequest::Insert { .. }
+        | ViewerRequest::Delete { .. }
+        | ViewerRequest::Replace { .. }
+        | ViewerRequest::ReverseComplement { .. }
+        | ViewerRequest::Cut { .. }
+        | ViewerRequest::Copy { .. }
+        | ViewerRequest::Paste { .. }
+        | ViewerRequest::AddFeature { .. }
+        | ViewerRequest::RemoveFeature { .. }
+        | ViewerRequest::RenameFeature { .. }
+        | ViewerRequest::Save { .. }
+        | ViewerRequest::SaveAs { .. }
+        | ViewerRequest::Undo { .. }
+        | ViewerRequest::Redo { .. } => {
+            unreachable!(
+                "editor write-ops are workspace-scoped; the caller routes them \
+                 to command/edit.rs before invoking dispatch (see command::apply)"
             )
         }
 
@@ -558,6 +741,102 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, ViewerRequest::Enzymes { ref query, .. } if query == "EcoRI BamHI"));
+    }
+
+    // ── Editor write-op serde round-trips (v0.2) ──────────────────────────────
+
+    #[test]
+    fn viewer_request_serde_round_trip_insert() {
+        let req = ViewerRequest::Insert {
+            pos: 10,
+            bases: "ATG".into(),
+            view: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"method":"insert","pos":10,"bases":"ATG"}"#);
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(back, ViewerRequest::Insert { pos: 10, ref bases, view: None } if bases == "ATG")
+        );
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_delete() {
+        let req = ViewerRequest::Delete {
+            start: 5,
+            end: 9,
+            view: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"method":"delete","start":5,"end":9}"#);
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::Delete {
+                start: 5,
+                end: 9,
+                view: None
+            }
+        ));
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_reverse_complement() {
+        let req = ViewerRequest::ReverseComplement {
+            start: 0,
+            end: 4,
+            view: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        // snake_case method tag derived from the variant name.
+        assert_eq!(json, r#"{"method":"reverse_complement","start":0,"end":4}"#);
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::ReverseComplement {
+                start: 0,
+                end: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn viewer_request_serde_add_feature_strand_defaults() {
+        // strand omitted on the wire → defaults to "+".
+        let json = r#"{"method":"add_feature","start":0,"end":9,"kind":"CDS","label":"gene"}"#;
+        let req: ViewerRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            req,
+            ViewerRequest::AddFeature { ref kind, ref label, ref strand, .. }
+            if kind == "CDS" && label == "gene" && strand == "+"
+        ));
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_undo_save() {
+        for (req, tag) in [
+            (ViewerRequest::Undo { view: None }, "undo"),
+            (ViewerRequest::Save { view: None }, "save"),
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert_eq!(json, format!(r#"{{"method":"{tag}"}}"#));
+            let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.target_view(), None);
+        }
+    }
+
+    #[test]
+    fn viewer_request_editor_view_target_round_trips() {
+        let req = ViewerRequest::Insert {
+            pos: 3,
+            bases: "C".into(),
+            view: Some(crate::ViewId(7)),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"view\":7"));
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.target_view(), Some(crate::ViewId(7)));
     }
 
     #[test]

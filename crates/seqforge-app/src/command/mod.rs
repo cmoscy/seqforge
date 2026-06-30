@@ -31,6 +31,7 @@ use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
 
+mod edit;
 mod file;
 mod layout;
 mod nav;
@@ -119,6 +120,19 @@ pub enum AppCommand {
     // ── Tools ────────────────────────────────────────────────────────
     InstallCli,
 
+    // ── Editor save side-effects ─────────────────────────────────────
+    /// Write a buffer to disk (IO). Emitted by `edit::apply_save` (path
+    /// known) and by the Save-As dialog on pick. Clears `dirty` + toasts.
+    SaveDocument {
+        view: Option<ViewId>,
+        path: PathBuf,
+    },
+    /// Open the Save-As file dialog for `view` (GUI-only). On pick, enqueues
+    /// `SaveDocument`.
+    OpenSaveAs {
+        view: Option<ViewId>,
+    },
+
     // ── Config ───────────────────────────────────────────────────────
     /// Re-read settings / theme / keybindings from disk.
     ReloadConfig,
@@ -154,6 +168,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         Viewer(_) => true,
         SetSelection(_) | SelectFeature(_) => true,
         RevealRange { .. } => state.workspace.active_view().is_some(),
+        // Fine-grained editor greying (Undo↔can_undo, Save↔dirty, …) lands in
+        // Phase 12f; for now the save side-effects just need an active view.
+        SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli | ReloadConfig
         | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile | OpenConfigDir => true,
@@ -337,6 +354,10 @@ pub fn apply<B: BioOps>(
         // ── Tools ───────────────────────────────────────────────────
         InstallCli => file::apply_install_cli(state),
 
+        // ── Editor save side-effects ────────────────────────────────
+        SaveDocument { view, path } => file::apply_save_document(state, view, path),
+        OpenSaveAs { view } => file::apply_open_save_as(state, view),
+
         // ── Config ──────────────────────────────────────────────────
         ReloadConfig => {
             let epoch = state.config.epoch;
@@ -392,6 +413,51 @@ pub fn apply<B: BioOps>(
         Viewer(req) => match req {
             ViewerRequest::Open { path } => file::apply_open_file(state, bio, path),
             ViewerRequest::Close => file::apply_close_doc(state),
+
+            // ── Editor write-ops → command/edit.rs (Phase 11 write path) ──
+            // Intercepted here, never reaching `dispatch_active`/`core::dispatch`
+            // (which read-lock); see commands.rs `dispatch` doc + editor.md §4.
+            ViewerRequest::Insert { pos, bases, view } => {
+                edit::apply_insert(state, view, pos, bases)
+            }
+            ViewerRequest::Delete { start, end, view } => {
+                edit::apply_delete(state, view, start, end)
+            }
+            ViewerRequest::Replace {
+                start,
+                end,
+                bases,
+                view,
+            } => edit::apply_replace(state, view, start, end, bases),
+            ViewerRequest::ReverseComplement { start, end, view } => {
+                edit::apply_reverse_complement(state, view, start, end)
+            }
+            ViewerRequest::Cut { start, end, view } => edit::apply_cut(state, view, start, end),
+            ViewerRequest::Copy { start, end, view } => edit::apply_copy(state, view, start, end),
+            ViewerRequest::Paste { pos, view } => edit::apply_paste(state, view, pos),
+            ViewerRequest::AddFeature {
+                start,
+                end,
+                kind,
+                label,
+                strand,
+                view,
+            } => edit::apply_add_feature(state, view, start, end, kind, label, strand),
+            ViewerRequest::RemoveFeature { index, view } => {
+                edit::apply_remove_feature(state, view, index)
+            }
+            ViewerRequest::RenameFeature { index, label, view } => {
+                edit::apply_rename_feature(state, view, index, label)
+            }
+            ViewerRequest::Save { view } => edit::apply_save(state, view),
+            ViewerRequest::SaveAs { path, view } => {
+                // `SaveAs` with an explicit path is a direct write; no dialog.
+                file::apply_save_document(state, view, path)
+            }
+            ViewerRequest::Undo { view } => edit::apply_undo(state, view),
+            ViewerRequest::Redo { view } => edit::apply_redo(state, view),
+
+            // ── Read-scoped (GoTo/Find/Enzymes) → core::dispatch ──
             other => {
                 let sel_before = active_selection(state);
                 let resp = dispatch_active(state, bio, other)?;

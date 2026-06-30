@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
-use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewerRequest, ViewerResponse};
+use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewId, ViewerRequest, ViewerResponse};
 
 use std::sync::Arc;
 
@@ -121,6 +121,14 @@ pub struct AppState {
     /// the `ReloadConfig` command. Wrapped in `Arc` so widgets cheaply
     /// clone a per-frame reference.
     pub config: Arc<Config>,
+    /// In-memory clipboard for Cut/Copy/Paste (editor v0.2). Headless- and
+    /// test-safe fallback holding the most recently cut/copied sequence bytes;
+    /// GUI clipboard interop (arboard) is layered on separately.
+    pub(crate) clipboard: Option<Vec<u8>>,
+    /// Set while a Save-As file dialog is open, naming the view to write on
+    /// pick. Discriminates the save-mode dialog from an open-mode one in the
+    /// shared file-dialog pick handler. Cleared on pick or cancel.
+    pub(crate) pending_save_as: Option<ViewId>,
 }
 
 impl Default for AppState {
@@ -151,6 +159,8 @@ impl Default for AppState {
             minimap: MiniMap::default(),
             pending_file_state: std::collections::HashMap::new(),
             config: Arc::new(Config::default()),
+            clipboard: None,
+            pending_save_as: None,
         }
     }
 }
@@ -370,26 +380,35 @@ impl eframe::App for SeqForgeApp {
             dialog.update(ctx);
             if let Some(picked) = dialog.picked() {
                 let path = picked.to_owned();
-                dialog_followup = Some(AppCommand::OpenFile(path));
+                // A Save-As dialog (pending_save_as set) routes to SaveDocument;
+                // an ordinary open dialog routes to OpenFile.
+                dialog_followup = Some(match self.state.pending_save_as.take() {
+                    Some(view) => AppCommand::SaveDocument {
+                        view: Some(view),
+                        path,
+                    },
+                    None => AppCommand::OpenFile(path),
+                });
             } else if matches!(
                 dialog.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
             ) {
+                self.state.pending_save_as = None;
                 dialog_followup = Some(AppCommand::DismissOverlay);
             }
         }
         if let Some(cmd) = dialog_followup {
-            // OpenFile carries its own seq_view reset; DismissOverlay
-            // pops the FileDialog from the stack. Both go through the
-            // single applier.
-            if matches!(cmd, AppCommand::OpenFile(_)) {
+            // OpenFile/SaveDocument were accepted from the dialog — pop the
+            // FileDialog now and discard the saved focus snapshot (OpenFile
+            // moves focus to the new view; for a save we just return to the
+            // active pane). DismissOverlay pops the dialog itself via apply.
+            if matches!(
+                cmd,
+                AppCommand::OpenFile(_) | AppCommand::SaveDocument { .. }
+            ) {
                 self.state
                     .overlays
                     .pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
-                // Dialog was accepted — discard the saved focus
-                // snapshot. The `OpenFile` apply will move focus to
-                // the newly-opened view; restoring the pre-dialog
-                // pane afterward would undo that.
                 self.state.focus_before_overlay = None;
             }
             enqueue(&mut self.state, cmd);
