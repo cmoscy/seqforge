@@ -1,8 +1,190 @@
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, text::LayoutJob};
-use seqforge_core::{Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View};
+use std::time::Duration;
+
+use egui::{
+    Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2, text::LayoutJob,
+};
+use seqforge_core::{
+    Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View, ViewerRequest,
+};
 
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::{Config, LabelOverflow};
+
+/// Cursor blink half-period (ms): the cursor toggles visible/hidden each
+/// interval while the viewer has focus.
+const BLINK_MS: u64 = 500;
+
+/// IUPAC nucleotide alphabet (DNA + ambiguity codes). Typed characters outside
+/// it are silently dropped (plan §6) so junk keystrokes never reach the edit
+/// layer; `edit::parse_bases` re-validates defensively for CLI/agent input.
+const IUPAC: &[u8] = b"ACGTURYSWKMBDHVN";
+
+/// Keep only IUPAC codes from typed text, upper-cased; drop everything else.
+fn iupac_filter(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| {
+            let u = c.to_ascii_uppercase();
+            (u.is_ascii() && IUPAC.contains(&(u as u8))).then_some(u)
+        })
+        .collect()
+}
+
+/// Translate keyboard input on the focused viewer into editor `ViewerRequest`s.
+/// Pure lowering — pushes commands through the single path; never mutates the
+/// buffer or `view.selection` directly. Edits target this view explicitly so a
+/// focused-but-not-active split pane still edits the right buffer.
+fn handle_keyboard(ui: &egui::Ui, view: &View, seq_len: usize, cmds: &mut Vec<PendingCommand>) {
+    let vid = view.id;
+    let sel = view.selection;
+    let range = sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
+    let cursor_pos = match sel {
+        Some(s) if s.is_cursor() => Some(s.focus),
+        _ => None,
+    };
+
+    let push = |cmds: &mut Vec<PendingCommand>, req: ViewerRequest| {
+        cmds.push((AppCommand::Viewer(req), None));
+    };
+
+    // ── Edit / save shortcuts ── consume so egui's own defaults don't also act.
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    if ui.input_mut(|i| i.consume_key(cmd, Key::Z)) {
+        push(cmds, ViewerRequest::Undo { view: Some(vid) });
+    }
+    if ui.input_mut(|i| i.consume_key(cmd_shift, Key::Z))
+        || ui.input_mut(|i| i.consume_key(cmd, Key::Y))
+    {
+        push(cmds, ViewerRequest::Redo { view: Some(vid) });
+    }
+    if let Some((start, end)) = range {
+        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
+            push(
+                cmds,
+                ViewerRequest::Cut {
+                    start,
+                    end,
+                    view: Some(vid),
+                },
+            );
+        }
+        if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
+            push(
+                cmds,
+                ViewerRequest::Copy {
+                    start,
+                    end,
+                    view: Some(vid),
+                },
+            );
+        }
+    }
+    if ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
+        if let Some(pos) = cursor_pos.or(range.map(|(s, _)| s)) {
+            push(
+                cmds,
+                ViewerRequest::Paste {
+                    pos,
+                    view: Some(vid),
+                },
+            );
+        }
+    }
+    if ui.input_mut(|i| i.consume_key(cmd, Key::S)) {
+        push(cmds, ViewerRequest::Save { view: Some(vid) });
+    }
+    if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
+        cmds.push((AppCommand::OpenSaveAs { view: Some(vid) }, None));
+    }
+
+    // ── Backspace / Delete + typed bases (from this frame's events) ──
+    let cmd_held = ui.input(|i| i.modifiers.command);
+    let events = ui.input(|i| i.events.clone());
+    let mut typed = String::new();
+    for ev in &events {
+        match ev {
+            egui::Event::Text(t) if !cmd_held => typed.push_str(t),
+            egui::Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.command => {
+                if let Some((start, end)) = range {
+                    push(
+                        cmds,
+                        ViewerRequest::Delete {
+                            start,
+                            end,
+                            view: Some(vid),
+                        },
+                    );
+                } else if let Some(p) = cursor_pos.filter(|&p| p > 0) {
+                    push(
+                        cmds,
+                        ViewerRequest::Delete {
+                            start: p - 1,
+                            end: p,
+                            view: Some(vid),
+                        },
+                    );
+                }
+            }
+            egui::Event::Key {
+                key: Key::Delete,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.command => {
+                if let Some((start, end)) = range {
+                    push(
+                        cmds,
+                        ViewerRequest::Delete {
+                            start,
+                            end,
+                            view: Some(vid),
+                        },
+                    );
+                } else if let Some(p) = cursor_pos.filter(|&p| p < seq_len) {
+                    push(
+                        cmds,
+                        ViewerRequest::Delete {
+                            start: p,
+                            end: p + 1,
+                            view: Some(vid),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Typed bases: replace a range selection, else insert at the cursor.
+    let bases = iupac_filter(&typed);
+    if !bases.is_empty() {
+        if let Some((start, end)) = range {
+            push(
+                cmds,
+                ViewerRequest::Replace {
+                    start,
+                    end,
+                    bases,
+                    view: Some(vid),
+                },
+            );
+        } else if let Some(pos) = cursor_pos {
+            push(
+                cmds,
+                ViewerRequest::Insert {
+                    pos,
+                    bases,
+                    view: Some(vid),
+                },
+            );
+        }
+    }
+}
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
 
@@ -479,6 +661,24 @@ impl SequenceView {
                 // A zero-length drag stays as a cursor; non-zero stays as a range.
             }
 
+            // ── Keyboard input (Phase 13) ─────────────────────────────────
+            // The viewer is always-editable: clicking focuses it; while focused,
+            // typed IUPAC bases and edit shortcuts lower to the same
+            // `ViewerRequest`s the menu/CLI use (never mutating state here).
+            if response.clicked() {
+                response.request_focus();
+            }
+            let has_focus = response.has_focus();
+            if has_focus {
+                handle_keyboard(ui, view, seq_len, cmds);
+                // Drive the cursor blink while focused.
+                ui.ctx()
+                    .request_repaint_after(Duration::from_millis(BLINK_MS));
+            }
+            // Cursor is solid when unfocused, blinks (~2 Hz) when focused.
+            let blink_on =
+                !has_focus || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
+
             // ── Pass 2: render all visible blocks ─────────────────────────
 
             for block_idx in 0..n_blocks {
@@ -543,7 +743,7 @@ impl SequenceView {
                     if sel.is_cursor() {
                         // Thin vertical line between bases spanning both strands.
                         let pos = sel.anchor;
-                        if pos >= block_start && pos <= block_end {
+                        if blink_on && pos >= block_start && pos <= block_end {
                             let cx = seq_x0 + (pos - block_start) as f32 * char_width;
                             painter.rect_filled(
                                 Rect::from_min_size(
@@ -970,4 +1170,24 @@ fn paint_feature_label(
         font.clone(),
         color,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iupac_filter;
+
+    #[test]
+    fn iupac_filter_uppercases_and_keeps_valid() {
+        assert_eq!(iupac_filter("atgc"), "ATGC");
+        assert_eq!(iupac_filter("ACGTN"), "ACGTN");
+        // ambiguity codes are valid
+        assert_eq!(iupac_filter("ryswkm"), "RYSWKM");
+    }
+
+    #[test]
+    fn iupac_filter_drops_junk_silently() {
+        // digits, punctuation, and non-IUPAC letters (e.g. Z, J) are dropped
+        assert_eq!(iupac_filter("A1T-G zJ C"), "ATGC");
+        assert_eq!(iupac_filter("123"), "");
+    }
 }

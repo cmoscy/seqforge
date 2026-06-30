@@ -1,6 +1,6 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: Stage 2.6 + Phases 10–12 done** (Phase 13 next). Canonical cross-track
+> **Status: Stage 2.6 + Phases 10–13 done** (Phase 14 next). Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a
 > single **`Splice` forward primitive** (§1) reached through the **one execution path**
 > (GUI keystroke / terminal / agent all lower to it, §4), with **delta-based undo**
@@ -516,12 +516,12 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 
 **Goal:** Type into the sequence; always-editable (no modal edit mode).
 
-- [ ] `SequenceView::show` calls `response.request_focus()` on click.
-- [ ] When `response.has_focus()`, consume `ui.input(|i| i.events.iter()...)` for `Event::Text` (filter IUPAC), `Event::Key { Backspace | Delete }`, and modifier shortcuts from §6.
-- [ ] Each consumed event pushes a `ViewerRequest` into `pending_commands` (via the existing `AppCommand::Viewer(req)` path).
-- [ ] Cursor blink: toggle a `cursor_visible: bool` in `SequenceView` via `ctx.request_repaint_after(Duration::from_millis(500))` when `has_focus()`.
+- [x] `SequenceView::show` calls `response.request_focus()` on click.
+- [x] When `response.has_focus()`, `handle_keyboard` reads this frame's events: `Event::Text` (→ `iupac_filter`, junk silently dropped), `Event::Key { Backspace | Delete }`, and modifier shortcuts from §6 (⌘Z/⇧⌘Z/⌘Y, ⌘X/C/V, ⌘S/⇧⌘S) via `consume_key` so egui defaults don't double-fire.
+- [x] Each event pushes a `ViewerRequest` (or `OpenSaveAs`) into `pending_commands`, **targeting `view.id` explicitly** so a focused-but-not-active split pane edits the right buffer. Range selection: typing → `Replace`, Backspace/Delete → `Delete`. Cursor: typing → `Insert`, Backspace/Delete → ±1.
+- [x] Cursor blink: `blink_on` derived from `input.time` at `BLINK_MS` (500 ms); `request_repaint_after` while focused; cursor solid when unfocused. `iupac_filter` unit-tested.
 
-**Done when:** Typing `ATGC` inserts at cursor; Backspace deletes; `Cmd+Z` undoes; modifier shortcuts work; clicking the terminal stops viewer from absorbing keys.
+**Done when:** ✅ (code) Typing `ATGC` inserts at cursor; Backspace deletes; `Cmd+Z` undoes; modifier shortcuts work; clicking the terminal stops viewer from absorbing keys. **Awaiting manual GUI verification** (keyboard wiring can't be unit-tested headlessly).
 
 ---
 
