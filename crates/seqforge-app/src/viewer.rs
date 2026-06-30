@@ -470,6 +470,10 @@ impl SequenceView {
     /// Selection / feature highlight mutations go through
     /// `AppCommand::SetSelection` / `SelectFeature` (pushed to `cmds`)
     /// so the single-applier invariant from the focus refactor holds.
+    // Render entry point: takes the egui ui plus the view/buffer/annotation
+    // handles the caller already holds locked, the command sink, config, and
+    // focus. Bundling them into a struct would just move the plumbing around.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -478,6 +482,11 @@ impl SequenceView {
         annotations: &Annotations,
         cmds: &mut Vec<PendingCommand>,
         cfg: &Config,
+        // App-level focus for this pane (`FocusScope::View` and no overlay open),
+        // computed by the caller. Gates keyboard editing the same way the
+        // terminal gates on `FocusScope::Terminal` — egui widget-focus on the
+        // custom painter doesn't persist reliably across frames.
+        focused: bool,
     ) {
         let seq = &buffer.text;
         let seq_len = seq.len();
@@ -755,30 +764,29 @@ impl SequenceView {
             }
 
             // ── In-canvas editing (Phase 13, staged §6) ───────────────────
-            // Clicking focuses the canvas and cancels any in-progress staging
-            // (a click moves the cursor, so the old staged edit no longer
-            // applies). While focused, `handle_keyboard` drives the staged
-            // `PendingEdit`; nothing reaches the buffer until it commits on
-            // Enter. Menus / CLI / agent post directly — staging is in-canvas
-            // only (ROADMAP decision 10).
+            // Focus is the app-level pane focus (`focused`, passed in) — the
+            // same signal the terminal uses — not egui widget-focus, which
+            // doesn't persist across frames on a custom painter. Clicking moves
+            // the cursor, so it cancels any in-progress staging. While focused,
+            // `handle_keyboard` drives the staged `PendingEdit`; nothing reaches
+            // the buffer until it commits on Enter. Menus / CLI / agent post
+            // directly — staging is in-canvas only (ROADMAP decision 10).
             if response.clicked() {
-                response.request_focus();
                 self.pending = None;
             }
-            let has_focus = response.has_focus();
-            if has_focus {
+            if focused {
                 handle_keyboard(&mut self.pending, ui, view, seq_len, cmds);
                 // Drive the cursor blink while focused.
                 ui.ctx()
                     .request_repaint_after(Duration::from_millis(BLINK_MS));
             } else {
-                // Losing focus abandons an uncommitted staged edit.
+                // Losing pane focus abandons an uncommitted staged edit.
                 self.pending = None;
             }
             let pending = self.pending.clone();
             // Cursor is solid when unfocused, blinks (~2 Hz) when focused.
             let blink_on =
-                !has_focus || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
+                !focused || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
 
             // ── Pass 2: render all visible blocks ─────────────────────────
 

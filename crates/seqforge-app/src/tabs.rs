@@ -174,6 +174,12 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                         self.pending_commands.push((cmd, None));
                     }
                 }
+                // App-level focus for this pane — gates in-canvas editing, the
+                // same way the terminal gates on `FocusScope::Terminal`. No
+                // staging while an overlay (Find/GoTo bar) owns the keyboard.
+                // Computed before the `self` destructure below borrows it.
+                let view_focused =
+                    self.focus.scope == FocusScope::View(view_id) && self.overlays.is_empty();
                 let TabViewer {
                     workspace,
                     pending_commands,
@@ -190,7 +196,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
                     match view.kind {
                         seqforge_core::ViewKind::TextView => {
-                            seq_view.show(ui, view, buf, ann, pending_commands, &cfg);
+                            seq_view.show(ui, view, buf, ann, pending_commands, &cfg, view_focused);
                         }
                     }
                 });
