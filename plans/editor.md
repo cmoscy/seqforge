@@ -1,8 +1,10 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: Stage 2.6 + Phases 10–12 done; Phase 13 (staged editing) in progress** — live-typing
-> spike landed (13.0, commit `2ce3c9a`), refactoring to the staged `PendingEdit` model (§6,
-> ROADMAP decision 10). Canonical cross-track
+> **Status: Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview).
+> Phase 14 (feature-editing UI) next.** Staged `PendingEdit` editing landed (§6,
+> ROADMAP decision 10): in-canvas typing/Backspace/⌘X/⌘V and menu Cut/Paste/Delete
+> all stage a realized diff preview, committing one `ViewerRequest` on `Enter`;
+> CLI/terminal/agent post immediately. Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a
 > single **`Splice` forward primitive** (§1) reached through the **one execution path**
 > (GUI keystroke / terminal / agent all lower to it, §4), with **delta-based undo**
@@ -611,7 +613,19 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 > selection that armed the `Replace` already showed what's being replaced, and
 > the footer names the size change (`Replace 4→6 bp`).
 
-**Done when:** Staging a long insert reflows and wraps like real sequence; deletions show struck-through-red in place; the summary line names the op; commit on `Enter` produces exactly the previewed result; no per-frame virtual-buffer rebuild.
+> **Decision — Reverse Complement stays immediate (not staged), for now.** RC is
+> a length-preserving *transform in place*, not an add/remove: nothing reflows,
+> no frame shift (the main reason staging exists), and it's **non-destructive**
+> (its own inverse — a mistaken RC is undone by re-RC, not just undo). It's also
+> menu/CLI-only today (no canvas keystroke). A faithful preview would need a
+> **new "modified-in-place" diff channel** (a neutral wash distinct from
+> green-add / red-delete) — reusing green-add would just wash the whole selection
+> uninformatively. So RC is left immediate; if menu-consistency is later wanted,
+> add that "changed" wash first and stage RC onto it (sketch: "13.6e", ~13.6c
+> in size). Logic is trivial (RC is a `Replace` via `apply_splice`); the gate is
+> purely the missing UX channel + weak staging rationale.
+
+**Done when:** ✅ (13.6a–d landed) Staging a long insert reflows and wraps like real sequence; deletions/cuts show struck-through-red in place; pastes wash green and reflow; the summary line names the op; menu Cut/Paste/Delete stage like the keyboard; commit on `Enter` produces exactly the previewed result; no per-frame virtual-buffer rebuild.
 
 ---
 
