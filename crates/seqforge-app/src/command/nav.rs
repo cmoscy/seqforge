@@ -169,6 +169,14 @@ pub(super) fn apply_set_selection(
     let before = active_selection(state);
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = new_sel;
+        // Keep the moving end (focus) on screen. Fires only when the focus is
+        // outside the last-rendered visible range — a no-op for clicks (always
+        // within view), so this just serves off-screen moves like arrow-key nav.
+        if let (Some(sel), Some((start, end))) = (new_sel, view.visible_range) {
+            if sel.focus < start || sel.focus >= end {
+                view.scroll_to = Some(sel.focus);
+            }
+        }
     }
     emit_selection_diff(state, before);
     Ok(None)

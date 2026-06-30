@@ -57,6 +57,9 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     let buf = arc.read().ok()?;
                     Some(crate::workspace::display_name(&buf))
                 });
+                // Focus cue is egui_dock's native tab styling: `Style::from_egui`
+                // colors the focused leaf's tab with `strong_text_color()` (white)
+                // and the rest with `text_color()` (grey). No hand-painting here.
                 name.unwrap_or_else(|| "Untitled".to_string()).into()
             }
         }
@@ -220,20 +223,9 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     });
                 }
 
-                // Focused-pane indicator. Paint a thin accent stroke
-                // around this pane when it owns keyboard focus, so the
-                // user can tell at a glance which split is active in
-                // multi-pane layouts. Drawn last so it sits above the
-                // viewer content.
-                if self.focus.scope == FocusScope::View(view_id) {
-                    let accent = ui.visuals().selection.stroke.color;
-                    ui.painter().rect_stroke(
-                        pane_rect.shrink(1.0),
-                        egui::CornerRadius::ZERO,
-                        egui::Stroke::new(2.0, accent),
-                        egui::StrokeKind::Inside,
-                    );
-                }
+                // No focused-pane border: focus is cued by the blinking caret
+                // (solid when unfocused, blinking when focused). The accent
+                // rectangle read as visual noise, especially in a single pane.
             }
             Tab::Terminal => match self.terminal.as_mut() {
                 Some(term) => {

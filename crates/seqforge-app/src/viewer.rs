@@ -184,24 +184,6 @@ impl Preview {
             deleted,
         }
     }
-
-    /// One-line footer summary naming the op and its size.
-    fn summary(&self) -> String {
-        let body = match &self.pending {
-            PendingEdit::Insert { staged, .. } => format!("Insert {} bp", staged.len()),
-            PendingEdit::Replace { start, end, staged } => {
-                format!("Replace {}→{} bp", end - start, staged.len())
-            }
-            PendingEdit::Delete { start, end } => format!("Delete {} bp", end - start),
-            PendingEdit::Cut { start, end } => format!("Cut {} bp", end - start),
-            // `added` holds the materialized paste span; fall back to 0.
-            PendingEdit::Paste { .. } => {
-                let n = self.added.map_or(0, |(s, e)| e - s);
-                format!("Paste {n} bp")
-            }
-        };
-        format!("{body} · ⏎ commit · esc cancel")
-    }
 }
 
 /// Fold one frame's typed bases + backspace/forward-delete counts into the
@@ -300,6 +282,13 @@ fn stage_input(
     }
 }
 
+/// Apply a signed arrow-key step to the selection focus, clamped to the valid
+/// cursor range `0..=seq_len` (the upper bound is the insert-at-end position).
+/// Pure, so the navigation math is unit-tested without egui.
+fn move_focus(base: usize, delta: isize, seq_len: usize) -> usize {
+    base.saturating_add_signed(delta).min(seq_len)
+}
+
 /// Read this frame's keyboard input on the focused viewer and drive the staged
 /// `PendingEdit`. In-canvas edits stage (commit on `Enter`, cancel on `Esc`):
 /// typing, Backspace/Delete, **⌘X (Cut)** and **⌘V (Paste)** all arm a staged
@@ -312,6 +301,7 @@ fn handle_keyboard(
     ui: &egui::Ui,
     view: &View,
     seq_len: usize,
+    line_width: usize,
     clipboard: Option<&[u8]>,
     cmds: &mut Vec<PendingCommand>,
 ) {
@@ -336,6 +326,48 @@ fn handle_keyboard(
     }
     if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         *pending = None;
+        return;
+    }
+
+    // ── Arrow-key cursor navigation ───────────────────────────────────────
+    // Left/Right move one base, Up/Down one line; Shift extends the selection
+    // (anchor fixed, focus moves), else collapse to a cursor. Consumed so the
+    // enclosing ScrollArea doesn't also scroll on them. An arrow cancels any
+    // active stage — same consistency guard as a click / focus loss.
+    let arrow = [
+        (Key::ArrowLeft, -1isize),
+        (Key::ArrowRight, 1),
+        (Key::ArrowUp, -(line_width as isize)),
+        (Key::ArrowDown, line_width as isize),
+    ]
+    .into_iter()
+    .find_map(|(key, delta)| {
+        if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, key)) {
+            Some((delta, true))
+        } else if ui.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
+            Some((delta, false))
+        } else {
+            None
+        }
+    });
+    if let Some((delta, extend)) = arrow {
+        // `delta == 0` only for Up/Down before the first layout sets line_width;
+        // consume the key but don't move.
+        if delta != 0 {
+            let base = sel.map_or(0, |s| s.focus);
+            let anchor = sel.map_or(base, |s| s.anchor);
+            let new_focus = move_focus(base, delta, seq_len);
+            let new_sel = if extend {
+                Selection {
+                    anchor,
+                    focus: new_focus,
+                }
+            } else {
+                Selection::cursor(new_focus)
+            };
+            *pending = None;
+            cmds.push((AppCommand::SetSelection(Some(new_sel)), None));
+        }
         return;
     }
 
@@ -625,6 +657,11 @@ pub struct SequenceView {
     /// Memoized realized-diff preview (Phase 13.6), rebuilt only when
     /// `pending` (or the committed version) changes. `None` when not staging.
     preview: Option<Preview>,
+    /// Wrap width (bases per line) from the previous frame's layout. Arrow-key
+    /// Up/Down navigation needs it, but `line_width` is computed *after*
+    /// `handle_keyboard` runs, so we read last frame's value. Only changes on
+    /// resize, so the one-frame lag is invisible; `0` until the first layout.
+    last_line_width: usize,
 }
 
 impl SequenceView {
@@ -656,6 +693,25 @@ impl SequenceView {
     /// Arm a staged Paste at `pos` (clipboard bytes materialize in the preview).
     pub fn stage_paste(&mut self, pos: usize) {
         self.pending = Some(PendingEdit::Paste { pos });
+    }
+
+    /// One-line summary of the staged edit (op + size), or `None` when nothing
+    /// is staged. Derived straight from `pending` (+ clipboard length for a
+    /// Paste) so the status bar shows it without waiting on a preview rebuild.
+    /// Excludes the `⏎ commit · esc cancel` hint — the status bar appends that.
+    pub fn staged_summary(&self, clipboard: Option<&[u8]>) -> Option<String> {
+        let summary = match self.pending.as_ref()? {
+            PendingEdit::Insert { staged, .. } => format!("Insert {} bp", staged.len()),
+            PendingEdit::Replace { start, end, staged } => {
+                format!("Replace {}→{} bp", end - start, staged.len())
+            }
+            PendingEdit::Delete { start, end } => format!("Delete {} bp", end - start),
+            PendingEdit::Cut { start, end } => format!("Cut {} bp", end - start),
+            PendingEdit::Paste { .. } => {
+                format!("Paste {} bp", clipboard.map_or(0, <[u8]>::len))
+            }
+        };
+        Some(summary)
     }
 
     /// Whether an edit is currently staged (armed, awaiting `Enter`/`Esc`).
@@ -729,6 +785,7 @@ impl SequenceView {
                 ui,
                 view,
                 buffer.text.len(),
+                self.last_line_width,
                 clipboard,
                 cmds,
             );
@@ -808,6 +865,9 @@ impl SequenceView {
         let avail = (ui.available_width() - left_margin - right_margin).max(char_width);
         let line_width = ((avail / char_width) as usize).max(10);
         let n_blocks = seq_len.div_ceil(line_width);
+        // Remember it for next frame's arrow-key Up/Down (computed here, after
+        // `handle_keyboard` has already run this frame).
+        self.last_line_width = line_width;
 
         // Per-block layout: each block sizes itself to the items it contains.
         // `block_offsets[i]` is the y-coord (within the allocated rect) of
@@ -1440,18 +1500,9 @@ impl SequenceView {
                 }
             }
 
-            // ── Staged-edit footer summary ── pinned to the bottom of the
-            // visible area so it's always seen while an edit is pending. Names
-            // the op + size (e.g. "Insert 6 bp · ⏎ commit · esc cancel").
-            if let Some(p) = &preview {
-                painter.text(
-                    Pos2::new(clip.min.x + 8.0, clip.max.y - char_height - 4.0),
-                    Align2::LEFT_TOP,
-                    p.summary(),
-                    ruler_font.clone(),
-                    text_color.gamma_multiply(0.7),
-                );
-            }
+            // The staged-edit op summary (e.g. "Insert 6 bp") now lives in the
+            // app status bar (see `staged_summary` + app.rs) — the in-canvas
+            // track-changes diff wash is the only in-place staging cue here.
 
             // Visible range for minimap viewport indicator. With
             // variable block heights we look up the first / last blocks
@@ -1792,7 +1843,7 @@ mod tests {
 
     // ── Realized diff preview (Phase 13.6) ───────────────────────────────────
 
-    use super::{Preview, SequenceView, apply_splice};
+    use super::{Preview, SequenceView, apply_splice, move_focus};
     use seqforge_core::{Annotations, Buffer, Topology};
 
     fn buf(bytes: &[u8]) -> Buffer {
@@ -1927,5 +1978,54 @@ mod tests {
         view.pending = None;
         view.refresh_preview(&b, &ann, None);
         assert!(view.preview.is_none());
+    }
+
+    /// Arrow-key focus math: ±1 / ±line_width steps clamp to `0..=seq_len`.
+    #[test]
+    fn move_focus_steps_and_clamps() {
+        // Right / Left by one base.
+        assert_eq!(move_focus(5, 1, 10), 6);
+        assert_eq!(move_focus(5, -1, 10), 4);
+        // Down / Up by a line (line_width = 4).
+        assert_eq!(move_focus(2, 4, 100), 6);
+        assert_eq!(move_focus(6, -4, 100), 2);
+        // Clamp at both ends — including the insert-at-end position (== seq_len).
+        assert_eq!(move_focus(0, -1, 10), 0);
+        assert_eq!(move_focus(10, 1, 10), 10);
+        assert_eq!(move_focus(8, 5, 10), 10);
+        assert_eq!(move_focus(2, -5, 10), 0);
+    }
+
+    /// The status-bar summary reflects each staged op + size, reads the
+    /// clipboard length for a Paste, and is `None` when nothing is staged.
+    #[test]
+    fn staged_summary_names_op_and_size() {
+        let mut view = SequenceView::default();
+        assert_eq!(view.staged_summary(None), None);
+
+        view.pending = Some(PendingEdit::Insert {
+            pos: 0,
+            staged: "ATG".into(),
+        });
+        assert_eq!(view.staged_summary(None).as_deref(), Some("Insert 3 bp"));
+
+        view.pending = Some(PendingEdit::Replace {
+            start: 2,
+            end: 6,
+            staged: "AT".into(),
+        });
+        assert_eq!(view.staged_summary(None).as_deref(), Some("Replace 4→2 bp"));
+
+        view.pending = Some(PendingEdit::Delete { start: 1, end: 5 });
+        assert_eq!(view.staged_summary(None).as_deref(), Some("Delete 4 bp"));
+
+        view.pending = Some(PendingEdit::Cut { start: 3, end: 10 });
+        assert_eq!(view.staged_summary(None).as_deref(), Some("Cut 7 bp"));
+
+        view.pending = Some(PendingEdit::Paste { pos: 4 });
+        assert_eq!(
+            view.staged_summary(Some(b"CCCCC")).as_deref(),
+            Some("Paste 5 bp")
+        );
     }
 }

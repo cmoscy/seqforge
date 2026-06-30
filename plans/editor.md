@@ -1,10 +1,13 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview).
-> Phase 14 (feature-editing UI) next.** Staged `PendingEdit` editing landed (§6,
-> ROADMAP decision 10): in-canvas typing/Backspace/⌘X/⌘V and menu Cut/Paste/Delete
-> all stage a realized diff preview, committing one `ViewerRequest` on `Enter`;
-> CLI/terminal/agent post immediately. Canonical cross-track
+> **Status: Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview
+> + 13.7 UX refinements). Phase 14 (feature-editing UI) next.** Staged
+> `PendingEdit` editing landed (§6, ROADMAP decision 10): in-canvas
+> typing/Backspace/⌘X/⌘V and menu Cut/Paste/Delete all stage a realized diff
+> preview, committing one `ViewerRequest` on `Enter`; CLI/terminal/agent post
+> immediately. 13.7 polished the surface: staged summary in the status bar (not
+> the canvas), focus shown via egui_dock's native tab styling (pane border
+> dropped), and arrow-key cursor navigation + shift-selection. Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a
 > single **`Splice` forward primitive** (§1) reached through the **one execution path**
 > (GUI keystroke / terminal / agent all lower to it, §4), with **delta-based undo**
@@ -427,12 +430,15 @@ seqforge/
         │                        # +editor variants in Viewer(req) arm → edit.rs
         ├── src/command/file.rs  # +apply_save_document (IO); +dirty-close modal flow
         ├── src/viewer.rs        # (Stage 2.6) bottom strand derived inline via bio::complement;
-        │                        # +keyboard input; +request_focus on click; +cursor blink
+        │                        # +keyboard input; +request_focus on click; +cursor blink;
+        │                        # +arrow-key nav (move_focus, last_line_width); +staged_summary
+        ├── src/tabs.rs          # (13.7b) pane border removed; focus cue = egui_dock native tab style
         ├── src/overlay.rs       # +Overlay::DirtyCloseConfirm { view_id }
         ├── src/workspace.rs     # +with_history_mut; +record_snapshot helper;
         │                        # BufferStore +histories: HashMap<BufferId, History>
+        ├── src/command/nav.rs   # (13.7c) apply_set_selection scrolls focus into view when off-screen
         ├── src/app.rs           # +clipboard: Option<Vec<u8>>; +dirty title bar;
-        │                        # +on_close_event dirty check
+        │                        # +on_close_event dirty check; (13.7a) staged summary in status bar
         └── Cargo.toml           # +arboard = "3"
 ```
 
@@ -626,6 +632,52 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 > purely the missing UX channel + weak staging rationale.
 
 **Done when:** ✅ (13.6a–d landed) Staging a long insert reflows and wraps like real sequence; deletions/cuts show struck-through-red in place; pastes wash green and reflow; the summary line names the op; menu Cut/Paste/Delete stage like the keyboard; commit on `Enter` produces exactly the previewed result; no per-frame virtual-buffer rebuild.
+
+#### 13.7 — Editor UX refinements *(done)*
+
+Three presentation/interaction polishes after 13.6, all confined to
+`seqforge-app` (no core/bio/command changes; the mutation + staging paths are
+untouched):
+
+- [x] **13.7a — Staged summary → status bar.** The op summary (`Insert 6 bp …`)
+  moved out of the canvas into the bottom status bar (`app.rs`), rendered as an
+  accent-colored segment alongside `bp · topology · pos/sel` and including the
+  `⏎ commit · esc cancel` hint. New `SequenceView::staged_summary(clipboard)`
+  derives it straight from `pending` (Paste length from the clipboard) so it's
+  live per keystroke with no preview-rebuild lag. The in-canvas footer paint and
+  the now-redundant `Preview::summary` were deleted. The green/red track-changes
+  diff wash stays in the canvas as the in-place "edit is staged" cue — moving
+  only the text loses no information. *(Supersedes the 13.6 "footer summary line"
+  wording: the summary is no longer painted in the canvas.)*
+- [x] **13.7b — Focus cue: drop the pane border, use egui_dock's native tab
+  styling.** The 2px accent rectangle around the focused view pane was removed
+  (read as noise, especially single-pane). The focus cue is now the tab title:
+  egui_dock 0.16's `Style::from_egui` (already used) colors the focused leaf's
+  tab with `strong_text_color()` (white) and the rest with `text_color()` (grey)
+  — theme-aware, for free. **No custom `title()` styling** (an earlier
+  hand-rolled `RichText` override was redundant with the library and removed).
+  Caveat: the cue follows egui_dock's internal focused-leaf, not our
+  `FocusState`; both update on the same pane click so they stay in sync, and if
+  they ever diverge we'd sync egui_dock's focus to ours rather than re-add a
+  `title()` override.
+- [x] **13.7c — Arrow-key cursor navigation + shift-selection.** On a focused
+  pane: Left/Right move the cursor ±1 base, Up/Down ±one line; Shift extends a
+  continuous selection (anchor fixed, focus moves), no-Shift collapses to a
+  cursor. Handled in `handle_keyboard` via the pure, unit-tested `move_focus`
+  (clamped to `0..=seq_len`); keys are `consume_key`'d so the `ScrollArea`
+  doesn't also scroll, and an arrow cancels any active stage (same guard as
+  click/focus-loss). Moves post `AppCommand::SetSelection` — the existing click
+  path — so no new mutation surface. Up/Down read the previous frame's
+  `line_width` (stored as `SequenceView.last_line_width`, since `line_width` is
+  computed after `handle_keyboard` runs). `nav::apply_set_selection` now scrolls
+  the focus into view (reusing `view.scroll_to` + `view.visible_range`) only when
+  it falls off-screen — a no-op for clicks, so it serves arrow moves and any
+  future programmatic selection.
+
+**Done when:** ✅ Status bar shows the live staged summary (canvas footer gone);
+no pane border, focused tab is brighter via egui_dock; arrow keys move the caret
+(±base / ±line), Shift extends, the caret auto-scrolls into view, and an arrow
+cancels a pending stage. 64 `seqforge-app` tests + clippy + fmt green.
 
 ---
 

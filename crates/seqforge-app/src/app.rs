@@ -686,9 +686,9 @@ impl eframe::App for SeqForgeApp {
                 let info = self.state.workspace.active_view().and_then(|v| {
                     let buf_arc = self.state.workspace.buffers.get(v.buffer_id)?;
                     let buf = buf_arc.read().ok()?;
-                    Some((buf.len(), format!("{:?}", buf.topology), v.selection))
+                    Some((v.id, buf.len(), format!("{:?}", buf.topology), v.selection))
                 });
-                if let Some((seq_len, topology, selection)) = info {
+                if let Some((view_id, seq_len, topology, selection)) = info {
                     ui.label(format!("{seq_len} bp  ·  {topology}"));
                     if let Some(sel) = selection {
                         if sel.is_cursor() {
@@ -697,6 +697,23 @@ impl eframe::App for SeqForgeApp {
                             let (s, e) = sel.ordered();
                             ui.label(format!("sel {s}–{e}  ({} bp)", e - s));
                         }
+                    }
+                    // Staged-edit indicator (Phase 13.6). Lives here rather than
+                    // floating in the canvas; the accent colour marks the active
+                    // staging mode. The track-changes diff wash stays in-canvas.
+                    let clipboard = self.state.clipboard.as_deref();
+                    if let Some(summary) = self
+                        .state
+                        .workspace
+                        .seq_views
+                        .get(&view_id)
+                        .and_then(|sv| sv.staged_summary(clipboard))
+                    {
+                        let accent = ui.visuals().selection.stroke.color;
+                        ui.label(
+                            egui::RichText::new(format!("{summary}  ·  ⏎ commit  ·  esc cancel"))
+                                .color(accent),
+                        );
                     }
                 } else {
                     ui.label("No file open");

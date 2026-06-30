@@ -33,7 +33,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 |---|---|---|---|
 | **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 (9 tag/verify left) | `v0.1.0` tag |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
-| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview) | Phase 14 — feature-editing UI |
+| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview + 13.7 UX refinements) | Phase 14 — feature-editing UI |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
 | **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 📋 not started | Phase 0.1 — `seqforge-thermo` + `seqforge tm` |
 
