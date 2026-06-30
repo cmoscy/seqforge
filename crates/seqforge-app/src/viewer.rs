@@ -4,7 +4,8 @@ use egui::{
     Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2, text::LayoutJob,
 };
 use seqforge_core::{
-    Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View, ViewerRequest,
+    Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View, ViewId,
+    ViewerRequest,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -29,78 +30,227 @@ fn iupac_filter(s: &str) -> String {
         .collect()
 }
 
-/// Translate keyboard input on the focused viewer into editor `ViewerRequest`s.
-/// Pure lowering — pushes commands through the single path; never mutates the
-/// buffer or `view.selection` directly. Edits target this view explicitly so a
-/// focused-but-not-active split pane still edits the right buffer.
-fn handle_keyboard(ui: &egui::Ui, view: &View, seq_len: usize, cmds: &mut Vec<PendingCommand>) {
+/// A staged in-canvas edit (§6 / ROADMAP decision 10). Armed by keyboard input,
+/// previewed, and committed to exactly one `ViewerRequest` on `Enter`. The
+/// buffer is never touched until commit, so this is the *only* in-canvas path
+/// to a mutation. Clipboard ops (cut/copy/paste), reverse-complement, undo/redo
+/// and save are **not** staged — their operands live in `AppState` or they are
+/// whole commands, so they post directly (mirroring menu/CLI behaviour).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingEdit {
+    /// Type bases at a cursor; `staged` accumulates the typed IUPAC text.
+    Insert { pos: usize, staged: String },
+    /// Type bases over a range selection (replaces it on commit).
+    Replace {
+        start: usize,
+        end: usize,
+        staged: String,
+    },
+    /// Backspace/Delete over a selection, or extended ±1 at a cursor.
+    Delete { start: usize, end: usize },
+}
+
+impl PendingEdit {
+    /// Lower to the matching `ViewerRequest`, or `None` if there is nothing to
+    /// commit yet (empty staged text, or a zero-width delete).
+    fn to_request(&self, view: ViewId) -> Option<ViewerRequest> {
+        match self {
+            PendingEdit::Insert { pos, staged } => {
+                (!staged.is_empty()).then(|| ViewerRequest::Insert {
+                    pos: *pos,
+                    bases: staged.clone(),
+                    view: Some(view),
+                })
+            }
+            PendingEdit::Replace { start, end, staged } => {
+                (!staged.is_empty()).then(|| ViewerRequest::Replace {
+                    start: *start,
+                    end: *end,
+                    bases: staged.clone(),
+                    view: Some(view),
+                })
+            }
+            PendingEdit::Delete { start, end } => (start < end).then_some(ViewerRequest::Delete {
+                start: *start,
+                end: *end,
+                view: Some(view),
+            }),
+        }
+    }
+}
+
+/// Fold one frame's typed bases + backspace/forward-delete counts into the
+/// staged edit. **Pure** (no egui) so the staging state machine is unit-tested
+/// directly. `range`/`cursor` are the current selection operands; `seq_len`
+/// bounds a forward-delete. Typing extends an operand edit or arms one;
+/// Backspace trims staged text, else arms/extends a Delete leftward; forward
+/// Delete arms/extends rightward. Leaves `pending` `None` if nothing armed.
+fn stage_input(
+    pending: &mut Option<PendingEdit>,
+    bases: &str,
+    backspaces: usize,
+    del_fwds: usize,
+    range: Option<(usize, usize)>,
+    cursor: Option<usize>,
+    seq_len: usize,
+) {
+    // 1 · Typed bases extend or arm an operand edit.
+    if !bases.is_empty() {
+        match pending {
+            Some(PendingEdit::Insert { staged, .. })
+            | Some(PendingEdit::Replace { staged, .. }) => staged.push_str(bases),
+            _ => {
+                *pending = match range {
+                    Some((start, end)) => Some(PendingEdit::Replace {
+                        start,
+                        end,
+                        staged: bases.to_string(),
+                    }),
+                    None => cursor.map(|pos| PendingEdit::Insert {
+                        pos,
+                        staged: bases.to_string(),
+                    }),
+                };
+            }
+        }
+    }
+
+    // 2 · Backspace trims a staged operand, else arms/extends a Delete left.
+    for _ in 0..backspaces {
+        match pending {
+            Some(PendingEdit::Insert { staged, .. })
+            | Some(PendingEdit::Replace { staged, .. })
+                if !staged.is_empty() =>
+            {
+                staged.pop();
+            }
+            Some(PendingEdit::Delete { start, .. }) if *start > 0 => *start -= 1,
+            Some(PendingEdit::Delete { .. }) => {} // already at 0
+            _ => {
+                *pending = match range {
+                    Some((start, end)) => Some(PendingEdit::Delete { start, end }),
+                    None => cursor.filter(|&p| p > 0).map(|p| PendingEdit::Delete {
+                        start: p - 1,
+                        end: p,
+                    }),
+                };
+            }
+        }
+    }
+
+    // 3 · Forward delete arms/extends a Delete right.
+    for _ in 0..del_fwds {
+        match pending {
+            Some(PendingEdit::Delete { end, .. }) if *end < seq_len => *end += 1,
+            Some(PendingEdit::Delete { .. }) => {}
+            _ => {
+                *pending = match range {
+                    Some((start, end)) => Some(PendingEdit::Delete { start, end }),
+                    None => cursor
+                        .filter(|&p| p < seq_len)
+                        .map(|p| PendingEdit::Delete {
+                            start: p,
+                            end: p + 1,
+                        }),
+                };
+            }
+        }
+    }
+
+    // Drop an operand edit whose staged text was fully trimmed away.
+    if let Some(PendingEdit::Insert { staged, .. }) | Some(PendingEdit::Replace { staged, .. }) =
+        pending
+    {
+        if staged.is_empty() {
+            *pending = None;
+        }
+    }
+}
+
+/// Read this frame's keyboard input on the focused viewer and drive the staged
+/// `PendingEdit`. In-canvas edits stage (commit on `Enter`, cancel on `Esc`);
+/// clipboard / RC / undo / redo / save post directly (their operands aren't
+/// assembled in the canvas). Never mutates the buffer or `view.selection`.
+fn handle_keyboard(
+    pending: &mut Option<PendingEdit>,
+    ui: &egui::Ui,
+    view: &View,
+    seq_len: usize,
+    cmds: &mut Vec<PendingCommand>,
+) {
     let vid = view.id;
     let sel = view.selection;
     let range = sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
-    let cursor_pos = match sel {
+    let cursor = match sel {
         Some(s) if s.is_cursor() => Some(s.focus),
         _ => None,
     };
-
-    let push = |cmds: &mut Vec<PendingCommand>, req: ViewerRequest| {
-        cmds.push((AppCommand::Viewer(req), None));
+    let post = |cmds: &mut Vec<PendingCommand>, cmd: AppCommand| cmds.push((cmd, None));
+    let post_req = |cmds: &mut Vec<PendingCommand>, req: ViewerRequest| {
+        cmds.push((AppCommand::Viewer(req), None))
     };
 
-    // ── Edit / save shortcuts ── consume so egui's own defaults don't also act.
-    let cmd = Modifiers::COMMAND;
-    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
-    if ui.input_mut(|i| i.consume_key(cmd, Key::Z)) {
-        push(cmds, ViewerRequest::Undo { view: Some(vid) });
-    }
-    if ui.input_mut(|i| i.consume_key(cmd_shift, Key::Z))
-        || ui.input_mut(|i| i.consume_key(cmd, Key::Y))
-    {
-        push(cmds, ViewerRequest::Redo { view: Some(vid) });
-    }
-    if let Some((start, end)) = range {
-        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
-            push(
-                cmds,
-                ViewerRequest::Cut {
-                    start,
-                    end,
-                    view: Some(vid),
-                },
-            );
+    // ── Commit / cancel ──
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        if let Some(req) = pending.take().and_then(|pe| pe.to_request(vid)) {
+            post_req(cmds, req);
         }
-        if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
-            push(
-                cmds,
-                ViewerRequest::Copy {
-                    start,
-                    end,
-                    view: Some(vid),
-                },
-            );
-        }
+        return;
     }
-    if ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
-        if let Some(pos) = cursor_pos.or(range.map(|(s, _)| s)) {
-            push(
-                cmds,
-                ViewerRequest::Paste {
-                    pos,
-                    view: Some(vid),
-                },
-            );
-        }
-    }
-    if ui.input_mut(|i| i.consume_key(cmd, Key::S)) {
-        push(cmds, ViewerRequest::Save { view: Some(vid) });
-    }
-    if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
-        cmds.push((AppCommand::OpenSaveAs { view: Some(vid) }, None));
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        *pending = None;
+        return;
     }
 
-    // ── Backspace / Delete + typed bases (from this frame's events) ──
+    // ── Direct-post ops (cancel any staging first) ──
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    let mut direct: Option<AppCommand> = None;
+    if ui.input_mut(|i| i.consume_key(cmd, Key::Z)) {
+        direct = Some(AppCommand::Viewer(ViewerRequest::Undo { view: Some(vid) }));
+    } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::Z))
+        || ui.input_mut(|i| i.consume_key(cmd, Key::Y))
+    {
+        direct = Some(AppCommand::Viewer(ViewerRequest::Redo { view: Some(vid) }));
+    } else if ui.input_mut(|i| i.consume_key(cmd, Key::S)) {
+        direct = Some(AppCommand::Viewer(ViewerRequest::Save { view: Some(vid) }));
+    } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
+        direct = Some(AppCommand::OpenSaveAs { view: Some(vid) });
+    } else if let Some((start, end)) = range {
+        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
+            direct = Some(AppCommand::Viewer(ViewerRequest::Cut {
+                start,
+                end,
+                view: Some(vid),
+            }));
+        } else if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
+            direct = Some(AppCommand::Viewer(ViewerRequest::Copy {
+                start,
+                end,
+                view: Some(vid),
+            }));
+        }
+    }
+    if direct.is_none() && ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
+        if let Some(pos) = cursor.or(range.map(|(s, _)| s)) {
+            direct = Some(AppCommand::Viewer(ViewerRequest::Paste {
+                pos,
+                view: Some(vid),
+            }));
+        }
+    }
+    if let Some(c) = direct {
+        *pending = None;
+        post(cmds, c);
+        return;
+    }
+
+    // ── Staging: typed bases + backspace / forward-delete ──
     let cmd_held = ui.input(|i| i.modifiers.command);
     let events = ui.input(|i| i.events.clone());
     let mut typed = String::new();
+    let mut backspaces = 0usize;
+    let mut del_fwds = 0usize;
     for ev in &events {
         match ev {
             egui::Event::Text(t) if !cmd_held => typed.push_str(t),
@@ -109,81 +259,20 @@ fn handle_keyboard(ui: &egui::Ui, view: &View, seq_len: usize, cmds: &mut Vec<Pe
                 pressed: true,
                 modifiers,
                 ..
-            } if !modifiers.command => {
-                if let Some((start, end)) = range {
-                    push(
-                        cmds,
-                        ViewerRequest::Delete {
-                            start,
-                            end,
-                            view: Some(vid),
-                        },
-                    );
-                } else if let Some(p) = cursor_pos.filter(|&p| p > 0) {
-                    push(
-                        cmds,
-                        ViewerRequest::Delete {
-                            start: p - 1,
-                            end: p,
-                            view: Some(vid),
-                        },
-                    );
-                }
-            }
+            } if !modifiers.command => backspaces += 1,
             egui::Event::Key {
                 key: Key::Delete,
                 pressed: true,
                 modifiers,
                 ..
-            } if !modifiers.command => {
-                if let Some((start, end)) = range {
-                    push(
-                        cmds,
-                        ViewerRequest::Delete {
-                            start,
-                            end,
-                            view: Some(vid),
-                        },
-                    );
-                } else if let Some(p) = cursor_pos.filter(|&p| p < seq_len) {
-                    push(
-                        cmds,
-                        ViewerRequest::Delete {
-                            start: p,
-                            end: p + 1,
-                            view: Some(vid),
-                        },
-                    );
-                }
-            }
+            } if !modifiers.command => del_fwds += 1,
             _ => {}
         }
     }
-
-    // Typed bases: replace a range selection, else insert at the cursor.
     let bases = iupac_filter(&typed);
-    if !bases.is_empty() {
-        if let Some((start, end)) = range {
-            push(
-                cmds,
-                ViewerRequest::Replace {
-                    start,
-                    end,
-                    bases,
-                    view: Some(vid),
-                },
-            );
-        } else if let Some(pos) = cursor_pos {
-            push(
-                cmds,
-                ViewerRequest::Insert {
-                    pos,
-                    bases,
-                    view: Some(vid),
-                },
-            );
-        }
-    }
+    stage_input(
+        pending, &bases, backspaces, del_fwds, range, cursor, seq_len,
+    );
 }
 
 // ── Stacking ─────────────────────────────────────────────────────────────────
@@ -361,12 +450,16 @@ fn annot_bar_rect(
 #[derive(Debug, Default)]
 pub struct SequenceView {
     drag_start: Option<usize>,
+    /// In-canvas staged edit (§6 / ROADMAP decision 10). `None` when not
+    /// editing. The buffer is never touched until this commits on `Enter`.
+    pending: Option<PendingEdit>,
 }
 
 impl SequenceView {
     /// Reset transient interaction state on document change.
     pub fn reset(&mut self) {
         self.drag_start = None;
+        self.pending = None;
     }
 
     /// Render the sequence viewer. Caller must have already resolved an
@@ -661,20 +754,28 @@ impl SequenceView {
                 // A zero-length drag stays as a cursor; non-zero stays as a range.
             }
 
-            // ── Keyboard input (Phase 13) ─────────────────────────────────
-            // The viewer is always-editable: clicking focuses it; while focused,
-            // typed IUPAC bases and edit shortcuts lower to the same
-            // `ViewerRequest`s the menu/CLI use (never mutating state here).
+            // ── In-canvas editing (Phase 13, staged §6) ───────────────────
+            // Clicking focuses the canvas and cancels any in-progress staging
+            // (a click moves the cursor, so the old staged edit no longer
+            // applies). While focused, `handle_keyboard` drives the staged
+            // `PendingEdit`; nothing reaches the buffer until it commits on
+            // Enter. Menus / CLI / agent post directly — staging is in-canvas
+            // only (ROADMAP decision 10).
             if response.clicked() {
                 response.request_focus();
+                self.pending = None;
             }
             let has_focus = response.has_focus();
             if has_focus {
-                handle_keyboard(ui, view, seq_len, cmds);
+                handle_keyboard(&mut self.pending, ui, view, seq_len, cmds);
                 // Drive the cursor blink while focused.
                 ui.ctx()
                     .request_repaint_after(Duration::from_millis(BLINK_MS));
+            } else {
+                // Losing focus abandons an uncommitted staged edit.
+                self.pending = None;
             }
+            let pending = self.pending.clone();
             // Cursor is solid when unfocused, blinks (~2 Hz) when focused.
             let blink_on =
                 !has_focus || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
@@ -776,6 +877,70 @@ impl SequenceView {
                                 ),
                                 0.0,
                                 selection_color.gamma_multiply(0.7),
+                            );
+                        }
+                    }
+                }
+
+                // ── Staged edit preview (Phase 13) ────────────────────────
+                // Shows the pending change before it commits on Enter. Reads
+                // `pending` only — the buffer is untouched until commit.
+                if let Some(pe) = &pending {
+                    let add_col = Color32::from_rgb(60, 179, 113); // bases to add
+                    let del_col = Color32::from_rgba_unmultiplied(208, 80, 80, 110); // to remove
+                    // Range marker for Delete / Replace.
+                    let region = match pe {
+                        PendingEdit::Delete { start, end }
+                        | PendingEdit::Replace { start, end, .. } => Some((*start, *end)),
+                        PendingEdit::Insert { .. } => None,
+                    };
+                    if let Some((rs, re)) = region {
+                        let vis_s = rs.max(block_start);
+                        let vis_e = re.min(block_end);
+                        if vis_s < vis_e {
+                            let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                            let sw = (vis_e - vis_s) as f32 * char_width;
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(sx, top_y),
+                                    Vec2::new(sw, strand_h * 2.0),
+                                ),
+                                0.0,
+                                del_col,
+                            );
+                        }
+                    }
+                    // Staged bases float above the anchor for Insert / Replace.
+                    let staged = match pe {
+                        PendingEdit::Insert { pos, staged } => Some((*pos, staged)),
+                        PendingEdit::Replace { start, staged, .. } => Some((*start, staged)),
+                        PendingEdit::Delete { .. } => None,
+                    };
+                    if let Some((anchor, txt)) = staged {
+                        if !txt.is_empty() && anchor >= block_start && anchor <= block_end {
+                            let cx = seq_x0 + (anchor - block_start) as f32 * char_width;
+                            let gy = top_y - char_height;
+                            let gw = txt.len() as f32 * char_width;
+                            painter.rect_filled(
+                                Rect::from_min_size(Pos2::new(cx, gy), Vec2::new(gw, char_height)),
+                                2.0,
+                                add_col.gamma_multiply(0.25),
+                            );
+                            painter.text(
+                                Pos2::new(cx, gy),
+                                Align2::LEFT_TOP,
+                                txt,
+                                font_id.clone(),
+                                add_col,
+                            );
+                            // Insertion caret at the anchor.
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    Pos2::new(cx - 0.75, top_y),
+                                    Vec2::new(1.5, strand_h * 2.0),
+                                ),
+                                0.0,
+                                add_col,
                             );
                         }
                     }
@@ -1003,6 +1168,18 @@ impl SequenceView {
                 }
             }
 
+            // ── Staged-edit footer hint ── pinned to the bottom of the visible
+            // area so it's always seen while an edit is pending.
+            if pending.is_some() {
+                painter.text(
+                    Pos2::new(clip.min.x + 8.0, clip.max.y - char_height - 4.0),
+                    Align2::LEFT_TOP,
+                    "⏎ commit · esc cancel",
+                    ruler_font.clone(),
+                    text_color.gamma_multiply(0.7),
+                );
+            }
+
             // Visible range for minimap viewport indicator. With
             // variable block heights we look up the first / last blocks
             // via the prefix-sum offsets rather than dividing by a
@@ -1189,5 +1366,150 @@ mod tests {
         // digits, punctuation, and non-IUPAC letters (e.g. Z, J) are dropped
         assert_eq!(iupac_filter("A1T-G zJ C"), "ATGC");
         assert_eq!(iupac_filter("123"), "");
+    }
+
+    // ── Staged-edit state machine (Phase 13) ─────────────────────────────────
+
+    use super::{PendingEdit, stage_input};
+    use seqforge_core::{ViewId, ViewerRequest};
+
+    fn stage(
+        pending: &mut Option<PendingEdit>,
+        bases: &str,
+        bs: usize,
+        del: usize,
+        range: Option<(usize, usize)>,
+        cursor: Option<usize>,
+    ) {
+        stage_input(pending, bases, bs, del, range, cursor, 100);
+    }
+
+    #[test]
+    fn typing_at_cursor_arms_and_extends_insert() {
+        let mut p = None;
+        stage(&mut p, "A", 0, 0, None, Some(10));
+        assert_eq!(
+            p,
+            Some(PendingEdit::Insert {
+                pos: 10,
+                staged: "A".into()
+            })
+        );
+        // more typing extends the same staged edit (still one pending edit)
+        stage(&mut p, "TG", 0, 0, None, Some(10));
+        assert_eq!(
+            p,
+            Some(PendingEdit::Insert {
+                pos: 10,
+                staged: "ATG".into()
+            })
+        );
+    }
+
+    #[test]
+    fn typing_over_range_arms_replace() {
+        let mut p = None;
+        stage(&mut p, "GG", 0, 0, Some((5, 9)), None);
+        assert_eq!(
+            p,
+            Some(PendingEdit::Replace {
+                start: 5,
+                end: 9,
+                staged: "GG".into()
+            })
+        );
+    }
+
+    #[test]
+    fn backspace_trims_staged_then_clears() {
+        let mut p = Some(PendingEdit::Insert {
+            pos: 3,
+            staged: "AT".into(),
+        });
+        stage(&mut p, "", 1, 0, None, Some(3));
+        assert_eq!(
+            p,
+            Some(PendingEdit::Insert {
+                pos: 3,
+                staged: "A".into()
+            })
+        );
+        // trimming the last char drops the pending edit entirely
+        stage(&mut p, "", 1, 0, None, Some(3));
+        assert_eq!(p, None);
+    }
+
+    #[test]
+    fn backspace_over_range_arms_delete() {
+        let mut p = None;
+        stage(&mut p, "", 1, 0, Some((4, 8)), None);
+        assert_eq!(p, Some(PendingEdit::Delete { start: 4, end: 8 }));
+    }
+
+    #[test]
+    fn backspace_at_cursor_arms_and_extends_delete_left() {
+        let mut p = None;
+        stage(&mut p, "", 1, 0, None, Some(10));
+        assert_eq!(p, Some(PendingEdit::Delete { start: 9, end: 10 }));
+        // a second backspace extends the deletion span leftward
+        stage(&mut p, "", 1, 0, None, Some(10));
+        assert_eq!(p, Some(PendingEdit::Delete { start: 8, end: 10 }));
+    }
+
+    #[test]
+    fn forward_delete_extends_right_bounded_by_len() {
+        let mut p = None;
+        stage_input(&mut p, "", 0, 1, None, Some(99), 100);
+        assert_eq!(
+            p,
+            Some(PendingEdit::Delete {
+                start: 99,
+                end: 100
+            })
+        );
+        // can't extend past seq_len
+        stage_input(&mut p, "", 0, 1, None, Some(99), 100);
+        assert_eq!(
+            p,
+            Some(PendingEdit::Delete {
+                start: 99,
+                end: 100
+            })
+        );
+    }
+
+    #[test]
+    fn to_request_lowers_to_viewer_request() {
+        let v = ViewId(1);
+        assert!(matches!(
+            PendingEdit::Insert {
+                pos: 2,
+                staged: "AT".into()
+            }
+            .to_request(v),
+            Some(ViewerRequest::Insert { pos: 2, .. })
+        ));
+        assert!(matches!(
+            PendingEdit::Delete { start: 1, end: 4 }.to_request(v),
+            Some(ViewerRequest::Delete {
+                start: 1,
+                end: 4,
+                ..
+            })
+        ));
+        // nothing to commit: empty staged text / zero-width delete
+        assert!(
+            PendingEdit::Insert {
+                pos: 0,
+                staged: String::new()
+            }
+            .to_request(v)
+            .is_none()
+        );
+        assert!(
+            PendingEdit::Delete { start: 5, end: 5 }
+                .to_request(v)
+                .is_none()
+        );
     }
 }

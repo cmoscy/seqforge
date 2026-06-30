@@ -1,6 +1,8 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: Stage 2.6 + Phases 10–13 done** (Phase 14 next). Canonical cross-track
+> **Status: Stage 2.6 + Phases 10–12 done; Phase 13 (staged editing) in progress** — live-typing
+> spike landed (13.0, commit `2ce3c9a`), refactoring to the staged `PendingEdit` model (§6,
+> ROADMAP decision 10). Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). The mutation model is settled: a
 > single **`Splice` forward primitive** (§1) reached through the **one execution path**
 > (GUI keystroke / terminal / agent all lower to it, §4), with **delta-based undo**
@@ -314,20 +316,47 @@ This is a `seqforge-core::document.rs` change. `viewer.rs` calls `feature_color(
 
 Add `BioError::Write(String)` variant.
 
-### 6. Keyboard input — always editable
+### 6. In-canvas editing — staged `PendingEdit` (arm → preview → commit)
 
-No modal "enter edit mode" toggle. When `SequenceView` has focus and `view.selection` is a cursor, typed IUPAC characters push `ViewerRequest::Insert`. With a range selection, typing replaces: `ViewerRequest::Replace { start, end, bases: one_char }`.
+> **Decision (revises the earlier "always-editable, no modal" wording; see
+> ROADMAP decision 10).** Verified against Benchling, which stages insertions in
+> a confirm-on-Enter modal rather than mutating live. Nucleotide edits are
+> deliberate and a stray keystroke can silently shift a frame, so **in-canvas
+> editing never mutates the buffer until the user commits.** This is *also* the
+> simpler, more maintainable design: one staging state machine + one commit path
+> + one preview renderer, replacing per-keystroke command dispatch. Coalescing
+> (§3) becomes irrelevant — one commit = one undo entry.
 
-Backspace/Delete: cursor `Delete { start: p-1, end: p }` / `Delete { start: p, end: p+1 }`; range: `Delete { start, end }`.
+**Model.** A single transient `PendingEdit` (on `SequenceView`, not document state):
 
-Modifier shortcuts:
-- `Cmd/Ctrl+Z` → `ViewerRequest::Undo`. `Cmd/Ctrl+Shift+Z` (or `Y`) → `ViewerRequest::Redo`.
-- `Cmd/Ctrl+X/C/V` → `Cut/Copy/Paste`.
-- `Cmd/Ctrl+S` → `ViewerRequest::Save`. `Cmd/Ctrl+Shift+S` → open SaveAs dialog → `AppCommand::OpenSaveAs`.
+```rust
+enum PendingEdit {
+    Insert  { pos: usize, staged: String },          // operand-bearing: type bases
+    Replace { start: usize, end: usize, staged: String },
+    Delete  { start: usize, end: usize },            // pure: no operand, confirm-only
+    Paste   { pos: usize },                          //   "  (bases come from clipboard)
+    ReverseComplement { start: usize, end: usize },  //   "
+}
+```
 
-Key reading happens in `viewer.rs` via `ui.input(|i| i.events.iter()...)` after `response = ui.allocate_painter(...)`. Only processes when `response.has_focus()` (call `response.request_focus()` on click). Viewer commands are pushed into `pending_commands` — they go through the normal `apply` path and never mutate state directly inside the render function.
+Three responsibilities, each in one place:
+1. **Arm.** A keystroke at a cursor → `Insert`; typing over a range → `Replace`; the Delete/Backspace key over a range → `Delete`; ⌘V → `Paste`; an RC action → `ReverseComplement`. Positional operands are auto-filled from `view.selection`.
+2. **Preview.** Render the pending change inline — staged bases in a distinct colour for `Insert`/`Replace`; the marked region for `Delete`/RC — with a footer hint `⏎ commit · esc cancel`.
+3. **Commit.** `Enter` translates the `PendingEdit` into exactly **one** `ViewerRequest` and pushes it through the single path; `Esc` clears. **The buffer never changes until `Enter`** — the core invariant.
 
-Non-IUPAC characters silently ignored. Paste with whitespace: strip it, accept valid IUPAC remainder; if any non-IUPAC remains after stripping, show a toast and discard.
+`Enter` therefore *is* the GUI sending the corresponding CLI command:
+`PendingEdit::Insert { pos: 10, staged: "ATG" }` → `ViewerRequest::Insert { pos: 10, bases: "ATG" }`, identical to `seqforge insert 10 ATG`. The staging UI is a **context-aware constructor for the command grammar** — selection supplies position, the user types only the novel operand.
+
+**Surface division (keep consistent):**
+- **In-canvas (keyboard/selection in `SequenceView`) → staged**: arm + preview + Enter, for *all* ops including delete/cut (preview-before-destroy has real value for DNA).
+- **Menus → post directly**: a menu click is itself the confirmation; it emits the `ViewerRequest` immediately (still through the single path).
+- **Terminal / CLI / agent → post directly**: a complete typed command is already deliberate. (The embedded terminal *is* the command-palette; don't rebuild one.)
+
+This is the **context-anchored modal** pattern (Benchling), not a generic command palette.
+
+Shortcuts (read in `viewer.rs` only when `response.has_focus()`; `request_focus()` on click): ⌘Z undo · ⇧⌘Z / ⌘Y redo · ⌘X cut · ⌘C copy · ⌘V paste · ⌘S save · ⇧⌘S save-as. Undo/Redo/Save are pure history/IO ops — they post directly, not staged.
+
+Non-IUPAC characters are silently dropped from staged text (`iupac_filter`); whitespace in a paste is stripped. `edit::parse_bases` re-validates defensively for CLI/agent input.
 
 ### 7. Clipboard — arboard + in-memory fallback
 
@@ -512,16 +541,25 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 
 ---
 
-### Phase 13 — Keyboard input in the viewer *(1 day)*
+### Phase 13 — In-canvas editing: staged `PendingEdit` *(1 day)*
 
-**Goal:** Type into the sequence; always-editable (no modal edit mode).
+**Goal:** Deliberate, preview-before-commit editing in the sequence canvas — the staged model of §6. The buffer never mutates until `Enter`.
 
-- [x] `SequenceView::show` calls `response.request_focus()` on click.
-- [x] When `response.has_focus()`, `handle_keyboard` reads this frame's events: `Event::Text` (→ `iupac_filter`, junk silently dropped), `Event::Key { Backspace | Delete }`, and modifier shortcuts from §6 (⌘Z/⇧⌘Z/⌘Y, ⌘X/C/V, ⌘S/⇧⌘S) via `consume_key` so egui defaults don't double-fire.
-- [x] Each event pushes a `ViewerRequest` (or `OpenSaveAs`) into `pending_commands`, **targeting `view.id` explicitly** so a focused-but-not-active split pane edits the right buffer. Range selection: typing → `Replace`, Backspace/Delete → `Delete`. Cursor: typing → `Insert`, Backspace/Delete → ±1.
-- [x] Cursor blink: `blink_on` derived from `input.time` at `BLINK_MS` (500 ms); `request_repaint_after` while focused; cursor solid when unfocused. `iupac_filter` unit-tested.
+> **13.0 (done, now superseded): live-typing spike.** The first pass wired
+> *live* per-keystroke editing (`handle_keyboard` → one `ViewerRequest` per key).
+> It validated focus handling, IUPAC filtering, the shortcut set, and cursor
+> blink end-to-end — all reused below — but it mutated the buffer live, which the
+> §6 decision reverses. 13.1+ refactors it into staging; the command spine
+> (12a–12e) it posts to is unchanged. Commit `2ce3c9a`.
 
-**Done when:** ✅ (code) Typing `ATGC` inserts at cursor; Backspace deletes; `Cmd+Z` undoes; modifier shortcuts work; clicking the terminal stops viewer from absorbing keys. **Awaiting manual GUI verification** (keyboard wiring can't be unit-tested headlessly).
+- [x] `SequenceView::show` calls `response.request_focus()` on click; cursor blink via `input.time` + `request_repaint_after`; `iupac_filter` (unit-tested). *(from 13.0; kept)*
+- [x] **13.1 — `PendingEdit` state** on `SequenceView` (enum `Insert`/`Replace`/`Delete`) + `to_request(view_id) -> Option<ViewerRequest>` (returns `None` for empty staged / zero-width delete). Unit-tested.
+- [x] **13.2 — arm from input.** `handle_keyboard` reads the frame's events; pure `stage_input` folds typed bases + backspace/forward-delete counts into `pending`: typing arms/extends `Insert` (cursor) or `Replace` (range); Backspace trims staged text, else arms/**extends** a `Delete` leftward; forward-Delete extends rightward; emptying staged text drops the edit. `Esc` clears. Pure history/IO + **clipboard** ops post directly (⌘Z/⇧⌘Z/⌘Y, ⌘S/⇧⌘S, ⌘X/⌘C/⌘V) — clipboard payload lives in `AppState`, outside the canvas. 6 `stage_input`/`to_request` unit tests.
+- [x] **13.3 — commit on Enter.** `Enter` → `to_request` → one `AppCommand::Viewer(req)` targeting `view.id`, then clear. The buffer is reached *only* here.
+- [x] **13.4 — preview render.** Staged `Insert`/`Replace` bases float above the anchor in green with an insertion caret; `Delete`/`Replace` region marked red; footer `⏎ commit · esc cancel` pinned to the visible area. Reads `pending` only. *(RC is menu-direct, so no RC preview.)*
+- [x] **13.5 — consistency guard.** Click or focus-loss cancels staging; menus/CLI/agent post directly. Rule documented at the `handle_keyboard` call site + in §6 / decision 10.
+
+**Done when:** ✅ (code, 170 tests + clippy + fmt green) staged preview commits on `Enter` (one undo entry), cancels on `Esc`/click/blur; delete/cut preview before commit; menus post directly. **Awaiting manual GUI verification** (preview rendering + focus handoff can't be unit-tested headlessly).
 
 ---
 
