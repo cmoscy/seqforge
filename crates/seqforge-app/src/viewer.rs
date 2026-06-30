@@ -635,6 +635,36 @@ impl SequenceView {
         self.preview = None;
     }
 
+    // ── Stage a destructive edit from outside the canvas (Edit menu) ──────
+    // These arm the same `PendingEdit` an in-canvas keystroke would, so a menu
+    // Cut/Delete/Paste previews before commit instead of mutating immediately.
+    // The caller (`edit::apply_stage_edit`) also focuses the pane so the stage
+    // survives (unfocus clears `pending`) and Enter commits it. The preview is
+    // built next frame in `show` from `self.pending`; Paste reads the clipboard
+    // passed into `show`.
+
+    /// Arm a staged Cut over `[start, end)` (no-op for an empty range).
+    pub fn stage_cut(&mut self, start: usize, end: usize) {
+        self.pending = (start < end).then_some(PendingEdit::Cut { start, end });
+    }
+
+    /// Arm a staged Delete over `[start, end)` (no-op for an empty range).
+    pub fn stage_delete(&mut self, start: usize, end: usize) {
+        self.pending = (start < end).then_some(PendingEdit::Delete { start, end });
+    }
+
+    /// Arm a staged Paste at `pos` (clipboard bytes materialize in the preview).
+    pub fn stage_paste(&mut self, pos: usize) {
+        self.pending = Some(PendingEdit::Paste { pos });
+    }
+
+    /// Whether an edit is currently staged (armed, awaiting `Enter`/`Esc`).
+    /// Test-only for now — the menu-staging applier asserts arming through it.
+    #[cfg(test)]
+    pub fn is_staging(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Rebuild the memoized preview iff the fingerprint changed. Keyed on the
     /// committed `version` + the `pending` edit, so it recomputes ~once per
     /// keystroke (when `pending` mutates), never per frame.

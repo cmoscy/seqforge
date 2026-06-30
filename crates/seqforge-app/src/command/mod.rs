@@ -145,8 +145,29 @@ pub enum AppCommand {
     /// Open the config directory in the platform file manager.
     OpenConfigDir,
 
+    // ── In-canvas staging (menu → arm a previewed edit) ──────────────
+    /// Arm a staged, destructive edit on the active view's canvas instead of
+    /// applying it immediately, so a menu Cut/Delete/Paste previews exactly
+    /// like the in-canvas keystroke would (ROADMAP decision 10, revised: all
+    /// interactive GUI surfaces stage; only CLI/terminal/agent post directly).
+    /// The applier also focuses the view so the stage survives and `Enter`
+    /// commits it — at which point it rides the *same* commit path the keyboard
+    /// uses (`PendingEdit::to_request` → `ViewerRequest`).
+    StageEdit(StagedEdit),
+
     // ── Pass-through ─────────────────────────────────────────────────
     Viewer(ViewerRequest),
+}
+
+/// A destructive edit armed for preview from the menu — the operand-bearing
+/// mirror of the in-canvas `PendingEdit` (Cut/Delete need a range, Paste a
+/// position). GUI-only: it never crosses the socket/CLI wire (those post the
+/// `ViewerRequest` directly and immediately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedEdit {
+    Cut { start: usize, end: usize },
+    Delete { start: usize, end: usize },
+    Paste { pos: usize },
 }
 
 /// Predicate: is this command currently runnable?
@@ -184,6 +205,15 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             // SaveAs, GoTo/Find/Enzymes, Insert/Replace/feature ops, Close.
             _ => state.workspace.active_view().is_some(),
         },
+        // Mirror the immediate-op gating: Cut/Delete need a range, Paste a
+        // non-empty clipboard (commit lowers to the same ViewerRequest).
+        StageEdit(StagedEdit::Cut { .. }) | StageEdit(StagedEdit::Delete { .. }) => {
+            has_range_selection(state)
+        }
+        StageEdit(StagedEdit::Paste { .. }) => {
+            state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
+                && state.workspace.active_view().is_some()
+        }
         SetSelection(_) | SelectFeature(_) => true,
         RevealRange { .. } => state.workspace.active_view().is_some(),
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
@@ -403,6 +433,9 @@ pub fn apply<B: BioOps>(
         // ── Selection ───────────────────────────────────────────────
         SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),
         SelectFeature(new_feat) => nav::apply_select_feature(state, new_feat),
+
+        // ── In-canvas staging (menu) ────────────────────────────────
+        StageEdit(edit) => edit::apply_stage_edit(state, edit),
 
         // ── Tools ───────────────────────────────────────────────────
         InstallCli => file::apply_install_cli(state),

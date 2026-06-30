@@ -25,7 +25,8 @@ use std::ops::Range;
 use seqforge_core::{DispatchError, EditKind, Feature, Strand, ViewId, ViewerResponse};
 
 use crate::app::AppState;
-use crate::command::AppCommand;
+use crate::command::{AppCommand, StagedEdit};
+use crate::focus::FocusScope;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -51,6 +52,37 @@ pub(super) fn resolve_target(
             .map(|v| v.id)
             .ok_or(DispatchError::NoActiveView),
     }
+}
+
+/// Arm a staged, destructive edit on the active view's canvas (the menu path
+/// for Cut/Delete/Paste). This does **not** mutate the buffer — it sets the
+/// same `PendingEdit` an in-canvas keystroke would, so the menu previews before
+/// commit. Commit (`Enter`) then rides the identical keyboard path
+/// (`PendingEdit::to_request` → one `ViewerRequest` → `apply_splice`).
+///
+/// Focusing the view is essential: staging is gated on pane focus and losing
+/// focus *clears* `pending`, so without this a menu-armed stage would vanish
+/// the next frame (the menu may have been opened from another pane).
+pub(super) fn apply_stage_edit(
+    state: &mut AppState,
+    edit: StagedEdit,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = state
+        .workspace
+        .active_view()
+        .map(|v| v.id)
+        .ok_or(DispatchError::NoActiveView)?;
+    // Focus the target pane so the stage survives + Enter reaches it.
+    state.workspace.focus_view(vid);
+    state.focus.set_scope(FocusScope::View(vid));
+    if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
+        match edit {
+            StagedEdit::Cut { start, end } => sv.stage_cut(start, end),
+            StagedEdit::Delete { start, end } => sv.stage_delete(start, end),
+            StagedEdit::Paste { pos } => sv.stage_paste(pos),
+        }
+    }
+    Ok(None)
 }
 
 /// IUPAC nucleotide alphabet (DNA + ambiguity codes). Validation is the command
@@ -470,6 +502,19 @@ mod tests {
         apply_cut(&mut s, None, 2, 4).unwrap();
         assert_eq!(text(&mut s), b"ATAA");
         assert_eq!(s.clipboard.as_deref(), Some(b"GC".as_slice()));
+    }
+
+    #[test]
+    fn stage_edit_arms_preview_without_mutating() {
+        let mut s = state_with(b"ATGCAA");
+        // A menu Cut used to delete immediately; now it stages a preview.
+        apply_stage_edit(&mut s, StagedEdit::Cut { start: 2, end: 4 }).unwrap();
+        assert_eq!(text(&mut s), b"ATGCAA"); // buffer untouched until Enter
+        let vid = s.workspace.active_view().unwrap().id;
+        // Focuses the target view (so the stage survives + Enter commits) and
+        // arms the canvas pending edit.
+        assert_eq!(s.focus.scope, FocusScope::View(vid));
+        assert!(s.workspace.seq_views.get(&vid).unwrap().is_staging());
     }
 
     #[test]

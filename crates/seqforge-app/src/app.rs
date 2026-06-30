@@ -520,10 +520,11 @@ impl eframe::App for SeqForgeApp {
                         .clicked()
                     {
                         if let Some((start, end)) = sel_range {
-                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Cut {
+                            // Stage (preview-before-commit), matching the ⌘X
+                            // keyboard path — not an immediate mutation.
+                            menu_cmds.push(AppCommand::StageEdit(command::StagedEdit::Cut {
                                 start,
                                 end,
-                                view: None,
                             }));
                         }
                         ui.close_menu();
@@ -551,7 +552,10 @@ impl eframe::App for SeqForgeApp {
                         .add_enabled(can_paste, egui::Button::new("Paste  ⌘V"))
                         .clicked()
                     {
-                        menu_cmds.push(AppCommand::Viewer(paste_req));
+                        // Stage the paste (preview), matching the ⌘V keyboard path.
+                        menu_cmds.push(AppCommand::StageEdit(command::StagedEdit::Paste {
+                            pos: paste_pos,
+                        }));
                         ui.close_menu();
                     }
                     if ui
@@ -559,10 +563,10 @@ impl eframe::App for SeqForgeApp {
                         .clicked()
                     {
                         if let Some((start, end)) = sel_range {
-                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Delete {
+                            // Stage the delete (red-struck preview before commit).
+                            menu_cmds.push(AppCommand::StageEdit(command::StagedEdit::Delete {
                                 start,
                                 end,
-                                view: None,
                             }));
                         }
                         ui.close_menu();
