@@ -353,15 +353,6 @@ fn handle_keyboard(
         direct = Some(AppCommand::Viewer(ViewerRequest::Save { view: Some(vid) }));
     } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
         direct = Some(AppCommand::OpenSaveAs { view: Some(vid) });
-    } else if let Some((start, end)) = range {
-        // ⌘C copies immediately — read-only, nothing to preview.
-        if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
-            direct = Some(AppCommand::Viewer(ViewerRequest::Copy {
-                start,
-                end,
-                view: Some(vid),
-            }));
-        }
     }
     if let Some(c) = direct {
         *pending = None;
@@ -369,19 +360,52 @@ fn handle_keyboard(
         return;
     }
 
-    // ── Staged clipboard ops (preview-before-commit, like typing/delete) ──
-    // ⌘X over a range stages a Cut (red-struck preview); ⌘V stages a Paste of
-    // the clipboard bytes (green-added preview). Both commit on Enter through
-    // the single path, identical to the menu/CLI Cut/Paste.
-    if let Some((start, end)) = range {
-        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
-            *pending = Some(PendingEdit::Cut { start, end });
-            return;
+    // ── Clipboard ops (⌘X / ⌘C / ⌘V) ──────────────────────────────────────
+    // eframe translates the platform clipboard shortcuts into *semantic*
+    // events (`Event::Cut` / `Copy` / `Paste`), NOT `Key::X/C/V` + modifier,
+    // so `consume_key` silently misses them. Detect the semantic events (with
+    // a raw-key fallback for backends that deliver them as keys). ⌘C copies
+    // immediately (read-only, nothing to preview); ⌘X / ⌘V stage a Cut / Paste
+    // previewed before commit — both lower to the same Cut/Paste the menu/CLI
+    // post.
+    let (mut want_cut, mut want_copy, mut want_paste) = (false, false, false);
+    ui.input(|i| {
+        for ev in &i.events {
+            match ev {
+                egui::Event::Cut => want_cut = true,
+                egui::Event::Copy => want_copy = true,
+                egui::Event::Paste(_) => want_paste = true,
+                _ => {}
+            }
         }
+    });
+    want_cut |= ui.input_mut(|i| i.consume_key(cmd, Key::X));
+    want_copy |= ui.input_mut(|i| i.consume_key(cmd, Key::C));
+    want_paste |= ui.input_mut(|i| i.consume_key(cmd, Key::V));
+
+    if want_copy {
+        // Read-only — leaves any in-progress stage untouched.
+        if let Some((start, end)) = range {
+            post_req(
+                cmds,
+                ViewerRequest::Copy {
+                    start,
+                    end,
+                    view: Some(vid),
+                },
+            );
+        }
+        return;
     }
-    if ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
+    if want_cut {
+        if let Some((start, end)) = range {
+            *pending = Some(PendingEdit::Cut { start, end });
+        }
+        return;
+    }
+    if want_paste {
         // Only arm if there's something to paste; the preview reads the same
-        // clipboard the commit will.
+        // in-memory clipboard the commit will.
         if let Some(pos) = cursor.or(range.map(|(s, _)| s)) {
             if clipboard.is_some_and(|c| !c.is_empty()) {
                 *pending = Some(PendingEdit::Paste { pos });
