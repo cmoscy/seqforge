@@ -341,7 +341,7 @@ enum PendingEdit {
 
 Three responsibilities, each in one place:
 1. **Arm.** A keystroke at a cursor → `Insert`; typing over a range → `Replace`; the Delete/Backspace key over a range → `Delete`; ⌘V → `Paste`; an RC action → `ReverseComplement`. Positional operands are auto-filled from `view.selection`.
-2. **Preview.** Render the pending change inline — staged bases in a distinct colour for `Insert`/`Replace`; the marked region for `Delete`/RC — with a footer hint `⏎ commit · esc cancel`.
+2. **Preview.** Render the sequence **as it will be after commit** (realized diff preview, Phase 13.6): the committed buffer with `apply_splice` speculatively applied, changes called out track-changes style (green-bg added, red-bg + strikethrough deleted, kept visible), with a footer summary line + `⏎ commit · esc cancel`. Preview is provably identical to the result (same `apply_splice`).
 3. **Commit.** `Enter` translates the `PendingEdit` into exactly **one** `ViewerRequest` and pushes it through the single path; `Esc` clears. **The buffer never changes until `Enter`** — the core invariant.
 
 `Enter` therefore *is* the GUI sending the corresponding CLI command:
@@ -556,10 +556,37 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 - [x] **13.1 — `PendingEdit` state** on `SequenceView` (enum `Insert`/`Replace`/`Delete`) + `to_request(view_id) -> Option<ViewerRequest>` (returns `None` for empty staged / zero-width delete). Unit-tested.
 - [x] **13.2 — arm from input.** `handle_keyboard` reads the frame's events; pure `stage_input` folds typed bases + backspace/forward-delete counts into `pending`: typing arms/extends `Insert` (cursor) or `Replace` (range); Backspace trims staged text, else arms/**extends** a `Delete` leftward; forward-Delete extends rightward; emptying staged text drops the edit. `Esc` clears. Pure history/IO + **clipboard** ops post directly (⌘Z/⇧⌘Z/⌘Y, ⌘S/⇧⌘S, ⌘X/⌘C/⌘V) — clipboard payload lives in `AppState`, outside the canvas. 6 `stage_input`/`to_request` unit tests.
 - [x] **13.3 — commit on Enter.** `Enter` → `to_request` → one `AppCommand::Viewer(req)` targeting `view.id`, then clear. The buffer is reached *only* here.
-- [x] **13.4 — preview render.** Staged `Insert`/`Replace` bases float above the anchor in green with an insertion caret; `Delete`/`Replace` region marked red; footer `⏎ commit · esc cancel` pinned to the visible area. Reads `pending` only. *(RC is menu-direct, so no RC preview.)*
+- [x] **13.4 — preview render (interim, ghost-above; superseded by 13.6).** Staged `Insert`/`Replace` bases float above the anchor in green with an insertion caret; `Delete`/`Replace` region marked red; footer `⏎ commit · esc cancel` pinned to the visible area. Reads `pending` only. **Limitation:** the floating ghost doesn't wrap and looks wrong for any staged text longer than a few bp — replaced by the realized diff preview in 13.6.
 - [x] **13.5 — consistency guard.** Click or focus-loss cancels staging; menus/CLI/agent post directly. Rule documented at the `handle_keyboard` call site + in §6 / decision 10.
+- [x] **13.fix — focus gating.** Keyboard handling gated on the **app-level** `FocusScope::View(id)` (and no open overlay), passed into `show()` like the terminal — not egui widget-focus on the painter, which didn't persist across frames (so Enter never committed). Commit after `a5810d7`.
 
-**Done when:** ✅ (code, 170 tests + clippy + fmt green) staged preview commits on `Enter` (one undo entry), cancels on `Esc`/click/blur; delete/cut preview before commit; menus post directly. **Awaiting manual GUI verification** (preview rendering + focus handoff can't be unit-tested headlessly).
+**Done when:** ✅ (code, 170 tests + clippy + fmt green) staged preview commits on `Enter` (one undo entry), cancels on `Esc`/click/blur; delete/cut preview before commit; menus post directly. Manual GUI commit-on-Enter confirmed after the focus fix.
+
+#### 13.6 — Realized diff preview (replaces 13.4 ghost-above) *(next)*
+
+**Goal:** The staged preview shows the sequence **as it will be after commit** — bases reflow, features recompute — with changes called out track-changes style. WYSIWYG, scales to any length, and preview is provably identical to the result.
+
+**Design (decided — keep consistent):**
+- **Preview = committed buffer with `apply_splice` speculatively applied.** `apply_splice` already does the text splice *and* the feature-shift policy — the exact transform commit runs — so rendering the speculative result **guarantees preview == post-commit state** (one code path, zero divergence). On `Enter`, the real `apply_splice` runs. This *deletes* the special-case ghost-drawing from 13.4.
+- **Track-changes styling (separate visual channel — bases are already per-nucleotide coloured via `theme.bases.for_base`, so changes use background + line, never foreground):**
+  - **Insert / added** → faint **green background** behind the new bases, reflowed inline (glyphs keep their A/C/G/T colour).
+  - **Delete** → faint **red background + strikethrough**, bases **kept visible** (not removed) so the user verifies what's leaving — the deliberate-edit goal. *(Chosen over the realized-removal + junction-caret variant: keep-struck verifies what's lost, needs no virtual buffer for deletes, and matches Word/Docs track-changes.)*
+  - **Replace** → ~~old (red, struck)~~ **new (green)** adjacent.
+- **Footer summary line** per op: `Insert 6 bp · ⏎ commit · esc cancel` / `Delete 10 bp …` / `Replace 4→6 bp …`.
+- **Asymmetry (intended, reads naturally):** additions reflow (bases flow in, features shift in the preview); deletions mark-in-place (no reflow; features stay at committed positions until commit). Only `Insert`/`Replace` materialize a virtual buffer.
+
+**Performance / resource rules (do not regress):**
+- **Memoize the virtual buffer; recompute only when `pending` changes** (≈ once per keystroke), **never per frame**. Cost ≈ one `Vec::splice` = what committing costs anyway.
+- **Deletions need no virtual buffer** (style the committed range in place).
+- **Suppress derived overlays (cut sites / search) while a stage is active** so we don't re-scan enzymes over the virtual sequence each keystroke; they refresh on commit.
+- **Caches stay clean:** the virtual buffer is a transient render-only artifact — never bump `buf.version`, never touch `Cache<K,V>` (those stay anchored to the committed buffer).
+- **Rope-friendly (downstream):** a future rope (deferred, on-evidence) makes the speculative clone near-free via structural sharing — this design gets cheaper, not obsolete.
+
+**Two landing steps (each green before the next):**
+- [ ] **13.6a — virtual-buffer plumbing.** On `pending` change, build a memoized `preview: Option<(Vec<u8>, Annotations)>` by cloning committed text+annotations and running `apply_splice` (for `Insert`/`Replace`; `Delete` keeps committed bytes). Render the normal block/layout path over the preview bytes when a stage is active; suppress derived overlays. Replace the 13.4 ghost-above. Footer summary line. *Done: staged insert of 200 bp wraps across lines correctly; no per-frame clone (assert recompute keyed on a pending fingerprint).*
+- [ ] **13.6b — diff styling.** Background wash (green added / red deleted) + strikethrough on deleted bases, over the per-base coloured glyphs; replace region marking. *Done: insert/replace/delete each render their track-changes styling; verified manually.*
+
+**Done when:** Staging a long insert reflows and wraps like real sequence; deletions show struck-through-red in place; the summary line names the op; commit on `Enter` produces exactly the previewed result; no per-frame virtual-buffer rebuild.
 
 ---
 
