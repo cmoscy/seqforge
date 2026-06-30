@@ -58,6 +58,16 @@ enum PendingEdit {
     },
     /// Backspace/Delete over a selection, or extended ±1 at a cursor.
     Delete { start: usize, end: usize },
+    /// ⌘X over a selection. Buffer effect is identical to `Delete` (same
+    /// red-struck preview); commit additionally copies the bases to the
+    /// clipboard. A distinct variant only so commit lowers to `Cut`, not
+    /// `Delete`.
+    Cut { start: usize, end: usize },
+    /// ⌘V at a cursor / selection start. Buffer effect is identical to an
+    /// `Insert` of the clipboard contents (same green-added preview); the
+    /// staged bytes come from the clipboard (passed into the preview build),
+    /// not from typing, so this variant carries only the position.
+    Paste { pos: usize },
 }
 
 impl PendingEdit {
@@ -83,6 +93,15 @@ impl PendingEdit {
             PendingEdit::Delete { start, end } => (start < end).then_some(ViewerRequest::Delete {
                 start: *start,
                 end: *end,
+                view: Some(view),
+            }),
+            PendingEdit::Cut { start, end } => (start < end).then_some(ViewerRequest::Cut {
+                start: *start,
+                end: *end,
+                view: Some(view),
+            }),
+            PendingEdit::Paste { pos } => Some(ViewerRequest::Paste {
+                pos: *pos,
                 view: Some(view),
             }),
         }
@@ -120,7 +139,13 @@ struct Preview {
 
 impl Preview {
     /// Build the speculative preview for `pending` over the committed buffer.
-    fn build(buffer: &Buffer, annotations: &Annotations, pending: &PendingEdit) -> Preview {
+    /// `clipboard` supplies the bytes for a staged `Paste` (ignored otherwise).
+    fn build(
+        buffer: &Buffer,
+        annotations: &Annotations,
+        pending: &PendingEdit,
+        clipboard: Option<&[u8]>,
+    ) -> Preview {
         let version = buffer.version;
         // Clone the committed state and run the *real* mutation primitive so
         // the preview can never diverge from what commit produces.
@@ -137,10 +162,18 @@ impl Preview {
                 apply_splice(&mut buf, &mut ann, *start..*end, bytes);
                 (Some((*start, *start + bytes.len())), None)
             }
-            // Delete keeps the committed bytes (no virtual buffer): the range
-            // is rendered struck-through in place so the user verifies what's
-            // leaving. Commit removes it.
-            PendingEdit::Delete { start, end } => (None, Some((*start, *end))),
+            // Delete / Cut keep the committed bytes (no virtual buffer): the
+            // range is rendered struck-through in place so the user verifies
+            // what's leaving. Commit removes it (Cut also copies it first).
+            PendingEdit::Delete { start, end } | PendingEdit::Cut { start, end } => {
+                (None, Some((*start, *end)))
+            }
+            // Paste materializes like an Insert of the clipboard bytes.
+            PendingEdit::Paste { pos } => {
+                let bytes = clipboard.unwrap_or_default();
+                apply_splice(&mut buf, &mut ann, *pos..*pos, bytes);
+                (Some((*pos, *pos + bytes.len())), None)
+            }
         };
         Preview {
             version,
@@ -160,6 +193,12 @@ impl Preview {
                 format!("Replace {}→{} bp", end - start, staged.len())
             }
             PendingEdit::Delete { start, end } => format!("Delete {} bp", end - start),
+            PendingEdit::Cut { start, end } => format!("Cut {} bp", end - start),
+            // `added` holds the materialized paste span; fall back to 0.
+            PendingEdit::Paste { .. } => {
+                let n = self.added.map_or(0, |(s, e)| e - s);
+                format!("Paste {n} bp")
+            }
         };
         format!("{body} · ⏎ commit · esc cancel")
     }
@@ -210,8 +249,12 @@ fn stage_input(
             {
                 staged.pop();
             }
-            Some(PendingEdit::Delete { start, .. }) if *start > 0 => *start -= 1,
-            Some(PendingEdit::Delete { .. }) => {} // already at 0
+            Some(PendingEdit::Delete { start, .. }) | Some(PendingEdit::Cut { start, .. })
+                if *start > 0 =>
+            {
+                *start -= 1
+            }
+            Some(PendingEdit::Delete { .. }) | Some(PendingEdit::Cut { .. }) => {} // at 0
             _ => {
                 *pending = match range {
                     Some((start, end)) => Some(PendingEdit::Delete { start, end }),
@@ -227,8 +270,12 @@ fn stage_input(
     // 3 · Forward delete arms/extends a Delete right.
     for _ in 0..del_fwds {
         match pending {
-            Some(PendingEdit::Delete { end, .. }) if *end < seq_len => *end += 1,
-            Some(PendingEdit::Delete { .. }) => {}
+            Some(PendingEdit::Delete { end, .. }) | Some(PendingEdit::Cut { end, .. })
+                if *end < seq_len =>
+            {
+                *end += 1
+            }
+            Some(PendingEdit::Delete { .. }) | Some(PendingEdit::Cut { .. }) => {}
             _ => {
                 *pending = match range {
                     Some((start, end)) => Some(PendingEdit::Delete { start, end }),
@@ -254,14 +301,18 @@ fn stage_input(
 }
 
 /// Read this frame's keyboard input on the focused viewer and drive the staged
-/// `PendingEdit`. In-canvas edits stage (commit on `Enter`, cancel on `Esc`);
-/// clipboard / RC / undo / redo / save post directly (their operands aren't
-/// assembled in the canvas). Never mutates the buffer or `view.selection`.
+/// `PendingEdit`. In-canvas edits stage (commit on `Enter`, cancel on `Esc`):
+/// typing, Backspace/Delete, **⌘X (Cut)** and **⌘V (Paste)** all arm a staged
+/// edit previewed before commit. ⌘C (Copy, read-only) and undo / redo / save
+/// post directly — they have no "after" state to preview. `clipboard` gates
+/// arming a Paste (nothing to paste ⇒ no stage). Never mutates the buffer or
+/// `view.selection`.
 fn handle_keyboard(
     pending: &mut Option<PendingEdit>,
     ui: &egui::Ui,
     view: &View,
     seq_len: usize,
+    clipboard: Option<&[u8]>,
     cmds: &mut Vec<PendingCommand>,
 ) {
     let vid = view.id;
@@ -303,13 +354,8 @@ fn handle_keyboard(
     } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
         direct = Some(AppCommand::OpenSaveAs { view: Some(vid) });
     } else if let Some((start, end)) = range {
-        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
-            direct = Some(AppCommand::Viewer(ViewerRequest::Cut {
-                start,
-                end,
-                view: Some(vid),
-            }));
-        } else if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
+        // ⌘C copies immediately — read-only, nothing to preview.
+        if ui.input_mut(|i| i.consume_key(cmd, Key::C)) {
             direct = Some(AppCommand::Viewer(ViewerRequest::Copy {
                 start,
                 end,
@@ -317,17 +363,30 @@ fn handle_keyboard(
             }));
         }
     }
-    if direct.is_none() && ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
-        if let Some(pos) = cursor.or(range.map(|(s, _)| s)) {
-            direct = Some(AppCommand::Viewer(ViewerRequest::Paste {
-                pos,
-                view: Some(vid),
-            }));
-        }
-    }
     if let Some(c) = direct {
         *pending = None;
         post(cmds, c);
+        return;
+    }
+
+    // ── Staged clipboard ops (preview-before-commit, like typing/delete) ──
+    // ⌘X over a range stages a Cut (red-struck preview); ⌘V stages a Paste of
+    // the clipboard bytes (green-added preview). Both commit on Enter through
+    // the single path, identical to the menu/CLI Cut/Paste.
+    if let Some((start, end)) = range {
+        if ui.input_mut(|i| i.consume_key(cmd, Key::X)) {
+            *pending = Some(PendingEdit::Cut { start, end });
+            return;
+        }
+    }
+    if ui.input_mut(|i| i.consume_key(cmd, Key::V)) {
+        // Only arm if there's something to paste; the preview reads the same
+        // clipboard the commit will.
+        if let Some(pos) = cursor.or(range.map(|(s, _)| s)) {
+            if clipboard.is_some_and(|c| !c.is_empty()) {
+                *pending = Some(PendingEdit::Paste { pos });
+            }
+        }
         return;
     }
 
@@ -555,7 +614,12 @@ impl SequenceView {
     /// Rebuild the memoized preview iff the fingerprint changed. Keyed on the
     /// committed `version` + the `pending` edit, so it recomputes ~once per
     /// keystroke (when `pending` mutates), never per frame.
-    fn refresh_preview(&mut self, buffer: &Buffer, annotations: &Annotations) {
+    fn refresh_preview(
+        &mut self,
+        buffer: &Buffer,
+        annotations: &Annotations,
+        clipboard: Option<&[u8]>,
+    ) {
         let Some(pending) = self.pending.clone() else {
             self.preview = None;
             return;
@@ -565,7 +629,7 @@ impl SequenceView {
                 return; // fingerprint unchanged — keep the memo.
             }
         }
-        self.preview = Some(Preview::build(buffer, annotations, &pending));
+        self.preview = Some(Preview::build(buffer, annotations, &pending, clipboard));
     }
 
     /// Render the sequence viewer. Caller must have already resolved an
@@ -593,6 +657,9 @@ impl SequenceView {
         // terminal gates on `FocusScope::Terminal` — egui widget-focus on the
         // custom painter doesn't persist reliably across frames.
         focused: bool,
+        // In-memory clipboard bytes (`AppState.clipboard`), needed so a staged
+        // Paste can render the clipboard contents in its green-added preview.
+        clipboard: Option<&[u8]>,
     ) {
         // ── Drive in-canvas staging from the keyboard, *before* layout ──
         // Editing must run before sizing so the realized diff preview (a buffer
@@ -603,7 +670,14 @@ impl SequenceView {
         // abandons an uncommitted stage. Menus / CLI / agent post directly —
         // staging is in-canvas only (ROADMAP decision 10).
         if focused {
-            handle_keyboard(&mut self.pending, ui, view, buffer.text.len(), cmds);
+            handle_keyboard(
+                &mut self.pending,
+                ui,
+                view,
+                buffer.text.len(),
+                clipboard,
+                cmds,
+            );
             ui.ctx()
                 .request_repaint_after(Duration::from_millis(BLINK_MS));
         } else {
@@ -614,7 +688,7 @@ impl SequenceView {
         // changed (≈ once per keystroke), then take it out as an owned local so
         // the render closure can freely mutate `self` (drag_start / pending)
         // without aliasing the borrow.
-        self.refresh_preview(buffer, annotations);
+        self.refresh_preview(buffer, annotations, clipboard);
         let preview = self.preview.take();
         let staging = preview.is_some();
         // Render source: the speculative preview while staging, else the
@@ -1681,7 +1755,7 @@ mod tests {
             pos: 4,
             staged: "GGG".into(),
         };
-        let p = Preview::build(&b, &ann, &pe);
+        let p = Preview::build(&b, &ann, &pe, None);
         // Same transform commit will run:
         let mut committed = b.clone();
         let mut cann = ann.clone();
@@ -1701,7 +1775,7 @@ mod tests {
             end: 6,
             staged: "CC".into(),
         };
-        let p = Preview::build(&b, &ann, &pe);
+        let p = Preview::build(&b, &ann, &pe, None);
         let mut committed = b.clone();
         let mut cann = ann.clone();
         apply_splice(&mut committed, &mut cann, 2..6, b"CC");
@@ -1719,10 +1793,54 @@ mod tests {
         let b = buf(b"AAAAAAAAAA");
         let ann = Annotations::default();
         let pe = PendingEdit::Delete { start: 3, end: 7 };
-        let p = Preview::build(&b, &ann, &pe);
+        let p = Preview::build(&b, &ann, &pe, None);
         assert_eq!(p.text, b.text); // unchanged — bases stay visible
         assert_eq!(p.deleted, Some((3, 7)));
         assert_eq!(p.added, None);
+    }
+
+    /// Cut reuses the Delete preview verbatim (red-struck, bytes kept) — only
+    /// its commit lowering differs (→ `Cut`, which also copies).
+    #[test]
+    fn cut_preview_matches_delete() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let cut = Preview::build(&b, &ann, &PendingEdit::Cut { start: 3, end: 7 }, None);
+        let del = Preview::build(&b, &ann, &PendingEdit::Delete { start: 3, end: 7 }, None);
+        assert_eq!(cut.text, del.text);
+        assert_eq!(cut.text, b.text); // bytes kept visible
+        assert_eq!(cut.deleted, Some((3, 7)));
+        assert_eq!(cut.added, None);
+        // Lowers to Cut, not Delete.
+        assert!(matches!(
+            PendingEdit::Cut { start: 3, end: 7 }.to_request(ViewId(1)),
+            Some(ViewerRequest::Cut {
+                start: 3,
+                end: 7,
+                ..
+            })
+        ));
+    }
+
+    /// Paste materializes the clipboard bytes exactly like an Insert of them,
+    /// so the preview is provably identical to what commit produces.
+    #[test]
+    fn paste_preview_materializes_clipboard() {
+        let b = buf(b"AAAAAAAAAA");
+        let ann = Annotations::default();
+        let clip = b"CCC";
+        let p = Preview::build(&b, &ann, &PendingEdit::Paste { pos: 4 }, Some(clip));
+        let mut committed = b.clone();
+        let mut cann = ann.clone();
+        apply_splice(&mut committed, &mut cann, 4..4, clip);
+        assert_eq!(p.text, committed.text);
+        assert_eq!(p.text, b"AAAACCCAAAAAA");
+        assert_eq!(p.added, Some((4, 7))); // green wash over the pasted bases
+        assert_eq!(p.deleted, None);
+        assert!(matches!(
+            PendingEdit::Paste { pos: 4 }.to_request(ViewId(1)),
+            Some(ViewerRequest::Paste { pos: 4, .. })
+        ));
     }
 
     /// The memo rebuilds only when the fingerprint (version + pending) changes,
@@ -1739,21 +1857,21 @@ mod tests {
             }),
             ..Default::default()
         };
-        view.refresh_preview(&b, &ann);
+        view.refresh_preview(&b, &ann, None);
         // Tamper the cache; a same-fingerprint refresh must NOT rebuild it.
         view.preview.as_mut().unwrap().text = b"SENTINEL".to_vec();
-        view.refresh_preview(&b, &ann);
+        view.refresh_preview(&b, &ann, None);
         assert_eq!(view.preview.as_ref().unwrap().text, b"SENTINEL");
         // Changing the pending edit changes the fingerprint → rebuild.
         view.pending = Some(PendingEdit::Insert {
             pos: 0,
             staged: "GG".into(),
         });
-        view.refresh_preview(&b, &ann);
+        view.refresh_preview(&b, &ann, None);
         assert_eq!(view.preview.as_ref().unwrap().text, b"GGAAAAAAAAAA");
         // Clearing pending drops the preview.
         view.pending = None;
-        view.refresh_preview(&b, &ann);
+        view.refresh_preview(&b, &ann, None);
         assert!(view.preview.is_none());
     }
 }

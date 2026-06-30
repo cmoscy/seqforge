@@ -36,6 +36,9 @@ pub struct TabViewer<'a> {
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
     pub minimap: &'a mut MiniMap,
+    /// In-memory clipboard bytes (`AppState.clipboard`), passed to the sequence
+    /// viewer so a staged Paste can preview the clipboard contents.
+    pub clipboard: Option<&'a [u8]>,
     /// Per-frame snapshot of the active config; cheap to clone.
     pub config: Arc<Config>,
 }
@@ -180,6 +183,8 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // Computed before the `self` destructure below borrows it.
                 let view_focused =
                     self.focus.scope == FocusScope::View(view_id) && self.overlays.is_empty();
+                // `Option<&[u8]>` is `Copy`; read it out before the destructure.
+                let clipboard = self.clipboard;
                 let TabViewer {
                     workspace,
                     pending_commands,
@@ -196,7 +201,16 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
                     match view.kind {
                         seqforge_core::ViewKind::TextView => {
-                            seq_view.show(ui, view, buf, ann, pending_commands, &cfg, view_focused);
+                            seq_view.show(
+                                ui,
+                                view,
+                                buf,
+                                ann,
+                                pending_commands,
+                                &cfg,
+                                view_focused,
+                                clipboard,
+                            );
                         }
                     }
                 });

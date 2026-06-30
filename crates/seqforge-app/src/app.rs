@@ -732,6 +732,7 @@ impl eframe::App for SeqForgeApp {
             focus,
             minimap,
             config,
+            clipboard,
             ..
         } = &mut self.state;
 
@@ -750,6 +751,7 @@ impl eframe::App for SeqForgeApp {
                             overlays,
                             focus,
                             minimap,
+                            clipboard: clipboard.as_deref(),
                             config: config.clone(),
                         },
                     );
