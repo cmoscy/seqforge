@@ -420,6 +420,13 @@ impl eframe::App for SeqForgeApp {
         // keymap (Stage 4) and the future agent reject path.
         let mut menu_cmds: Vec<AppCommand> = Vec::new();
         let recent_snapshot = self.state.recent_files.clone();
+        // Selection-derived operands for the Edit menu's editor ops. A range
+        // selection (not a bare cursor) feeds Cut/Copy/Delete/RC; the cursor
+        // start is the paste position. `is_enabled` greys items whose operand
+        // is missing, so these are only read when the action is enabled.
+        let active_sel = self.state.workspace.active_view().and_then(|v| v.selection);
+        let sel_range = active_sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
+        let paste_pos = active_sel.map(|s| s.ordered().0).unwrap_or(0);
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -433,6 +440,26 @@ impl eframe::App for SeqForgeApp {
                         .clicked()
                     {
                         menu_cmds.push(AppCommand::CloseDoc);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let save_req = ViewerRequest::Save { view: None };
+                    let can_save =
+                        command::is_enabled(&AppCommand::Viewer(save_req.clone()), &self.state);
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save  ⌘S"))
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::Viewer(save_req));
+                        ui.close_menu();
+                    }
+                    let can_save_as =
+                        command::is_enabled(&AppCommand::OpenSaveAs { view: None }, &self.state);
+                    if ui
+                        .add_enabled(can_save_as, egui::Button::new("Save As…  ⇧⌘S"))
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::OpenSaveAs { view: None });
                         ui.close_menu();
                     }
                     if !recent_snapshot.is_empty() {
@@ -457,6 +484,107 @@ impl eframe::App for SeqForgeApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    // ── Undo / Redo ──
+                    let undo_req = ViewerRequest::Undo { view: None };
+                    let can_undo =
+                        command::is_enabled(&AppCommand::Viewer(undo_req.clone()), &self.state);
+                    if ui
+                        .add_enabled(can_undo, egui::Button::new("Undo  ⌘Z"))
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::Viewer(undo_req));
+                        ui.close_menu();
+                    }
+                    let redo_req = ViewerRequest::Redo { view: None };
+                    let can_redo =
+                        command::is_enabled(&AppCommand::Viewer(redo_req.clone()), &self.state);
+                    if ui
+                        .add_enabled(can_redo, egui::Button::new("Redo  ⇧⌘Z"))
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::Viewer(redo_req));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+
+                    // ── Cut / Copy / Paste / Delete ── (operands from selection)
+                    let range_probe = ViewerRequest::Cut {
+                        start: 0,
+                        end: 0,
+                        view: None,
+                    };
+                    let has_range =
+                        command::is_enabled(&AppCommand::Viewer(range_probe), &self.state);
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Cut  ⌘X"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Cut {
+                                start,
+                                end,
+                                view: None,
+                            }));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Copy  ⌘C"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
+                                start,
+                                end,
+                                view: None,
+                            }));
+                        }
+                        ui.close_menu();
+                    }
+                    let paste_req = ViewerRequest::Paste {
+                        pos: paste_pos,
+                        view: None,
+                    };
+                    let can_paste =
+                        command::is_enabled(&AppCommand::Viewer(paste_req.clone()), &self.state);
+                    if ui
+                        .add_enabled(can_paste, egui::Button::new("Paste  ⌘V"))
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::Viewer(paste_req));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Delete"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Delete {
+                                start,
+                                end,
+                                view: None,
+                            }));
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+
+                    // ── Reverse Complement ──
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Reverse Complement Selection"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::ReverseComplement {
+                                start,
+                                end,
+                                view: None,
+                            }));
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+
                     let can_find = command::is_enabled(&AppCommand::OpenFind, &self.state);
                     if ui
                         .add_enabled(can_find, egui::Button::new("Find…  ⌘F"))

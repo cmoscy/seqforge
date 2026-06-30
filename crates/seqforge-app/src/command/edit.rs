@@ -576,4 +576,42 @@ mod tests {
         let err = apply_insert(&mut s, Some(bogus), 0, "G".into()).unwrap_err();
         assert!(matches!(err, DispatchError::ViewNotFound(_)));
     }
+
+    /// Phase 12f refinement D: menu/keymap greying follows live state.
+    #[test]
+    fn menu_enablement_tracks_state() {
+        use crate::command::is_enabled;
+        use seqforge_core::{Selection, ViewerRequest};
+
+        let mut s = state_with(b"ATGC");
+        let undo = AppCommand::Viewer(ViewerRequest::Undo { view: None });
+        let save = AppCommand::Viewer(ViewerRequest::Save { view: None });
+        let paste = AppCommand::Viewer(ViewerRequest::Paste { pos: 0, view: None });
+        let cut = AppCommand::Viewer(ViewerRequest::Cut {
+            start: 0,
+            end: 0,
+            view: None,
+        });
+
+        // Fresh buffer: no history, not dirty, empty clipboard, no range.
+        assert!(!is_enabled(&undo, &s), "nothing to undo yet");
+        assert!(!is_enabled(&save, &s), "not dirty yet");
+        assert!(!is_enabled(&paste, &s), "clipboard empty");
+        assert!(!is_enabled(&cut, &s), "no range selection");
+
+        // After an edit: undo available + buffer dirty → save available.
+        apply_insert(&mut s, None, 0, "G".into()).unwrap();
+        assert!(is_enabled(&undo, &s));
+        assert!(is_enabled(&save, &s));
+
+        // Clipboard populated → paste available.
+        s.clipboard = Some(b"AA".to_vec());
+        assert!(is_enabled(&paste, &s));
+
+        // Range selection → cut available; a bare cursor does not enable it.
+        s.workspace.active_view_mut().unwrap().selection = Some(Selection::cursor(1));
+        assert!(!is_enabled(&cut, &s), "cursor is not a range");
+        s.workspace.active_view_mut().unwrap().selection = Some(Selection::range(0, 2));
+        assert!(is_enabled(&cut, &s));
+    }
 }

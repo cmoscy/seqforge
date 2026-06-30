@@ -165,11 +165,27 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | SplitPane { .. } => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
         SwitchTab { .. } | CloseTab { .. } => true,
-        Viewer(_) => true,
+        // Editor write-ops carry their own enablement so menus / keymap grey
+        // correctly (Phase 12f). Read-scoped variants and the position-explicit
+        // ops just need an open view.
+        Viewer(req) => match req {
+            ViewerRequest::Undo { .. } => active_can_undo(state),
+            ViewerRequest::Redo { .. } => active_can_redo(state),
+            ViewerRequest::Cut { .. }
+            | ViewerRequest::Copy { .. }
+            | ViewerRequest::Delete { .. }
+            | ViewerRequest::ReverseComplement { .. } => has_range_selection(state),
+            ViewerRequest::Paste { .. } => {
+                state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
+                    && state.workspace.active_view().is_some()
+            }
+            ViewerRequest::Save { .. } => active_dirty(state),
+            ViewerRequest::Open { .. } => true,
+            // SaveAs, GoTo/Find/Enzymes, Insert/Replace/feature ops, Close.
+            _ => state.workspace.active_view().is_some(),
+        },
         SetSelection(_) | SelectFeature(_) => true,
         RevealRange { .. } => state.workspace.active_view().is_some(),
-        // Fine-grained editor greying (Undo↔can_undo, Save↔dirty, …) lands in
-        // Phase 12f; for now the save side-effects just need an active view.
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli | ReloadConfig
@@ -214,6 +230,43 @@ pub(super) fn view_tab_order(state: &AppState) -> Vec<ViewId> {
 
 pub(super) fn active_selection(state: &AppState) -> Option<Selection> {
     state.workspace.active_view().and_then(|v| v.selection)
+}
+
+// ── Editor-op enablement predicates (Phase 12f) ──────────────────────────────--
+
+/// True when the active view holds a non-empty range selection (not a bare
+/// cursor) — gates Cut/Copy/Delete/Reverse-Complement.
+pub(super) fn has_range_selection(state: &AppState) -> bool {
+    active_selection(state).is_some_and(|s| !s.is_cursor())
+}
+
+/// `(can_undo, can_redo)` for the active buffer's history, `(false, false)` if
+/// no view or no history yet. Reads through the buffer store with a shared
+/// borrow (no write lock needed).
+fn active_history_flags(state: &AppState) -> (bool, bool) {
+    state
+        .workspace
+        .active_view()
+        .and_then(|v| state.workspace.buffers.history(v.buffer_id))
+        .map_or((false, false), |h| (h.can_undo(), h.can_redo()))
+}
+
+fn active_can_undo(state: &AppState) -> bool {
+    active_history_flags(state).0
+}
+
+fn active_can_redo(state: &AppState) -> bool {
+    active_history_flags(state).1
+}
+
+/// True when the active buffer has unsaved changes — gates Save.
+fn active_dirty(state: &AppState) -> bool {
+    state
+        .workspace
+        .active_view()
+        .and_then(|v| state.workspace.buffers.get(v.buffer_id))
+        .and_then(|arc| arc.read().ok().map(|b| b.dirty))
+        .unwrap_or(false)
 }
 
 pub(super) fn emit_selection_diff(state: &AppState, before: Option<Selection>) {

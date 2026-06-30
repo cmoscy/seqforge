@@ -33,7 +33,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 |---|---|---|---|
 | **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 (9 tag/verify left) | `v0.1.0` tag |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
-| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–11 done · Phases 12–16 | Phase 12 — editor commands in dispatcher |
+| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–12 done · Phases 13–16 | Phase 13 — keyboard input in the viewer |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
 | **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 📋 not started | Phase 0.1 — `seqforge-thermo` + `seqforge tm` |
 
@@ -85,8 +85,8 @@ flowchart LR
 
     classDef done fill:#1f5,stroke:#093,color:#000;
     classDef next fill:#fd5,stroke:#a80,color:#000;
-    class V,R1,R25,T1,E10,E11 done;
-    class E12 next;
+    class V,R1,R25,T1,E10,E11,E12 done;
+    class E13 next;
 ```
 
 **Reading it:** the editor (v0.2) is the critical path and depends only on the
