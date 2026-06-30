@@ -21,6 +21,9 @@ const BLINK_MS: u64 = 500;
 /// never recolours the bases.
 const DIFF_ADD_BG: Color32 = Color32::from_rgba_premultiplied(40, 120, 75, 70); // added
 const DIFF_DEL_BG: Color32 = Color32::from_rgba_premultiplied(120, 45, 45, 70); // removed
+/// Strikethrough line struck through kept-but-deleted bases (drawn over the
+/// glyphs, so opaque rather than a wash).
+const DIFF_DEL_LINE: Color32 = Color32::from_rgb(214, 92, 92);
 
 /// IUPAC nucleotide alphabet (DNA + ambiguity codes). Typed characters outside
 /// it are silently dropped (plan §6) so junk keystrokes never reach the edit
@@ -1103,6 +1106,25 @@ impl SequenceView {
                 let block_comp = seqforge_bio::complement(&seq[block_start..block_end]);
                 let bot_galley = build_strand_galley(ui, &block_comp, &font_id, 0.65, &cfg.theme);
                 painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
+
+                // ── Delete strikethrough (Phase 13.6b) ────────────────────
+                // Deleted bases are kept visible (verify-what's-leaving) with a
+                // strikethrough struck through both strands, drawn *over* the
+                // glyphs. The red wash behind them was painted in pass 2's diff
+                // block above.
+                if let Some((rs, re)) = preview.as_ref().and_then(|p| p.deleted) {
+                    let vis_s = rs.max(block_start);
+                    let vis_e = re.min(block_end);
+                    if vis_s < vis_e {
+                        let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                        let ex = seq_x0 + (vis_e - block_start) as f32 * char_width;
+                        let stroke = Stroke::new(1.5, DIFF_DEL_LINE);
+                        for strand_top in [top_y, bot_y] {
+                            let my = strand_top + char_height * 0.5;
+                            painter.line_segment([Pos2::new(sx, my), Pos2::new(ex, my)], stroke);
+                        }
+                    }
+                }
 
                 // ── Annotation bars (below strands) ───────────────────────
                 for &(feat_idx, row) in &layout.feat_rows {

@@ -583,8 +583,20 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 - **Rope-friendly (downstream):** a future rope (deferred, on-evidence) makes the speculative clone near-free via structural sharing — this design gets cheaper, not obsolete.
 
 **Two landing steps (each green before the next):**
-- [ ] **13.6a — virtual-buffer plumbing.** On `pending` change, build a memoized `preview: Option<(Vec<u8>, Annotations)>` by cloning committed text+annotations and running `apply_splice` (for `Insert`/`Replace`; `Delete` keeps committed bytes). Render the normal block/layout path over the preview bytes when a stage is active; suppress derived overlays. Replace the 13.4 ghost-above. Footer summary line. *Done: staged insert of 200 bp wraps across lines correctly; no per-frame clone (assert recompute keyed on a pending fingerprint).*
-- [ ] **13.6b — diff styling.** Background wash (green added / red deleted) + strikethrough on deleted bases, over the per-base coloured glyphs; replace region marking. *Done: insert/replace/delete each render their track-changes styling; verified manually.*
+- [x] **13.6a — virtual-buffer plumbing.** (`1cfbe06`) `SequenceView.preview: Option<Preview>` (text + annotations + `added`/`deleted` render-space ranges), memoized on a `(buffer.version, pending)` fingerprint — rebuilt ~once per keystroke, never per frame. `Insert`/`Replace` materialize via the real `apply_splice`; `Delete` keeps committed bytes. Keyboard staging + preview build moved *before* layout so the speculative length drives block sizing the same frame. Normal block/strand/feature path renders over preview bytes + reflowed annotations while staging; derived overlays (cut sites / search) and the committed-space selection highlight suppressed. Footer is now an op summary line. Preview never bumps `version` / touches `Cache`. *Done: 174 tests + clippy + fmt green; `refresh_preview_is_memoized_on_fingerprint` asserts no per-frame rebuild.*
+- [x] **13.6b — diff styling.** Faint green wash behind added bases, faint red wash + opaque strikethrough (through both strands, over the glyphs) on kept-visible deleted bases. *Done: 174 tests + clippy + fmt green; manual GUI check pending.*
+
+> **Realized decision — `Replace` shows new-green only (no old-struck).** The
+> design sketch above floated "old (red, struck) then new (green) adjacent" for
+> `Replace`. The landed code keeps `Replace` on the single `apply_splice` path
+> (old bytes removed, new bytes washed green over the replaced span), because
+> the **hard constraint — preview provably identical to the commit result —
+> wins**: an old-struck hybrid buffer would contain bytes commit removes, so
+> "commit produces exactly the previewed result" would only hold *modulo struck*
+> and feature reflow would diverge. Old-struck verify-what's-leaving is retained
+> where it has no identity cost: `Delete` (kept-visible + struck in place). The
+> selection that armed the `Replace` already showed what's being replaced, and
+> the footer names the size change (`Replace 4→6 bp`).
 
 **Done when:** Staging a long insert reflows and wraps like real sequence; deletions show struck-through-red in place; the summary line names the op; commit on `Enter` produces exactly the previewed result; no per-frame virtual-buffer rebuild.
 
