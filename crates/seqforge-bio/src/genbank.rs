@@ -81,6 +81,8 @@ fn map_feature(f: &GbFeature) -> Option<Feature> {
     }
 
     Some(Feature {
+        // Placeholder; `Annotations::new` re-mints a session-scoped id on load.
+        id: Default::default(),
         range: start..end,
         raw_kind,
         label,
@@ -108,7 +110,7 @@ pub fn write(buf: &Buffer, ann: &Annotations, path: &Path) -> Result<(), BioErro
     seq.molecule_type = Some("DNA".to_string());
     seq.len = Some(buf.text.len());
     seq.seq = buf.text.clone();
-    seq.features = ann.features.iter().map(feature_to_gb).collect();
+    seq.features = ann.iter().map(feature_to_gb).collect();
 
     let file = File::create(path)?;
     seq.write(BufWriter::new(file))

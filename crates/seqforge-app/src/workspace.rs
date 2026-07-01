@@ -438,6 +438,44 @@ impl Workspace {
         Ok(())
     }
 
+    /// The edit entry point for **annotation-only** mutations (feature
+    /// add/remove/rename): the sequence bytes are untouched, but the change is
+    /// still undoable via the annotation-snapshot half of the history entry.
+    ///
+    /// The closure mutates the annotations (using the id-only API); it may read
+    /// the buffer for validation. On success we record a history entry with an
+    /// **empty splice delta** (`start = 0`, no bytes) plus the pre-edit
+    /// annotation snapshot — so `undo` restores the features (ids ride the
+    /// snapshot for free) and touches no text — then bump `version` + `dirty`.
+    /// `EditKind::Other` guarantees the entry never coalesces with typing. If
+    /// the closure returns `Err`, nothing is recorded and no flags change.
+    pub fn edit_annotations<R>(
+        &mut self,
+        view_id: ViewId,
+        f: impl FnOnce(&mut Annotations, &Buffer) -> Result<R, DispatchError>,
+    ) -> Result<R, DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let ann_before = ann.clone();
+        let result = f(ann, &buf)?;
+        history.record(0, Vec::new(), Vec::new(), &ann_before, EditKind::Other);
+        buf.version += 1;
+        buf.dirty = true;
+        Ok(result)
+    }
+
     /// Undo the last edit on the view's buffer. Returns whether anything was
     /// undone. Pure history op — takes no new snapshot.
     pub fn undo(&mut self, view_id: ViewId) -> Result<bool, DispatchError> {
@@ -555,7 +593,7 @@ mod tests {
             .with_active_buffer(|view, buf, ann| {
                 assert_eq!(view.id, vid);
                 assert_eq!(buf.text, b"ATGC");
-                assert!(ann.features.is_empty());
+                assert!(ann.is_empty());
                 42
             })
             .unwrap();

@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use egui::{
     Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2, text::LayoutJob,
 };
 use seqforge_core::{
-    Annotations, Buffer, CutSite, Feature, FeatureKind, Selection, Strand, View, ViewId,
+    Annotations, Buffer, CutSite, Feature, FeatureId, FeatureKind, Selection, Strand, View, ViewId,
     ViewerRequest, mutations::apply_splice,
 };
 
@@ -533,7 +534,7 @@ pub(crate) struct BlockLayout {
 /// `offsets[n_blocks]` is the total content height.
 #[allow(clippy::too_many_arguments)]
 fn build_block_layouts(
-    features: &[Feature],
+    annotations: &Annotations,
     cut_sites: &[CutSite],
     seq_len: usize,
     line_width: usize,
@@ -544,6 +545,9 @@ fn build_block_layouts(
     strand_h: f32,
     annot_row_h: f32,
     block_gap: f32,
+    // Height of the translation band (0 when no lanes shown). Sits between the
+    // bottom strand and the annotation bars in every block.
+    trans_band_h: f32,
 ) -> (Vec<BlockLayout>, Vec<f32>) {
     let n_blocks = seq_len.div_ceil(line_width).max(1);
     let mut layouts: Vec<BlockLayout> = Vec::with_capacity(n_blocks);
@@ -559,7 +563,7 @@ fn build_block_layouts(
         // drawn in this row.
         let mut feat_idx_list: Vec<usize> = Vec::new();
         let mut feat_ranges: Vec<(usize, usize)> = Vec::new();
-        for (i, f) in features.iter().enumerate() {
+        for (i, f) in annotations.iter().enumerate() {
             if f.range.start < block_end && f.range.end > block_start {
                 feat_idx_list.push(i);
                 feat_ranges.push((f.range.start.max(block_start), f.range.end.min(block_end)));
@@ -587,7 +591,8 @@ fn build_block_layouts(
 
         let cut_label_h = n_cut_rows as f32 * cut_label_row_h;
         let annot_section_h = n_feat_rows as f32 * annot_row_h;
-        let height = cut_label_h + ruler_h + strand_h * 2.0 + annot_section_h + block_gap;
+        let height =
+            cut_label_h + ruler_h + strand_h * 2.0 + trans_band_h + annot_section_h + block_gap;
 
         offsets.push(offsets.last().copied().unwrap_or(0.0) + height);
         layouts.push(BlockLayout {
@@ -662,6 +667,344 @@ pub struct SequenceView {
     /// `handle_keyboard` runs, so we read last frame's value. Only changes on
     /// resize, so the one-frame lag is invisible; `0` until the first layout.
     last_line_width: usize,
+    /// The feature under the pointer at the last right-click, captured so the
+    /// context menu (Rename / Remove / Translate) can act on a stable
+    /// `FeatureId` while the menu is open. `None` when the last secondary click
+    /// missed every annotation bar (the menu then renders nothing).
+    context_feature: Option<FeatureContext>,
+    /// The ORF under the pointer at the last right-click in a frame lane (when no
+    /// feature was hit), enabling "Annotate ORF as CDS feature".
+    context_orf: Option<OrfPromote>,
+    /// Which in-canvas translation lanes are shown (View → Translation). Transient
+    /// per-view state (like the active enzyme set), toggled through `AppCommand`.
+    pub translation: TranslationDisplay,
+    /// Memoized translation lanes, rebuilt only when `(buffer.version, translation)`
+    /// changes — never per frame. `None` when no lanes are shown.
+    translation_cache: Option<TranslationCache>,
+    /// The codon a translation selection is anchored to (forward nt range),
+    /// set when a residue is clicked. Shift-clicking another residue keeps this
+    /// whole codon selected in *either* direction — the two nt indices in
+    /// `Selection` can't disambiguate which codon the anchor belongs to once
+    /// the range is extended past a codon boundary. Cleared on any non-codon
+    /// selection. See the shift-click handler below.
+    translation_anchor: Option<std::ops::Range<usize>>,
+}
+
+/// Which in-canvas translation lanes are active.
+///
+/// Two independent kinds of translation, matching the biology:
+/// - **Feature translations** are *feature-anchored* — a feature's protein reads
+///   from its own start in its own strand (`/codon_start`), so it never needs a
+///   global frame. `show_cds` auto-enables this for every CDS; `features` adds
+///   individually-toggled features (of any kind).
+/// - **Global frame lanes** (`frames`, indexed `[+1, +2, +3, −1, −2, −3]`) are
+///   the *frameless* whole-sequence scan, where a reading frame must be chosen
+///   because there's no feature to anchor to.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TranslationDisplay {
+    pub frames: [bool; 6],
+    /// Auto-translate every CDS feature (anchored to its start/strand).
+    pub show_cds: bool,
+    /// Individually-toggled features to translate inline (any kind), by id.
+    pub features: HashSet<FeatureId>,
+    /// Emphasize ORFs in the frame lanes (stops red, Met green, Met→stop wash).
+    pub show_orfs: bool,
+}
+
+impl TranslationDisplay {
+    /// Any lane visible at all?
+    pub fn is_active(&self) -> bool {
+        self.show_cds || !self.features.is_empty() || self.frames.iter().any(|f| *f)
+    }
+
+    /// Should this feature get an inline translation lane? Auto for CDS when
+    /// `show_cds`, plus any feature explicitly toggled on.
+    fn wants_feature(&self, id: FeatureId, is_cds: bool) -> bool {
+        (self.show_cds && is_cds) || self.features.contains(&id)
+    }
+}
+
+/// Frame lane index → (strand, codon_start). `0..3` forward, `3..6` reverse.
+fn frame_spec(i: usize) -> (Strand, usize) {
+    if i < 3 {
+        (Strand::Forward, i + 1)
+    } else {
+        (Strand::Reverse, i - 2)
+    }
+}
+
+/// Human label for a frame-lane index (`+1`…`−3`).
+fn frame_label(i: usize) -> &'static str {
+    ["+1", "+2", "+3", "−1", "−2", "−3"][i]
+}
+
+/// How to colour an amino-acid glyph in a translation lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AaKind {
+    Normal,
+    /// Start codon (Met) — green when ORFs are emphasized.
+    Start,
+    /// Stop codon (`*`) — red when ORFs are emphasized.
+    Stop,
+}
+
+/// One amino acid placed under the sequence. `pos` is the **forward-strand
+/// 0-based position of the codon's middle base**, so the glyph aligns under
+/// that column regardless of strand.
+#[derive(Debug, Clone)]
+struct AaGlyph {
+    pos: usize,
+    ch: char,
+    kind: AaKind,
+}
+
+/// One translation lane (a global frame, or the merged CDS lane).
+#[derive(Debug, Clone)]
+struct TransLane {
+    label: String,
+    /// The lane's strand — used when promoting one of its ORFs to a feature.
+    strand: Strand,
+    glyphs: Vec<AaGlyph>,
+    /// Met→stop ORF spans (forward nt `[start, end)`) for the wash + promote;
+    /// empty unless ORF emphasis is on.
+    orf_runs: Vec<(usize, usize)>,
+}
+
+/// An ORF the user right-clicked in a frame lane, ready to annotate as a CDS.
+#[derive(Debug, Clone, Copy)]
+struct OrfPromote {
+    start: usize,
+    end: usize,
+    strand: Strand,
+}
+
+/// Memoized translation lanes for the whole buffer, rebuilt only when the
+/// sequence version or the display toggles change.
+#[derive(Debug, Clone)]
+struct TranslationCache {
+    version: u64,
+    display: TranslationDisplay,
+    /// Forward frame lanes then reverse frame lanes, in display order.
+    frame_lanes: Vec<TransLane>,
+    /// Feature-anchored lanes (auto-CDS + toggled features), each read from
+    /// its own start/strand and packed so overlapping features never share a
+    /// lane (same greedy interval stacking as the annotation bars).
+    feature_lanes: Vec<TransLane>,
+}
+
+/// Compute AA glyphs for a whole-sequence reading frame. Reverse frames read the
+/// reverse complement but map each glyph back to its forward column.
+fn frame_glyphs(seq: &[u8], strand: Strand, frame1: usize) -> Vec<AaGlyph> {
+    let offset = frame1 - 1;
+    let oriented = match strand {
+        Strand::Reverse => seqforge_bio::reverse_complement(seq),
+        _ => seq.to_vec(),
+    };
+    let protein = seqforge_bio::translate(&oriented, Strand::Forward, frame1);
+    let l = seq.len();
+    protein
+        .chars()
+        .enumerate()
+        .filter_map(|(j, ch)| {
+            let o_mid = offset + 3 * j + 1;
+            if o_mid >= l {
+                return None;
+            }
+            let pos = match strand {
+                Strand::Reverse => l - 1 - o_mid,
+                _ => o_mid,
+            };
+            let kind = match ch {
+                '*' => AaKind::Stop,
+                'M' => AaKind::Start,
+                _ => AaKind::Normal,
+            };
+            Some(AaGlyph { pos, ch, kind })
+        })
+        .collect()
+}
+
+/// Glyphs for one CDS feature translated in its own frame/strand, placed at
+/// forward columns within the feature span.
+fn cds_glyphs(
+    seq: &[u8],
+    range: std::ops::Range<usize>,
+    strand: Strand,
+    codon_start: usize,
+) -> Vec<AaGlyph> {
+    let end = range.end.min(seq.len());
+    if range.start >= end {
+        return Vec::new();
+    }
+    let sub = &seq[range.start..end];
+    let sublen = sub.len();
+    let offset = codon_start.clamp(1, 3) - 1;
+    let oriented = match strand {
+        Strand::Reverse => seqforge_bio::reverse_complement(sub),
+        _ => sub.to_vec(),
+    };
+    let protein = seqforge_bio::translate(&oriented, Strand::Forward, codon_start);
+    protein
+        .chars()
+        .enumerate()
+        .filter_map(|(j, ch)| {
+            let o_mid = offset + 3 * j + 1;
+            if o_mid >= sublen {
+                return None;
+            }
+            let pos = match strand {
+                Strand::Reverse => range.start + (sublen - 1 - o_mid),
+                _ => range.start + o_mid,
+            };
+            let kind = match ch {
+                '*' => AaKind::Stop,
+                'M' => AaKind::Start,
+                _ => AaKind::Normal,
+            };
+            Some(AaGlyph { pos, ch, kind })
+        })
+        .collect()
+}
+
+/// Extend a codon-anchored translation selection so both the origin codon
+/// (`anchor`) and the newly clicked codon (`clicked`) stay whole, preserving
+/// drag direction. Reaching right, the range runs from the origin's 5′ edge to
+/// the clicked codon's 3′ edge; reaching left, from the origin's 3′ edge to the
+/// clicked codon's 5′ edge — so a reverse (3′→5′) selection keeps the origin
+/// residue's 3′ bases instead of clipping them. Matches whole-codon selection
+/// in Benchling / SnapGene.
+fn codon_extend(anchor: &std::ops::Range<usize>, clicked: &std::ops::Range<usize>) -> Selection {
+    if clicked.start >= anchor.start {
+        Selection {
+            anchor: anchor.start,
+            focus: clicked.end,
+        }
+    } else {
+        Selection {
+            anchor: anchor.end,
+            focus: clicked.start,
+        }
+    }
+}
+
+/// Build the memoized translation lanes for the current display toggles.
+fn build_translation_cache(
+    seq: &[u8],
+    annotations: &Annotations,
+    version: u64,
+    display: TranslationDisplay,
+) -> TranslationCache {
+    // ORF spans (per strand+frame) for the wash, computed once.
+    let all_orfs = if display.show_orfs {
+        seqforge_bio::find_orfs(seq, 1, true, true)
+    } else {
+        Vec::new()
+    };
+
+    let mut frame_lanes = Vec::new();
+    for i in 0..6 {
+        if !display.frames[i] {
+            continue;
+        }
+        let (strand, frame1) = frame_spec(i);
+        let glyphs = frame_glyphs(seq, strand, frame1);
+        let orf_runs = all_orfs
+            .iter()
+            .filter(|o| o.strand == strand && o.frame == frame1)
+            .map(|o| (o.start, o.end))
+            .collect();
+        frame_lanes.push(TransLane {
+            label: frame_label(i).to_string(),
+            strand,
+            glyphs,
+            orf_runs,
+        });
+    }
+
+    // Feature-anchored translation lanes: every feature the display wants
+    // (auto-CDS + individually toggled), each read from its own start/strand.
+    // Overlapping features are packed onto separate lanes via the same greedy
+    // interval stacking the annotation bars use, so their residues never
+    // collide in a shared row.
+    let wanted: Vec<&Feature> = annotations
+        .iter()
+        .filter(|f| {
+            let is_cds = matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds);
+            display.wants_feature(f.id, is_cds)
+        })
+        .collect();
+    let ranges: Vec<(usize, usize)> = wanted
+        .iter()
+        .map(|f| (f.range.start, f.range.end))
+        .collect();
+    let (rows, n_rows) = greedy_stack(&ranges);
+    let mut feature_lanes: Vec<TransLane> = (0..n_rows)
+        .map(|_| TransLane {
+            label: "aa".to_string(),
+            strand: Strand::Forward,
+            glyphs: Vec::new(),
+            orf_runs: Vec::new(),
+        })
+        .collect();
+    for (i, f) in wanted.iter().enumerate() {
+        let cs = f
+            .qualifiers
+            .get("codon_start")
+            .and_then(|v| v.as_deref())
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|n| (1..=3).contains(n))
+            .unwrap_or(1);
+        feature_lanes[rows[i]]
+            .glyphs
+            .extend(cds_glyphs(seq, f.range.clone(), f.strand, cs));
+    }
+
+    TranslationCache {
+        version,
+        display,
+        frame_lanes,
+        feature_lanes,
+    }
+}
+
+/// Snapshot of a right-clicked feature, driving the annotation-bar context
+/// menu. Captured by value so the menu closure needs no live annotation borrow.
+#[derive(Debug, Clone)]
+struct FeatureContext {
+    id: FeatureId,
+    start: usize,
+    end: usize,
+    strand: Strand,
+    label: String,
+    /// Verbatim GenBank feature-type string (for the Edit dialog).
+    kind: String,
+    /// `true` when the feature classifies as a CDS — the menu offers a CDS
+    /// translation prefilled with its reading frame.
+    is_cds: bool,
+    /// Reading frame from `/codon_start` (1, 2, or 3; defaults to 1).
+    codon_start: usize,
+}
+
+/// GenBank-style strand flag for the feature forms (`+` / `-` / `.`).
+fn strand_flag(strand: Strand) -> &'static str {
+    match strand {
+        Strand::Reverse => "-",
+        Strand::None => ".",
+        _ => "+",
+    }
+}
+
+/// Build the edit-mode `OpenFeatureForm` command pre-filled from a right-clicked
+/// / double-clicked feature.
+fn open_edit_feature_cmd(fc: &FeatureContext) -> AppCommand {
+    AppCommand::OpenFeatureForm {
+        id: Some(fc.id),
+        label: fc.label.clone(),
+        kind: fc.kind.clone(),
+        strand: strand_flag(fc.strand).to_string(),
+        start: fc.start,
+        end: fc.end,
+    }
 }
 
 impl SequenceView {
@@ -869,11 +1212,38 @@ impl SequenceView {
         // `handle_keyboard` has already run this frame).
         self.last_line_width = line_width;
 
+        // ── Translation lanes (memoized on version + display) ────────────
+        // Suppressed while staging (like cut sites / search): the lanes are
+        // derived from the committed buffer and would need a re-scan over the
+        // virtual sequence each keystroke otherwise.
+        let show_trans = self.translation.is_active() && !staging;
+        let mut trans_cache = self.translation_cache.take();
+        if show_trans {
+            let stale = trans_cache
+                .as_ref()
+                .is_none_or(|c| c.version != buffer.version || c.display != self.translation);
+            if stale {
+                trans_cache = Some(build_translation_cache(
+                    buffer.text.as_slice(),
+                    annotations,
+                    buffer.version,
+                    self.translation.clone(),
+                ));
+            }
+        } else {
+            trans_cache = None;
+        }
+        let aa_row_h = char_height;
+        let band_rows = trans_cache
+            .as_ref()
+            .map_or(0, |c| c.frame_lanes.len() + c.feature_lanes.len());
+        let trans_band_h = band_rows as f32 * aa_row_h;
+
         // Per-block layout: each block sizes itself to the items it contains.
         // `block_offsets[i]` is the y-coord (within the allocated rect) of
         // the top of block i; `block_offsets[n_blocks]` is the total height.
         let (block_layouts, block_offsets) = build_block_layouts(
-            &render_ann.features,
+            render_ann,
             cut_sites,
             seq_len,
             line_width,
@@ -884,6 +1254,7 @@ impl SequenceView {
             strand_h,
             annot_row_h,
             block_gap,
+            trans_band_h,
         );
         let total_height = *block_offsets.last().unwrap_or(&0.0);
         let content_width = left_margin + line_width as f32 * char_width + right_margin;
@@ -922,6 +1293,12 @@ impl SequenceView {
             // target. The full staple only paints when this rect is
             // hovered (or the site is the persistent click selection).
             let mut cut_site_rects: Vec<(Rect, usize)> = Vec::new();
+            // ORF runs in the frame lanes — click targets for "Annotate as CDS".
+            let mut orf_hits: Vec<(Rect, OrfPromote)> = Vec::new();
+            // Codon cells in every translation lane — clicking a residue selects
+            // its 3 nucleotides. One rect per cell segment visible in this block;
+            // the payload is the codon's forward nt range.
+            let mut aa_hits: Vec<(Rect, std::ops::Range<usize>)> = Vec::new();
             for block_idx in 0..n_blocks {
                 let block_y = rect.min.y + block_offsets[block_idx];
                 let block_h = block_layouts[block_idx].height;
@@ -937,10 +1314,13 @@ impl SequenceView {
                 let cut_label_h = layout.n_cut_rows as f32 * cut_label_row_h;
                 let top_y = block_y + cut_label_h + ruler_h;
                 let bot_y = top_y + strand_h;
-                let annot_base_y = bot_y + strand_h;
+                // Annotation bars sit below the strands *and* the translation band.
+                let annot_base_y = bot_y + strand_h + trans_band_h;
 
                 for &(feat_idx, row) in &layout.feat_rows {
-                    let feat = &render_ann.features[feat_idx];
+                    let feat = render_ann
+                        .by_position(feat_idx)
+                        .expect("feat_idx from this frame's layout");
                     let bar_row_y = annot_base_y + row as f32 * annot_row_h;
                     if let Some(r) = annot_bar_rect(
                         feat,
@@ -952,6 +1332,60 @@ impl SequenceView {
                         annot_row_h,
                     ) {
                         annot_hits.push((r, feat_idx));
+                    }
+                }
+                // ORF-run click targets in the translation band (one rect per
+                // run segment visible in this block; all map to the full ORF).
+                if let Some(tc) = &trans_cache {
+                    let trans_y = bot_y + strand_h;
+                    for (lane_i, lane) in tc.frame_lanes.iter().enumerate() {
+                        let lane_y = trans_y + lane_i as f32 * aa_row_h;
+                        for &(rs, re) in &lane.orf_runs {
+                            let vis_s = rs.max(block_start);
+                            let vis_e = re.min(block_end);
+                            if vis_s < vis_e {
+                                let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                                let sw = (vis_e - vis_s) as f32 * char_width;
+                                orf_hits.push((
+                                    Rect::from_min_size(
+                                        Pos2::new(sx, lane_y),
+                                        Vec2::new(sw, aa_row_h),
+                                    ),
+                                    OrfPromote {
+                                        start: rs,
+                                        end: re,
+                                        strand: lane.strand,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    // Codon-cell click targets across all lanes (frame + feature).
+                    for (lane_i, lane) in tc
+                        .frame_lanes
+                        .iter()
+                        .chain(tc.feature_lanes.iter())
+                        .enumerate()
+                    {
+                        let lane_y = trans_y + lane_i as f32 * aa_row_h;
+                        for g in &lane.glyphs {
+                            if g.pos < block_start || g.pos >= block_end {
+                                continue;
+                            }
+                            let ncs = g.pos.saturating_sub(1).max(block_start);
+                            let nce = (g.pos + 2).min(block_end);
+                            if ncs < nce {
+                                let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
+                                let cw = (nce - ncs) as f32 * char_width;
+                                aa_hits.push((
+                                    Rect::from_min_size(
+                                        Pos2::new(cx, lane_y),
+                                        Vec2::new(cw, aa_row_h),
+                                    ),
+                                    g.pos.saturating_sub(1)..(g.pos + 2).min(seq_len),
+                                ));
+                            }
+                        }
                     }
                 }
                 if !staging {
@@ -1013,60 +1447,258 @@ impl SequenceView {
             let push_sel = |cmds: &mut Vec<PendingCommand>, sel: Option<Selection>| {
                 cmds.push((AppCommand::SetSelection(sel), None));
             };
-            let push_feat = |cmds: &mut Vec<PendingCommand>, feat: Option<usize>| {
+            let push_feat = |cmds: &mut Vec<PendingCommand>, feat: Option<FeatureId>| {
                 cmds.push((AppCommand::SelectFeature(feat), None));
             };
 
             if response.clicked() {
                 if let Some(pos) = ptr {
                     if shift_held {
-                        // Shift+click: extend focus while keeping existing anchor.
-                        if let Some(seq_pos) = ptr_seq {
-                            let new_sel = match view.selection {
+                        // Shift+click extends the selection. Over a translation
+                        // codon cell, keep *both* the origin codon and the clicked
+                        // codon whole, in whichever direction we're reaching — the
+                        // two nt indices in `Selection` can't say which codon the
+                        // anchor belongs to once extended, so `translation_anchor`
+                        // remembers the origin codon (set on the residue click).
+                        let over_codon = aa_hits
+                            .iter()
+                            .find(|(r, _)| r.contains(pos))
+                            .map(|(_, c)| c.clone());
+                        let new_sel = match (over_codon, self.translation_anchor.clone()) {
+                            (Some(codon), Some(ac)) => Some(codon_extend(&ac, &codon)),
+                            // Residue click but no codon anchor yet: snap the focus
+                            // to the clicked codon relative to the nt-level anchor.
+                            (Some(codon), None) => Some(match view.selection {
+                                Some(sel) => {
+                                    let focus = if codon.start >= sel.anchor {
+                                        codon.end
+                                    } else {
+                                        codon.start
+                                    };
+                                    Selection {
+                                        anchor: sel.anchor,
+                                        focus,
+                                    }
+                                }
+                                None => Selection::range(codon.start, codon.end),
+                            }),
+                            // Not over a residue: nucleotide-level extend as before.
+                            (None, _) => ptr_seq.map(|p| match view.selection {
                                 Some(sel) => Selection {
                                     anchor: sel.anchor,
-                                    focus: seq_pos,
+                                    focus: p,
                                 },
-                                None => Selection::cursor(seq_pos),
-                            };
-                            push_sel(cmds, Some(new_sel));
+                                None => Selection::cursor(p),
+                            }),
+                        };
+                        if let Some(sel) = new_sel {
+                            push_sel(cmds, Some(sel));
                         }
-                    } else if let Some(&(_, feat_idx)) =
-                        annot_hits.iter().find(|(r, _)| r.contains(pos))
-                    {
-                        let feat = &render_ann.features[feat_idx];
-                        push_sel(
-                            cmds,
-                            Some(Selection::range(feat.range.start, feat.range.end)),
-                        );
-                        push_feat(cmds, Some(feat_idx));
-                    } else if let Some(&(_, hit_idx)) =
-                        search_hit_rects.iter().find(|(r, _)| r.contains(pos))
-                    {
-                        let hit = &view.search_hits[hit_idx];
-                        push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
-                        push_feat(cmds, None);
-                    } else if let Some(&(_, site_idx)) =
-                        cut_site_rects.iter().find(|(r, _)| r.contains(pos))
-                    {
-                        let site = &cut_sites[site_idx];
-                        push_sel(
-                            cmds,
-                            Some(Selection::range(
-                                site.recognition_start,
-                                site.recognition_end,
-                            )),
-                        );
-                        push_feat(cmds, None);
-                    } else if let Some(seq_pos) = ptr_seq {
-                        push_sel(cmds, Some(Selection::cursor(seq_pos)));
-                        push_feat(cmds, None);
                     } else {
-                        push_sel(cmds, None);
-                        push_feat(cmds, None);
+                        // Any fresh (non-extending) click clears the codon anchor;
+                        // a residue click re-sets it in that branch below.
+                        self.translation_anchor = None;
+                        if let Some(&(_, feat_idx)) =
+                            annot_hits.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let feat = render_ann
+                                .by_position(feat_idx)
+                                .expect("feat_idx from this frame's layout");
+                            push_sel(
+                                cmds,
+                                Some(Selection::range(feat.range.start, feat.range.end)),
+                            );
+                            push_feat(cmds, Some(feat.id));
+                        } else if let Some(&(_, hit_idx)) =
+                            search_hit_rects.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let hit = &view.search_hits[hit_idx];
+                            push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
+                            push_feat(cmds, None);
+                        } else if let Some(&(_, site_idx)) =
+                            cut_site_rects.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            let site = &cut_sites[site_idx];
+                            push_sel(
+                                cmds,
+                                Some(Selection::range(
+                                    site.recognition_start,
+                                    site.recognition_end,
+                                )),
+                            );
+                            push_feat(cmds, None);
+                        } else if let Some((_, codon)) =
+                            aa_hits.iter().find(|(r, _)| r.contains(pos))
+                        {
+                            // Click a residue → select its codon and anchor to it.
+                            self.translation_anchor = Some(codon.clone());
+                            push_sel(cmds, Some(Selection::range(codon.start, codon.end)));
+                            push_feat(cmds, None);
+                        } else if let Some(seq_pos) = ptr_seq {
+                            push_sel(cmds, Some(Selection::cursor(seq_pos)));
+                            push_feat(cmds, None);
+                        } else {
+                            push_sel(cmds, None);
+                            push_feat(cmds, None);
+                        }
                     }
                 }
             }
+
+            // ── Double-click a feature → Edit dialog ──────────────────────
+            if response.double_clicked() {
+                if let Some(p) = ptr {
+                    if let Some(fc) = annot_hits
+                        .iter()
+                        .find(|(r, _)| r.contains(p))
+                        .and_then(|&(_, fi)| render_ann.by_position(fi))
+                        .map(|f| FeatureContext {
+                            id: f.id,
+                            start: f.range.start,
+                            end: f.range.end,
+                            strand: f.strand,
+                            kind: f.raw_kind.clone(),
+                            label: f.label.clone(),
+                            is_cds: false,
+                            codon_start: 1,
+                        })
+                    {
+                        cmds.push((open_edit_feature_cmd(&fc), None));
+                    }
+                }
+            }
+
+            // ── Right-click a feature → context menu ──────────────────────
+            // Capture which feature (if any) was under the pointer at the
+            // secondary click; the menu below reads this stable snapshot.
+            if response.secondary_clicked() {
+                self.context_feature = ptr.and_then(|p| {
+                    annot_hits
+                        .iter()
+                        .find(|(r, _)| r.contains(p))
+                        .and_then(|&(_, fi)| render_ann.by_position(fi))
+                        .map(|f| FeatureContext {
+                            id: f.id,
+                            start: f.range.start,
+                            end: f.range.end,
+                            strand: f.strand,
+                            kind: f.raw_kind.clone(),
+                            label: f.label.clone(),
+                            is_cds: matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds),
+                            codon_start: f
+                                .qualifiers
+                                .get("codon_start")
+                                .and_then(|v| v.as_deref())
+                                .and_then(|s| s.trim().parse::<usize>().ok())
+                                .filter(|n| (1..=3).contains(n))
+                                .unwrap_or(1),
+                        })
+                });
+                // If no feature was hit, capture an ORF run under the pointer.
+                self.context_orf = if self.context_feature.is_some() {
+                    None
+                } else {
+                    ptr.and_then(|p| {
+                        orf_hits
+                            .iter()
+                            .find(|(r, _)| r.contains(p))
+                            .map(|(_, o)| *o)
+                    })
+                };
+            }
+            let ctx_feat = self.context_feature.clone();
+            let ctx_orf = self.context_orf;
+            // Is the right-clicked feature currently translated inline?
+            let feat_translated = ctx_feat
+                .as_ref()
+                .is_some_and(|fc| self.translation.features.contains(&fc.id));
+            response.context_menu(|ui| {
+                let Some(fc) = ctx_feat else {
+                    // No feature under the click — offer ORF promotion if one is.
+                    if let Some(orf) = ctx_orf {
+                        ui.label(egui::RichText::new("ORF").strong());
+                        ui.separator();
+                        if ui.button("Annotate as CDS feature").clicked() {
+                            cmds.push((
+                                AppCommand::Viewer(ViewerRequest::AddFeature {
+                                    start: orf.start,
+                                    end: orf.end,
+                                    kind: "CDS".to_string(),
+                                    label: "ORF".to_string(),
+                                    strand: strand_flag(orf.strand).to_string(),
+                                    view: None,
+                                }),
+                                None,
+                            ));
+                            ui.close_menu();
+                        }
+                    } else {
+                        ui.close_menu();
+                    }
+                    return;
+                };
+                let title = if fc.label.is_empty() {
+                    format!("Feature {}", fc.id)
+                } else {
+                    fc.label.clone()
+                };
+                ui.label(egui::RichText::new(title).strong());
+                ui.separator();
+                if ui.button("Edit…").clicked() {
+                    cmds.push((open_edit_feature_cmd(&fc), None));
+                    ui.close_menu();
+                }
+                if ui.button("Rename…").clicked() {
+                    cmds.push((
+                        AppCommand::OpenRenameFeature {
+                            id: fc.id,
+                            label: fc.label.clone(),
+                        },
+                        None,
+                    ));
+                    ui.close_menu();
+                }
+                if ui.button("Remove").clicked() {
+                    cmds.push((
+                        AppCommand::Viewer(ViewerRequest::RemoveFeature {
+                            id: fc.id,
+                            view: None,
+                        }),
+                        None,
+                    ));
+                    ui.close_menu();
+                }
+                ui.separator();
+                // Inline translation, anchored to the feature's start + strand
+                // (no global frame needed). Auto-on for CDS; toggle for any kind.
+                let inline_label = if feat_translated {
+                    "Hide translation"
+                } else {
+                    "Show translation"
+                };
+                if ui.button(inline_label).clicked() {
+                    cmds.push((AppCommand::ToggleFeatureTranslation(fc.id), None));
+                    ui.close_menu();
+                }
+                // Separate on-demand window (arbitrary strand/frame, all-6 view).
+                if ui.button("Translate in window…").clicked() {
+                    cmds.push((
+                        AppCommand::OpenTranslation {
+                            title: if fc.label.is_empty() {
+                                "Feature".to_string()
+                            } else {
+                                fc.label.clone()
+                            },
+                            start: fc.start,
+                            end: fc.end,
+                            strand: fc.strand,
+                            frame: if fc.is_cds { fc.codon_start } else { 1 },
+                        },
+                        None,
+                    ));
+                    ui.close_menu();
+                }
+            });
 
             if response.drag_started() {
                 let on_annot = ptr.is_some_and(|p| annot_hits.iter().any(|(r, _)| r.contains(p)));
@@ -1139,7 +1771,10 @@ impl SequenceView {
 
                 let top_y = ruler_y + ruler_h;
                 let bot_y = top_y + strand_h;
-                let annot_base_y = bot_y + strand_h;
+                // Translation band sits directly under the bottom strand; the
+                // annotation bars follow it.
+                let trans_y = bot_y + strand_h;
+                let annot_base_y = trans_y + trans_band_h;
 
                 // ── Search hit highlights (behind selection and text) ──────
                 // Suppressed while staging — derived overlays are anchored to
@@ -1295,6 +1930,96 @@ impl SequenceView {
                 let bot_galley = build_strand_galley(ui, &block_comp, &font_id, 0.65, &cfg.theme);
                 painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
 
+                // ── Translation band (frame + CDS amino-acid lanes) ───────
+                if let Some(tc) = &trans_cache {
+                    let aa_normal = text_color.gamma_multiply(0.72);
+                    let aa_stop = Color32::from_rgb(210, 70, 70);
+                    let aa_start = Color32::from_rgb(70, 175, 90);
+                    let orf_wash = Color32::from_rgba_unmultiplied(90, 175, 110, 26);
+                    let show_orfs = self.translation.show_orfs;
+                    for (lane_i, lane) in tc
+                        .frame_lanes
+                        .iter()
+                        .chain(tc.feature_lanes.iter())
+                        .enumerate()
+                    {
+                        let lane_y = trans_y + lane_i as f32 * aa_row_h;
+                        // ORF wash behind the lane (frame lanes only).
+                        if show_orfs {
+                            for &(rs, re) in &lane.orf_runs {
+                                let vis_s = rs.max(block_start);
+                                let vis_e = re.min(block_end);
+                                if vis_s < vis_e {
+                                    let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                                    let sw = (vis_e - vis_s) as f32 * char_width;
+                                    painter.rect_filled(
+                                        Rect::from_min_size(
+                                            Pos2::new(sx, lane_y),
+                                            Vec2::new(sw, aa_row_h),
+                                        ),
+                                        0.0,
+                                        orf_wash,
+                                    );
+                                }
+                            }
+                        }
+                        // Lane label in the left margin (first block only).
+                        if block_idx == 0 {
+                            painter.text(
+                                Pos2::new(rect.min.x, lane_y),
+                                Align2::LEFT_TOP,
+                                &lane.label,
+                                small_font.clone(),
+                                text_color.gamma_multiply(0.5),
+                            );
+                        }
+                        // Amino-acid glyphs whose codon midpoint falls in this block.
+                        for g in &lane.glyphs {
+                            if g.pos < block_start || g.pos >= block_end {
+                                continue;
+                            }
+                            let color = if show_orfs {
+                                match g.kind {
+                                    AaKind::Stop => aa_stop,
+                                    AaKind::Start => aa_start,
+                                    AaKind::Normal => aa_normal,
+                                }
+                            } else {
+                                aa_normal
+                            };
+                            // Codon cell spanning the residue's 3 nucleotides
+                            // (clamped to the block at a wrap). The faint outline
+                            // groups the codon and marks the click target that
+                            // selects those bases (hit-rect collected in pass 1).
+                            let ncs = g.pos.saturating_sub(1).max(block_start);
+                            let nce = (g.pos + 2).min(block_end);
+                            if ncs < nce {
+                                let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
+                                let cw = (nce - ncs) as f32 * char_width;
+                                painter.rect_stroke(
+                                    Rect::from_min_size(
+                                        Pos2::new(cx, lane_y),
+                                        Vec2::new(cw, aa_row_h),
+                                    ),
+                                    2.0,
+                                    Stroke::new(1.0, text_color.gamma_multiply(0.16)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let x = seq_x0
+                                + (g.pos - block_start) as f32 * char_width
+                                + char_width * 0.5;
+                            painter.text(
+                                Pos2::new(x, lane_y),
+                                Align2::CENTER_TOP,
+                                g.ch,
+                                font_id.clone(),
+                                color,
+                            );
+                        }
+                    }
+                }
+
                 // ── Delete strikethrough (Phase 13.6b) ────────────────────
                 // Deleted bases are kept visible (verify-what's-leaving) with a
                 // strikethrough struck through both strands, drawn *over* the
@@ -1316,7 +2041,9 @@ impl SequenceView {
 
                 // ── Annotation bars (below strands) ───────────────────────
                 for &(feat_idx, row) in &layout.feat_rows {
-                    let feat = &render_ann.features[feat_idx];
+                    let feat = render_ann
+                        .by_position(feat_idx)
+                        .expect("feat_idx from this frame's layout");
                     let bar_row_y = annot_base_y + row as f32 * annot_row_h;
                     if let Some(bar) = annot_bar_rect(
                         feat,
@@ -1327,7 +2054,9 @@ impl SequenceView {
                         char_width,
                         annot_row_h,
                     ) {
-                        let is_selected = view.selected_feature == Some(feat_idx);
+                        // Resolve the selected *id* to this frame's position for
+                        // the highlight — position never leaves the frame.
+                        let is_selected = view.selected_feature == Some(feat.id);
                         painter.rect_filled(
                             bar,
                             2.0,
@@ -1523,6 +2252,8 @@ impl SequenceView {
         // could mutate `self`). A click that cancelled `pending` this frame
         // leaves it stale; next frame's `refresh_preview` clears it.
         self.preview = preview;
+        // Same for the memoized translation cache.
+        self.translation_cache = trans_cache;
     }
 }
 
@@ -1679,7 +2410,128 @@ fn paint_feature_label(
 
 #[cfg(test)]
 mod tests {
-    use super::iupac_filter;
+    use super::{
+        AaKind, TranslationDisplay, build_translation_cache, codon_extend, frame_glyphs,
+        iupac_filter,
+    };
+    use seqforge_core::Strand;
+
+    #[test]
+    fn frame_glyphs_forward_positions_and_kinds() {
+        // ATG AAA TAA → M(start) K(normal) *(stop) at codon-middle columns 1,4,7.
+        let g = frame_glyphs(b"ATGAAATAA", Strand::Forward, 1);
+        assert_eq!(g.len(), 3);
+        assert_eq!((g[0].pos, g[0].ch, g[0].kind), (1, 'M', AaKind::Start));
+        assert_eq!((g[1].pos, g[1].ch), (4, 'K'));
+        assert_eq!((g[2].pos, g[2].ch, g[2].kind), (7, '*', AaKind::Stop));
+    }
+
+    #[test]
+    fn reverse_frame_glyphs_map_to_forward_columns() {
+        // revcomp("TTATTTCAT") = "ATGAAATAA" (M K *). On the reverse lane the
+        // glyphs anchor to forward columns (descending), still within bounds.
+        let g = frame_glyphs(b"TTATTTCAT", Strand::Reverse, 1);
+        assert_eq!(g.len(), 3);
+        assert!(g.iter().all(|gl| gl.pos < 9));
+        assert!(g.iter().any(|gl| gl.ch == 'M'));
+    }
+
+    #[test]
+    fn translation_cache_builds_enabled_frames_only() {
+        let seq = b"ATGAAATAAATGCCC";
+        let ann = seqforge_core::Annotations::new(vec![]);
+        let mut d = TranslationDisplay::default();
+        d.frames[0] = true; // +1 only
+        let cache = build_translation_cache(seq, &ann, 1, d);
+        assert_eq!(cache.frame_lanes.len(), 1);
+        assert!(cache.feature_lanes.is_empty());
+    }
+
+    #[test]
+    fn non_cds_feature_translates_when_toggled_on() {
+        use seqforge_core::{Feature, Strand};
+        let seq = b"ATGAAATAA";
+        let mut ann = seqforge_core::Annotations::new(vec![]);
+        let id = ann.add(Feature {
+            id: Default::default(),
+            range: 0..9,
+            raw_kind: "misc_feature".to_string(),
+            label: "region".to_string(),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+            provenance: None,
+        });
+        // show_cds is off; a misc_feature only translates when individually toggled.
+        let mut d = TranslationDisplay::default();
+        assert!(
+            build_translation_cache(seq, &ann, 1, d.clone())
+                .feature_lanes
+                .is_empty()
+        );
+        d.features.insert(id);
+        let cache = build_translation_cache(seq, &ann, 1, d);
+        assert_eq!(
+            cache.feature_lanes.len(),
+            1,
+            "toggled feature must translate"
+        );
+        // ATG AAA TAA anchored at the feature start → M K *.
+        assert_eq!(
+            cache.feature_lanes[0]
+                .glyphs
+                .iter()
+                .map(|g| g.ch)
+                .collect::<String>(),
+            "MK*"
+        );
+    }
+
+    #[test]
+    fn codon_extend_keeps_both_codons_whole_in_either_direction() {
+        // Codons: A=[0,3), B=[3,6), C=[6,9).
+        // Reaching right from A to C → [A.start, C.end) = 0..9.
+        let s = codon_extend(&(0..3), &(6..9));
+        assert_eq!(s.ordered(), (0, 9));
+        // Reaching left from C to A → still 0..9; the origin codon C keeps its
+        // 3′ base (index 8), which the old nt-level path clipped.
+        let s = codon_extend(&(6..9), &(0..3));
+        assert_eq!(s.ordered(), (0, 9));
+        assert_eq!(
+            s.anchor, 9,
+            "reverse selection anchors at the origin's 3′ edge"
+        );
+        // Clicking the anchor codon itself selects exactly that codon.
+        assert_eq!(codon_extend(&(3..6), &(3..6)).ordered(), (3, 6));
+    }
+
+    #[test]
+    fn overlapping_translated_features_get_separate_lanes() {
+        use seqforge_core::{Feature, Strand};
+        let seq = b"ATGAAATAAATGCCCTAA";
+        let mut ann = seqforge_core::Annotations::new(vec![]);
+        let mk = |range: std::ops::Range<usize>| Feature {
+            id: Default::default(),
+            range,
+            raw_kind: "CDS".to_string(),
+            label: "c".to_string(),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+            provenance: None,
+        };
+        // Two overlapping CDS features (0..12 and 6..18 share columns 6..12).
+        ann.add(mk(0..12));
+        ann.add(mk(6..18));
+        let d = TranslationDisplay {
+            show_cds: true,
+            ..Default::default()
+        };
+        let cache = build_translation_cache(seq, &ann, 1, d);
+        assert_eq!(
+            cache.feature_lanes.len(),
+            2,
+            "overlapping features must be packed onto separate lanes"
+        );
+    }
 
     #[test]
     fn iupac_filter_uppercases_and_keeps_valid() {

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use seqforge_core::ViewerRequest;
+use seqforge_core::{Strand, ViewerRequest};
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
@@ -22,6 +22,77 @@ pub fn run_info(path: &Path) -> anyhow::Result<()> {
         "path": path,
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
+    Ok(())
+}
+
+/// Translate a (sub)range of a sequence file to protein — a local, read-only
+/// derivation that needs no running GUI. `start`/`end` are 0-based half-open
+/// (default: whole sequence); `strand` is `+`/`-`; `frame` is the GenBank
+/// codon_start convention (1, 2, or 3).
+pub fn run_translate(
+    path: &Path,
+    start: Option<usize>,
+    end: Option<usize>,
+    strand: &str,
+    frame: usize,
+) -> anyhow::Result<()> {
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
+    let len = doc.len();
+    let start = start.unwrap_or(0);
+    let end = end.unwrap_or(len);
+    if start >= end || end > len {
+        anyhow::bail!("range {start}..{end} is invalid for a sequence of length {len}");
+    }
+    let strand = match strand.trim() {
+        "-" | "reverse" | "Reverse" => Strand::Reverse,
+        _ => Strand::Forward,
+    };
+    let protein = seqforge_bio::translate(&doc.sequence[start..end], strand, frame);
+    let out = serde_json::json!({
+        "kind": "translation",
+        "name": doc.name,
+        "start": start,
+        "end": end,
+        "strand": format!("{strand:?}").to_lowercase(),
+        "frame": frame,
+        "protein": protein,
+        "length": protein.chars().count(),
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Find open reading frames in a sequence file — a local analysis (no GUI).
+/// `min_aa` filters by protein length; forward + reverse frames by default.
+pub fn run_orfs(
+    path: &Path,
+    min_aa: usize,
+    stop_to_stop: bool,
+    forward_only: bool,
+) -> anyhow::Result<()> {
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
+    let orfs = seqforge_bio::find_orfs(&doc.sequence, min_aa, !stop_to_stop, !forward_only);
+    let items: Vec<_> = orfs
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "start": o.start,
+                "end": o.end,
+                "strand": format!("{:?}", o.strand).to_lowercase(),
+                "frame": o.frame,
+                "aa_len": o.aa_len,
+            })
+        })
+        .collect();
+    let out = serde_json::json!({
+        "kind": "orfs",
+        "name": doc.name,
+        "count": orfs.len(),
+        "orfs": items,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 

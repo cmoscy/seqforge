@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use egui::Key;
 use egui_file_dialog::FileDialog;
-use seqforge_core::CutSite;
+use seqforge_core::{CutSite, FeatureId, Strand};
 
 use crate::command::AppCommand;
 
@@ -159,6 +159,112 @@ fn toggle(set: &mut HashSet<String>, name: &str) {
     }
 }
 
+// ── Feature dialogs ───────────────────────────────────────────────────────────
+
+/// GenBank feature-type strings offered in the New-Feature dropdown. The chosen
+/// string is stored verbatim in `Feature.raw_kind`; display colour is derived
+/// via `FeatureKind::classify` (never a stored enum — see editor.md conventions).
+pub const FEATURE_KINDS: &[&str] = &[
+    "CDS",
+    "gene",
+    "promoter",
+    "terminator",
+    "rep_origin",
+    "misc_feature",
+];
+
+/// Unified add/edit feature modal. `id.is_none()` ⇒ **create** (`Tools → New
+/// Feature from Selection…`, pre-filled from the selection; commits `AddFeature`);
+/// `id.is_some()` ⇒ **edit** (double-click a feature or right-click → Edit…,
+/// pre-filled from the feature; commits `UpdateFeature`). One form, one render
+/// path — the create/edit split is a single `Option<FeatureId>`.
+pub struct FeatureForm {
+    /// `None` for a new feature, `Some` when editing an existing one.
+    pub id: Option<FeatureId>,
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+    /// GenBank feature-type string (from [`FEATURE_KINDS`]).
+    pub kind: String,
+    /// `"+"`, `"-"`, or `"."` (unstranded).
+    pub strand: String,
+    pub needs_focus: bool,
+}
+
+impl FeatureForm {
+    /// A create form over the selection range.
+    pub fn create(start: usize, end: usize) -> Self {
+        Self {
+            id: None,
+            start,
+            end,
+            label: String::new(),
+            kind: "misc_feature".to_string(),
+            strand: "+".to_string(),
+            needs_focus: true,
+        }
+    }
+
+    /// An edit form pre-filled from an existing feature.
+    pub fn edit(
+        id: FeatureId,
+        label: String,
+        kind: String,
+        strand: String,
+        start: usize,
+        end: usize,
+    ) -> Self {
+        Self {
+            id: Some(id),
+            start,
+            end,
+            label,
+            kind,
+            strand,
+            needs_focus: true,
+        }
+    }
+
+    /// `true` when editing an existing feature.
+    pub fn is_edit(&self) -> bool {
+        self.id.is_some()
+    }
+}
+
+/// Modal form for renaming an existing feature (right-click → Rename…).
+pub struct RenameFeatureForm {
+    pub id: FeatureId,
+    pub input: String,
+    pub needs_focus: bool,
+}
+
+impl RenameFeatureForm {
+    pub fn new(id: FeatureId, current: String) -> Self {
+        Self {
+            id,
+            input: current,
+            needs_focus: true,
+        }
+    }
+}
+
+/// Read-only translation window: protein derived from DNA + strand + frame
+/// (recomputed live from these fields each frame). Opened from the feature
+/// context menu (prefilled from a CDS's strand + `/codon_start`) or from
+/// `Tools → Translate Selection…` (frame user-adjustable, default 1).
+pub struct TranslationView {
+    /// Feature label or `"Selection"` — window subtitle.
+    pub title: String,
+    pub start: usize,
+    pub end: usize,
+    pub strand: Strand,
+    /// GenBank codon_start convention: 1, 2, or 3.
+    pub frame: usize,
+    /// When `true`, show all six reading frames (+1/+2/+3, −1/−2/−3) at once
+    /// instead of the single strand+frame selected above.
+    pub all_frames: bool,
+}
+
 // ── Overlay variants ──────────────────────────────────────────────────────────
 
 /// All transient UI that may be present at once. Variants are
@@ -171,6 +277,9 @@ pub enum Overlay {
     /// blow up every `Overlay` value to that size.
     FileDialog(Box<FileDialog>),
     CliStatus(String),
+    FeatureForm(FeatureForm),
+    RenameFeature(RenameFeatureForm),
+    Translation(TranslationView),
 }
 
 impl Overlay {
@@ -179,6 +288,9 @@ impl Overlay {
     pub const TAG_ENZYME_BAR: &'static str = "EnzymeBar";
     pub const TAG_FILE_DIALOG: &'static str = "FileDialog";
     pub const TAG_CLI_STATUS: &'static str = "CliStatus";
+    pub const TAG_FEATURE_FORM: &'static str = "FeatureForm";
+    pub const TAG_RENAME_FEATURE: &'static str = "RenameFeature";
+    pub const TAG_TRANSLATION: &'static str = "Translation";
     /// Generic "any overlay" marker — pushed onto the KeyContext stack
     /// whenever [`OverlayStack`] is non-empty. The keymap's Escape
     /// binding matches on this so one binding dismisses every kind.
@@ -191,6 +303,9 @@ impl Overlay {
             Overlay::EnzymeBar(_) => Self::TAG_ENZYME_BAR,
             Overlay::FileDialog(_) => Self::TAG_FILE_DIALOG,
             Overlay::CliStatus(_) => Self::TAG_CLI_STATUS,
+            Overlay::FeatureForm(_) => Self::TAG_FEATURE_FORM,
+            Overlay::RenameFeature(_) => Self::TAG_RENAME_FEATURE,
+            Overlay::Translation(_) => Self::TAG_TRANSLATION,
         }
     }
 }
@@ -291,6 +406,27 @@ impl OverlayStack {
     pub fn cli_status(&self) -> Option<&str> {
         self.overlays.iter().find_map(|o| match o {
             Overlay::CliStatus(m) => Some(m.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn feature_form_mut(&mut self) -> Option<&mut FeatureForm> {
+        self.overlays.iter_mut().find_map(|o| match o {
+            Overlay::FeatureForm(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    pub fn rename_feature_mut(&mut self) -> Option<&mut RenameFeatureForm> {
+        self.overlays.iter_mut().find_map(|o| match o {
+            Overlay::RenameFeature(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    pub fn translation_mut(&mut self) -> Option<&mut TranslationView> {
+        self.overlays.iter_mut().find_map(|o| match o {
+            Overlay::Translation(t) => Some(t),
             _ => None,
         })
     }

@@ -4,7 +4,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Annotations, Buffer, CutSite, Document, SearchHit, View, ViewId};
+use crate::{Annotations, Buffer, CutSite, Document, FeatureId, SearchHit, Strand, View, ViewId};
 
 // ── Selection model ───────────────────────────────────────────────────────────
 
@@ -255,18 +255,55 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
-    /// Remove the feature at `index` in the annotation list.
-    RemoveFeature {
-        index: usize,
+    /// List the features on the active buffer (id, kind, label, range, strand).
+    /// Ids are session-scoped — use them for `remove-feature`/`rename-feature`.
+    ListFeatures {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
-    /// Rename the feature at `index`.
+    /// Remove the feature with the given id (from `list-features`).
+    RemoveFeature {
+        #[arg(long)]
+        id: FeatureId,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Rename the feature with the given id (from `list-features`).
     RenameFeature {
-        index: usize,
+        #[arg(long)]
+        id: FeatureId,
         #[arg(long)]
         label: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Edit a feature's geometry/type in place: only the fields you pass change.
+    /// Addressed by id (from `list-features`); validates `start < end <= len`.
+    UpdateFeature {
+        #[arg(long)]
+        id: FeatureId,
+        /// New GenBank feature-type string (e.g. `CDS`, `misc_feature`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// `+`, `-`, or `.` (unstranded).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strand: Option<String>,
+        /// New 0-based start of the half-open range.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<usize>,
+        /// New 0-based exclusive end of the range.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<usize>,
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
@@ -320,8 +357,10 @@ impl ViewerRequest {
             ViewerRequest::Copy { view, .. } => *view,
             ViewerRequest::Paste { view, .. } => *view,
             ViewerRequest::AddFeature { view, .. } => *view,
+            ViewerRequest::ListFeatures { view, .. } => *view,
             ViewerRequest::RemoveFeature { view, .. } => *view,
             ViewerRequest::RenameFeature { view, .. } => *view,
+            ViewerRequest::UpdateFeature { view, .. } => *view,
             ViewerRequest::Save { view, .. } => *view,
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
@@ -349,6 +388,25 @@ pub enum ViewerResponse {
     /// for a no-op Undo/Redo (empty history) so callers can report "nothing to
     /// undo" without it being an error.
     Edited { len: usize, changed: bool },
+    /// `AddFeature` — the new feature's session-scoped id (use it to
+    /// remove/rename), and the buffer length after the add.
+    FeatureAdded { id: FeatureId, len: usize },
+    /// `ListFeatures` — every feature on the buffer, in definition order.
+    Features { features: Vec<FeatureInfo> },
+}
+
+/// A feature summary for `ListFeatures` — a by-value projection so CLI/agent
+/// callers get id + location without a live handle into editor state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureInfo {
+    pub id: FeatureId,
+    /// Verbatim GenBank feature-type string (e.g. `CDS`, `misc_feature`).
+    pub kind: String,
+    pub label: String,
+    /// 0-based half-open range `[start, end)`.
+    pub start: usize,
+    pub end: usize,
+    pub strand: Strand,
 }
 
 // ── BioOps trait ─────────────────────────────────────────────────────────────
@@ -419,7 +477,7 @@ fn difference_names(base: &[String], remove: &[String]) -> Vec<String> {
 pub fn dispatch<B: BioOps>(
     view: &mut View,
     buffer: &Buffer,
-    _annotations: &mut Annotations,
+    annotations: &mut Annotations,
     bio: &B,
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
@@ -446,6 +504,7 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::AddFeature { .. }
         | ViewerRequest::RemoveFeature { .. }
         | ViewerRequest::RenameFeature { .. }
+        | ViewerRequest::UpdateFeature { .. }
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
         | ViewerRequest::Undo { .. }
@@ -498,6 +557,23 @@ pub fn dispatch<B: BioOps>(
             }
             view.search_hits = hits.clone();
             Ok(ViewerResponse::SearchResults { count, hits })
+        }
+
+        // Read-op: features are addressed by id, so surface the live id table
+        // for CLI/agent callers. Rides `dispatch` (read-only, no history).
+        ViewerRequest::ListFeatures { view: _ } => {
+            let features = annotations
+                .iter()
+                .map(|f| FeatureInfo {
+                    id: f.id,
+                    kind: f.raw_kind.clone(),
+                    label: f.label.clone(),
+                    start: f.range.start,
+                    end: f.range.end,
+                    strand: f.strand,
+                })
+                .collect();
+            Ok(ViewerResponse::Features { features })
         }
 
         ViewerRequest::Enzymes { query, op, view: _ } => {
@@ -895,6 +971,56 @@ mod tests {
             DispatchError::OutOfRange {
                 position: 9,
                 seq_len: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn dispatch_list_features_returns_id_table() {
+        let (mut view, buf, _) = fixture();
+        let mut ann = Annotations::new(vec![crate::Feature {
+            id: Default::default(),
+            range: 1..4,
+            raw_kind: "CDS".into(),
+            label: "gene".into(),
+            strand: crate::Strand::Forward,
+            qualifiers: Default::default(),
+            provenance: None,
+        }]);
+        let minted = ann.iter().next().unwrap().id;
+        let resp = dispatch(
+            &mut view,
+            &buf,
+            &mut ann,
+            &FakeBio::new(),
+            ViewerRequest::ListFeatures { view: None },
+        )
+        .unwrap();
+        match resp {
+            ViewerResponse::Features { features } => {
+                assert_eq!(features.len(), 1);
+                assert_eq!(features[0].id, minted);
+                assert_eq!(features[0].kind, "CDS");
+                assert_eq!((features[0].start, features[0].end), (1, 4));
+            }
+            other => panic!("expected Features, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_feature_request_serde_round_trips_id() {
+        let req = ViewerRequest::RemoveFeature {
+            id: FeatureId(42),
+            view: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""id":42"#), "got {json}");
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::RemoveFeature {
+                id: FeatureId(42),
+                ..
             }
         ));
     }

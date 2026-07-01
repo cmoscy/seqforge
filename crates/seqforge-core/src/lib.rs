@@ -21,7 +21,7 @@ pub use commands::{
     dispatch, dispatch_file,
 };
 pub use document::{
-    CutSite, Document, Feature, FeatureKind, Provenance, SearchHit, Strand, Topology,
+    CutSite, Document, Feature, FeatureId, FeatureKind, Provenance, SearchHit, Strand, Topology,
 };
 pub use history::{EditKind, History, HistoryEntry};
 pub use model::{Annotations, Buffer, BufferId, View, ViewId, ViewKind};

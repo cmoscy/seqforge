@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use seqforge_core::{
-    BioOps, DispatchError, Selection, ViewId, ViewerRequest, ViewerResponse, dispatch,
+    BioOps, DispatchError, FeatureId, Selection, ViewId, ViewerRequest, ViewerResponse, dispatch,
 };
 
 use crate::app::AppState;
@@ -115,7 +115,54 @@ pub enum AppCommand {
 
     // ── Selection ────────────────────────────────────────────────────
     SetSelection(Option<Selection>),
-    SelectFeature(Option<usize>),
+    SelectFeature(Option<FeatureId>),
+
+    // ── Feature editing (Phase 14) ───────────────────────────────────
+    /// Open the unified add/edit feature modal. `id` is `None` for a new
+    /// feature (pre-filled from the selection) or `Some` to edit an existing one.
+    OpenFeatureForm {
+        id: Option<FeatureId>,
+        label: String,
+        kind: String,
+        strand: String,
+        start: usize,
+        end: usize,
+    },
+    /// Commit the feature modal → `AddFeature` (`id` = `None`) or `UpdateFeature`
+    /// (`id` = `Some`), then dismiss.
+    SubmitFeatureForm {
+        id: Option<FeatureId>,
+        label: String,
+        kind: String,
+        strand: String,
+        start: usize,
+        end: usize,
+    },
+    /// Open the Rename modal for a feature (right-click → Rename…).
+    OpenRenameFeature {
+        id: FeatureId,
+        label: String,
+    },
+    /// Commit the Rename modal → one `RenameFeature`, then dismiss.
+    SubmitRenameFeature {
+        id: FeatureId,
+        label: String,
+    },
+    /// Set which in-canvas translation lanes the active view shows
+    /// (View → Translation). Carries the full new state; the menu toggles a
+    /// field and sends the whole struct.
+    SetTranslationDisplay(crate::viewer::TranslationDisplay),
+    /// Toggle inline translation for a single feature (right-click → Show/Hide
+    /// translation), anchored to that feature's start + strand.
+    ToggleFeatureTranslation(FeatureId),
+    /// Open the read-only translation window for a range/strand/frame.
+    OpenTranslation {
+        title: String,
+        start: usize,
+        end: usize,
+        strand: seqforge_core::Strand,
+        frame: usize,
+    },
 
     // ── Tools ────────────────────────────────────────────────────────
     InstallCli,
@@ -215,6 +262,15 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
                 && state.workspace.active_view().is_some()
         }
         SetSelection(_) | SelectFeature(_) => true,
+        // New Feature (create form from the menu) needs a range selection;
+        // an edit form is opened with a concrete feature so it's always valid.
+        OpenFeatureForm { id, .. } => id.is_some() || has_range_selection(state),
+        OpenTranslation { .. } | SetTranslationDisplay(_) | ToggleFeatureTranslation(_) => {
+            state.workspace.active_view().is_some()
+        }
+        SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
+            state.workspace.active_view().is_some()
+        }
         RevealRange { .. } => state.workspace.active_view().is_some(),
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
@@ -434,6 +490,51 @@ pub fn apply<B: BioOps>(
         SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),
         SelectFeature(new_feat) => nav::apply_select_feature(state, new_feat),
 
+        // ── Feature editing (Phase 14) ──────────────────────────────
+        OpenFeatureForm {
+            id,
+            label,
+            kind,
+            strand,
+            start,
+            end,
+        } => nav::apply_open_feature_form(state, id, label, kind, strand, start, end),
+        SubmitFeatureForm {
+            id,
+            label,
+            kind,
+            strand,
+            start,
+            end,
+        } => edit::apply_submit_feature_form(state, id, label, kind, strand, start, end),
+        OpenRenameFeature { id, label } => nav::apply_open_rename_feature(state, id, label),
+        SubmitRenameFeature { id, label } => edit::apply_submit_rename_feature(state, id, label),
+        SetTranslationDisplay(display) => {
+            if let Some(vid) = state.workspace.active_view {
+                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
+                    sv.translation = display;
+                }
+            }
+            Ok(None)
+        }
+        ToggleFeatureTranslation(id) => {
+            if let Some(vid) = state.workspace.active_view {
+                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
+                    if !sv.translation.features.remove(&id) {
+                        sv.translation.features.insert(id);
+                    }
+                }
+            }
+            Ok(None)
+        }
+        OpenTranslation {
+            title,
+            start,
+            end,
+            strand,
+            frame,
+        } => nav::apply_open_translation(state, title, start, end, strand, frame),
+
         // ── In-canvas staging (menu) ────────────────────────────────
         StageEdit(edit) => edit::apply_stage_edit(state, edit),
 
@@ -529,12 +630,21 @@ pub fn apply<B: BioOps>(
                 strand,
                 view,
             } => edit::apply_add_feature(state, view, start, end, kind, label, strand),
-            ViewerRequest::RemoveFeature { index, view } => {
-                edit::apply_remove_feature(state, view, index)
+            ViewerRequest::RemoveFeature { id, view } => {
+                edit::apply_remove_feature(state, view, id)
             }
-            ViewerRequest::RenameFeature { index, label, view } => {
-                edit::apply_rename_feature(state, view, index, label)
+            ViewerRequest::RenameFeature { id, label, view } => {
+                edit::apply_rename_feature(state, view, id, label)
             }
+            ViewerRequest::UpdateFeature {
+                id,
+                kind,
+                label,
+                strand,
+                start,
+                end,
+                view,
+            } => edit::apply_update_feature(state, view, id, kind, label, strand, start, end),
             ViewerRequest::Save { view } => edit::apply_save(state, view),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.

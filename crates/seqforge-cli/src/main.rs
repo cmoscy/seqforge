@@ -43,6 +43,35 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Translate a (sub)range of a sequence file to protein (no GUI needed).
+    Translate {
+        input: PathBuf,
+        /// 0-based start of the range (default: 0).
+        #[arg(long)]
+        start: Option<usize>,
+        /// 0-based exclusive end of the range (default: sequence length).
+        #[arg(long)]
+        end: Option<usize>,
+        /// Strand: `+` (forward) or `-` (reverse complement).
+        #[arg(long, default_value = "+")]
+        strand: String,
+        /// Reading frame as GenBank codon_start: 1, 2, or 3.
+        #[arg(long, default_value_t = 1)]
+        frame: usize,
+    },
+    /// Find open reading frames in a sequence file (no GUI needed).
+    Orfs {
+        input: PathBuf,
+        /// Minimum ORF length in amino acids.
+        #[arg(long, default_value_t = 30)]
+        min_aa: usize,
+        /// Report stop-to-stop ORFs instead of Met-to-stop.
+        #[arg(long)]
+        stop_to_stop: bool,
+        /// Only scan the forward strand.
+        #[arg(long)]
+        forward_only: bool,
+    },
 
     // ── Viewer / editor commands (forwarded as JSON-RPC to the running GUI) ───
     //
@@ -58,6 +87,19 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         // ── File commands (always local) ──────────────────────────────────────
         Cmd::Info { input } => seqforge_cli::run_info(&input),
+        Cmd::Translate {
+            input,
+            start,
+            end,
+            strand,
+            frame,
+        } => seqforge_cli::run_translate(&input, start, end, &strand, frame),
+        Cmd::Orfs {
+            input,
+            min_aa,
+            stop_to_stop,
+            forward_only,
+        } => seqforge_cli::run_orfs(&input, min_aa, stop_to_stop, forward_only),
         Cmd::Digest { .. } | Cmd::Annotate { .. } => {
             anyhow::bail!("not yet implemented (post-MVP)")
         }

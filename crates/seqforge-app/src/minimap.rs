@@ -13,7 +13,7 @@
 use std::f32::consts::{PI, TAU};
 
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use seqforge_core::{Annotations, BufferId, FeatureKind, Strand, ViewerRequest};
+use seqforge_core::{Annotations, BufferId, FeatureId, FeatureKind, Strand, ViewerRequest};
 
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
@@ -43,7 +43,7 @@ struct PaintArc {
     /// absolute screen coords). Translated to screen in `show()`.
     points: Vec<Pos2>,
     color: Color32,
-    feat_idx: usize,
+    feat_id: FeatureId,
     strand: Strand,
 }
 
@@ -52,7 +52,7 @@ struct PaintArc {
 struct PaintBar {
     rect: Rect,
     color: Color32,
-    feat_idx: usize,
+    feat_id: FeatureId,
     strand: Strand,
 }
 
@@ -70,8 +70,8 @@ fn build_circular_geom(
     let center = Pos2::new(panel_size / 2.0, panel_size / 2.0);
     let radius = panel_size * 0.38;
 
-    let mut arcs = Vec::with_capacity(ann.features.len());
-    for (feat_idx, feat) in ann.features.iter().enumerate() {
+    let mut arcs = Vec::with_capacity(ann.len());
+    for feat in ann.iter() {
         let start_a = angle_for_pos(feat.range.start, seq_len);
         let end_a = angle_for_pos(feat.range.end, seq_len);
 
@@ -101,7 +101,7 @@ fn build_circular_geom(
         arcs.push(PaintArc {
             points,
             color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
-            feat_idx,
+            feat_id: feat.id,
             strand: feat.strand,
         });
     }
@@ -123,15 +123,13 @@ fn build_linear_geom(
     theme: &crate::config::Theme,
 ) -> MinimapGeom {
     // Feature rows packed identically to the text viewer's stacking.
-    let ranges: Vec<(usize, usize)> = ann
-        .features
-        .iter()
-        .map(|f| (f.range.start, f.range.end))
-        .collect();
+    let ranges: Vec<(usize, usize)> = ann.iter().map(|f| (f.range.start, f.range.end)).collect();
     let (row_assign, _n_rows) = crate::viewer::greedy_stack(&ranges);
 
-    let mut bars = Vec::with_capacity(ann.features.len());
-    for (feat_idx, feat) in ann.features.iter().enumerate() {
+    let mut bars = Vec::with_capacity(ann.len());
+    // `feat_idx` is a within-frame render detail (indexes `row_assign`); the
+    // stored handle is the stable `feat.id`.
+    for (feat_idx, feat) in ann.iter().enumerate() {
         let x = (feat.range.start as f32 / seq_len as f32) * panel_width;
         let w = ((feat.range.end - feat.range.start) as f32 / seq_len as f32) * panel_width;
 
@@ -153,7 +151,7 @@ fn build_linear_geom(
                 ),
             ),
             color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
-            feat_idx,
+            feat_id: feat.id,
             strand: feat.strand,
         });
     }
@@ -230,7 +228,7 @@ impl MiniMap {
             is_circular: bool,
             cursor_pos: usize,
             selection: Option<seqforge_core::Selection>,
-            selected_feature: Option<usize>,
+            selected_feature: Option<FeatureId>,
             /// Display label — file basename when the buffer is backed
             /// by a file, otherwise the sequence name from the record.
             display_name: String,
@@ -415,7 +413,7 @@ fn paint_circular(
     rect: Rect,
     geom: &MinimapGeom,
     selection: &Option<seqforge_core::Selection>,
-    selected_feature: Option<usize>,
+    selected_feature: Option<FeatureId>,
     cursor_pos: usize,
     visible_range: Option<(usize, usize)>,
     spine_color: Color32,
@@ -450,7 +448,7 @@ fn paint_circular(
 
     // Feature arcs (normal, non-selected first)
     for arc in &geom.arcs {
-        if Some(arc.feat_idx) == selected_feature {
+        if Some(arc.feat_id) == selected_feature {
             continue; // drawn on top below
         }
         let pts: Vec<Pos2> = arc.points.iter().map(|p| rect.min + p.to_vec2()).collect();
@@ -479,7 +477,7 @@ fn paint_circular(
 
     // Selected feature on top (white border + arrowhead)
     if let Some(sel_idx) = selected_feature {
-        if let Some(arc) = geom.arcs.iter().find(|a| a.feat_idx == sel_idx) {
+        if let Some(arc) = geom.arcs.iter().find(|a| a.feat_id == sel_idx) {
             let pts: Vec<Pos2> = arc.points.iter().map(|p| rect.min + p.to_vec2()).collect();
             painter.add(Shape::line(pts.clone(), Stroke::new(feat_w, arc.color)));
             painter.add(Shape::line(pts, Stroke::new(sel_feat_w, Color32::WHITE)));
@@ -563,7 +561,7 @@ fn paint_linear(
     rect: Rect,
     geom: &MinimapGeom,
     selection: &Option<seqforge_core::Selection>,
-    selected_feature: Option<usize>,
+    selected_feature: Option<FeatureId>,
     cursor_pos: usize,
     visible_range: Option<(usize, usize)>,
     panel_width: f32,
@@ -599,7 +597,7 @@ fn paint_linear(
     for bar in &geom.bars {
         let r = Rect::from_min_size(origin + bar.rect.min.to_vec2(), bar.rect.size());
         painter.rect_filled(r, 1.0, bar.color);
-        if Some(bar.feat_idx) == selected_feature {
+        if Some(bar.feat_id) == selected_feature {
             painter.rect_stroke(
                 r,
                 1.0,

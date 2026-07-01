@@ -78,6 +78,36 @@ impl FeatureKind {
     }
 }
 
+/// Session-scoped stable handle for a [`Feature`].
+///
+/// Ids are minted by [`crate::Annotations`] (a per-instance monotonic
+/// counter) and are **never persisted**: `Feature.id` is `#[serde(skip)]`,
+/// so on load every feature deserializes with the [`Default`] placeholder
+/// (`FeatureId(0)`) and `Annotations` re-mints a fresh id for each. GenBank /
+/// FASTA therefore stay positional; ids live only for the life of the
+/// process. This is what makes the stale-index bug class unrepresentable —
+/// features are addressed by id, never by their position in the `Vec`. See
+/// ROADMAP decision 12.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+pub struct FeatureId(pub u64);
+
+impl std::fmt::Display for FeatureId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Parse a bare numeric id (`"42"`), for clap's `--id` flag and JSON-number
+/// socket clients.
+impl std::str::FromStr for FeatureId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>().map(FeatureId)
+    }
+}
+
 /// Lineage of a feature across edits / cloning operations. Round-trips
 /// through GenBank as a single JSON-valued `/seqforge_provenance` qualifier
 /// so it survives save/reload without committing to any cloning shape now.
@@ -90,6 +120,10 @@ pub struct Provenance {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
+    /// Session-scoped handle. Never persisted (`#[serde(skip)]`); re-minted
+    /// by [`crate::Annotations`] on load. See [`FeatureId`].
+    #[serde(skip)]
+    pub id: FeatureId,
     pub range: Range<usize>,
     /// Verbatim GenBank feature-type string (the authoritative type).
     /// Display kind is derived via [`FeatureKind::classify`].

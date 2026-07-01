@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
-use seqforge_core::{BioOps, CutSite, Document, SearchHit, ViewId, ViewerRequest, ViewerResponse};
+use seqforge_core::{
+    BioOps, CutSite, Document, FeatureKind, SearchHit, ViewId, ViewerRequest, ViewerResponse,
+};
 
 use std::sync::Arc;
 
@@ -13,7 +15,7 @@ use crate::event::{AppEvent, EventLog, EventSink};
 use crate::focus::FocusState;
 use crate::keymap;
 use crate::minimap::MiniMap;
-use crate::overlay::OverlayStack;
+use crate::overlay::{FEATURE_KINDS, OverlayStack};
 use crate::persistence::{self, PersistedSession};
 #[cfg(unix)]
 use crate::socket::{self, SocketRequest};
@@ -325,6 +327,268 @@ impl SeqForgeApp {
 
         Self { state }
     }
+
+    /// Render the Phase 14 feature/translation modal windows (centered egui
+    /// Windows, mirroring the CLI-install status window). Each collects at most
+    /// one command per frame and enqueues it through the single applier.
+    fn show_feature_modals(&mut self, ctx: &egui::Context) {
+        // ── Add / Edit Feature (one form; create vs edit = `form.id`) ──
+        {
+            let mut submit: Option<AppCommand> = None;
+            let mut cancel = false;
+            if let Some(form) = self.state.overlays.feature_form_mut() {
+                let editing = form.is_edit();
+                let (title, action) = if editing {
+                    ("Edit Feature", "Save")
+                } else {
+                    ("New Feature", "Create")
+                };
+                let mut open = true;
+                egui::Window::new(title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        // Enter from the label field submits (Find-bar idiom): a
+                        // singleline TextEdit gives up focus on Enter, so
+                        // `lost_focus()` + the Enter key is the submit moment.
+                        let mut submit_on_enter = false;
+                        egui::Grid::new("feature_form")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Label");
+                                let r = ui.text_edit_singleline(&mut form.label);
+                                if form.needs_focus {
+                                    r.request_focus();
+                                    form.needs_focus = false;
+                                }
+                                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    submit_on_enter = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Kind");
+                                egui::ComboBox::from_id_salt("feature_form_kind")
+                                    .selected_text(&form.kind)
+                                    .show_ui(ui, |ui| {
+                                        for k in FEATURE_KINDS {
+                                            ui.selectable_value(
+                                                &mut form.kind,
+                                                (*k).to_string(),
+                                                *k,
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Strand");
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut form.strand, "+".into(), "+ fwd");
+                                    ui.selectable_value(&mut form.strand, "-".into(), "− rev");
+                                    ui.selectable_value(&mut form.strand, ".".into(), ". none");
+                                });
+                                ui.end_row();
+
+                                ui.label("Start");
+                                ui.add(egui::DragValue::new(&mut form.start).range(0..=usize::MAX));
+                                ui.end_row();
+
+                                ui.label("End");
+                                ui.add(
+                                    egui::DragValue::new(&mut form.end)
+                                        .range(form.start + 1..=usize::MAX),
+                                );
+                                ui.end_row();
+                            });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(action).clicked() || submit_on_enter {
+                                submit = Some(AppCommand::SubmitFeatureForm {
+                                    id: form.id,
+                                    label: form.label.clone(),
+                                    kind: form.kind.clone(),
+                                    strand: form.strand.clone(),
+                                    start: form.start,
+                                    end: form.end,
+                                });
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if !open {
+                    cancel = true;
+                }
+            }
+            if let Some(cmd) = submit {
+                enqueue(&mut self.state, cmd);
+            } else if cancel {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+            }
+        }
+
+        // ── Rename Feature ──
+        {
+            let mut submit: Option<AppCommand> = None;
+            let mut cancel = false;
+            if let Some(form) = self.state.overlays.rename_feature_mut() {
+                let mut open = true;
+                egui::Window::new("Rename Feature")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label("Label");
+                        let r = ui.text_edit_singleline(&mut form.input);
+                        if form.needs_focus {
+                            r.request_focus();
+                            form.needs_focus = false;
+                        }
+                        let submit_now =
+                            r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Rename").clicked() || submit_now {
+                                submit = Some(AppCommand::SubmitRenameFeature {
+                                    id: form.id,
+                                    label: form.input.clone(),
+                                });
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    });
+                if !open {
+                    cancel = true;
+                }
+            }
+            if let Some(cmd) = submit {
+                enqueue(&mut self.state, cmd);
+            } else if cancel {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+            }
+        }
+
+        // ── Translation (read-only) ──
+        {
+            let mut cancel = false;
+            // Snapshot the active buffer's bytes once (owned, releases the read
+            // lock) so we can compute the protein inside the window closure.
+            let seq: Option<Vec<u8>> = self.state.workspace.active_view().and_then(|v| {
+                let arc = self.state.workspace.buffers.get(v.buffer_id)?;
+                let buf = arc.read().ok()?;
+                Some(buf.text.clone())
+            });
+            if let Some(t) = self.state.overlays.translation_mut() {
+                let mut open = true;
+                egui::Window::new("Translation")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(360.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  ·  {}..{} ({} bp)",
+                                t.title,
+                                t.start,
+                                t.end,
+                                t.end.saturating_sub(t.start)
+                            ))
+                            .strong(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut t.all_frames, "All 6 frames");
+                            if !t.all_frames {
+                                ui.separator();
+                                ui.label("Strand");
+                                ui.selectable_value(
+                                    &mut t.strand,
+                                    seqforge_core::Strand::Forward,
+                                    "+",
+                                );
+                                ui.selectable_value(
+                                    &mut t.strand,
+                                    seqforge_core::Strand::Reverse,
+                                    "−",
+                                );
+                                ui.separator();
+                                ui.label("Frame");
+                                for f in 1..=3usize {
+                                    ui.selectable_value(&mut t.frame, f, f.to_string());
+                                }
+                            }
+                        });
+                        ui.separator();
+                        // Compute after the controls so edits show the same frame.
+                        let range_seq = seq.as_ref().and_then(|s| {
+                            let end = t.end.min(s.len());
+                            (t.start < end).then(|| &s[t.start..end])
+                        });
+                        if t.all_frames {
+                            // +1/+2/+3 then −1/−2/−3, each a labeled monospace row.
+                            egui::Grid::new("translation_all_frames")
+                                .num_columns(2)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    for (strand, sign) in [
+                                        (seqforge_core::Strand::Forward, '+'),
+                                        (seqforge_core::Strand::Reverse, '-'),
+                                    ] {
+                                        for frame in 1..=3usize {
+                                            let protein = range_seq
+                                                .map(|s| seqforge_bio::translate(s, strand, frame))
+                                                .unwrap_or_default();
+                                            ui.label(
+                                                egui::RichText::new(format!("{sign}{frame}"))
+                                                    .strong(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(protein).monospace(),
+                                                )
+                                                .wrap(),
+                                            );
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                        } else {
+                            let protein = range_seq
+                                .map(|s| seqforge_bio::translate(s, t.strand, t.frame))
+                                .unwrap_or_default();
+                            ui.label(
+                                egui::RichText::new(format!("{} aa", protein.chars().count()))
+                                    .weak(),
+                            );
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&protein).monospace()).wrap(),
+                            );
+                        }
+                        ui.add_space(4.0);
+                        // Read-only window: Enter closes (Escape is handled by
+                        // the global overlay keymap, like every other dialog).
+                        if ui.button("Close").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            cancel = true;
+                        }
+                    });
+                if !open {
+                    cancel = true;
+                }
+            }
+            if cancel {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+            }
+        }
+    }
 }
 
 /// Convenience: push a command with no response channel.
@@ -612,6 +876,42 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                     ui.separator();
+                    // ── Translation lanes (View → Translation) ──
+                    let cur_trans = self
+                        .state
+                        .workspace
+                        .active_view()
+                        .and_then(|v| self.state.workspace.seq_views.get(&v.id))
+                        .map(|sv| sv.translation.clone())
+                        .unwrap_or_default();
+                    let has_view = self.state.workspace.active_view().is_some();
+                    ui.add_enabled_ui(has_view, |ui| {
+                        ui.menu_button("Translation", |ui| {
+                            let mut d = cur_trans;
+                            let mut changed = false;
+                            changed |= ui.checkbox(&mut d.show_cds, "CDS translations").changed();
+                            ui.separator();
+                            let labels = [
+                                "Frame +1",
+                                "Frame +2",
+                                "Frame +3",
+                                "Frame −1",
+                                "Frame −2",
+                                "Frame −3",
+                            ];
+                            for (i, lbl) in labels.iter().enumerate() {
+                                changed |= ui.checkbox(&mut d.frames[i], *lbl).changed();
+                            }
+                            ui.separator();
+                            changed |= ui
+                                .checkbox(&mut d.show_orfs, "Show ORFs (mark stops / starts)")
+                                .changed();
+                            if changed {
+                                menu_cmds.push(AppCommand::SetTranslationDisplay(d));
+                            }
+                        });
+                    });
+                    ui.separator();
                     if ui.button("Reset Layout").clicked() {
                         menu_cmds.push(AppCommand::ResetLayout);
                         ui.close_menu();
@@ -620,6 +920,41 @@ impl eframe::App for SeqForgeApp {
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Restriction Sites…  ⌘E").clicked() {
                         menu_cmds.push(AppCommand::OpenEnzymes);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+
+                    // ── Feature editing / translation (Phase 14) ──
+                    let has_range = sel_range.is_some();
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("New Feature from Selection…"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::OpenFeatureForm {
+                                id: None,
+                                label: String::new(),
+                                kind: "misc_feature".to_string(),
+                                strand: "+".to_string(),
+                                start,
+                                end,
+                            });
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Translate Selection…"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = sel_range {
+                            menu_cmds.push(AppCommand::OpenTranslation {
+                                title: "Selection".to_string(),
+                                start,
+                                end,
+                                strand: seqforge_core::Strand::Forward,
+                                frame: 1,
+                            });
+                        }
                         ui.close_menu();
                     }
                     ui.separator();
@@ -686,9 +1021,47 @@ impl eframe::App for SeqForgeApp {
                 let info = self.state.workspace.active_view().and_then(|v| {
                     let buf_arc = self.state.workspace.buffers.get(v.buffer_id)?;
                     let buf = buf_arc.read().ok()?;
-                    Some((v.id, buf.len(), format!("{:?}", buf.topology), v.selection))
+                    // Auto-translate the selected feature if it's a CDS (derived,
+                    // read-only — decision 8). Frame from `/codon_start`, strand
+                    // from the feature. Other kinds translate on demand via the
+                    // Translate window, not here.
+                    let cds = v.selected_feature.and_then(|fid| {
+                        let f = self
+                            .state
+                            .workspace
+                            .buffers
+                            .annotations(v.buffer_id)?
+                            .get(fid)?;
+                        if !matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds) {
+                            return None;
+                        }
+                        let end = f.range.end.min(buf.text.len());
+                        if f.range.start >= end {
+                            return None;
+                        }
+                        let codon_start = f
+                            .qualifiers
+                            .get("codon_start")
+                            .and_then(|x| x.as_deref())
+                            .and_then(|s| s.trim().parse::<usize>().ok())
+                            .filter(|n| (1..=3).contains(n))
+                            .unwrap_or(1);
+                        let protein = seqforge_bio::translate(
+                            &buf.text[f.range.start..end],
+                            f.strand,
+                            codon_start,
+                        );
+                        Some((f.label.clone(), protein))
+                    });
+                    Some((
+                        v.id,
+                        buf.len(),
+                        format!("{:?}", buf.topology),
+                        v.selection,
+                        cds,
+                    ))
                 });
-                if let Some((view_id, seq_len, topology, selection)) = info {
+                if let Some((view_id, seq_len, topology, selection, cds)) = info {
                     ui.label(format!("{seq_len} bp  ·  {topology}"));
                     if let Some(sel) = selection {
                         if sel.is_cursor() {
@@ -697,6 +1070,22 @@ impl eframe::App for SeqForgeApp {
                             let (s, e) = sel.ordered();
                             ui.label(format!("sel {s}–{e}  ({} bp)", e - s));
                         }
+                    }
+                    // Read-only CDS protein for the selected feature.
+                    if let Some((label, protein)) = &cds {
+                        let aa = protein.chars().count();
+                        let shown: String = protein.chars().take(24).collect();
+                        let ellipsis = if aa > 24 { "…" } else { "" };
+                        let name = if label.is_empty() {
+                            "CDS"
+                        } else {
+                            label.as_str()
+                        };
+                        ui.label(
+                            egui::RichText::new(format!("{name}: {shown}{ellipsis} ({aa} aa)"))
+                                .monospace()
+                                .weak(),
+                        );
                     }
                     // Staged-edit indicator (Phase 13.6). Lives here rather than
                     // floating in the canvas; the accent colour marks the active
@@ -741,6 +1130,9 @@ impl eframe::App for SeqForgeApp {
                 enqueue(&mut self.state, AppCommand::DismissCliStatus);
             }
         }
+
+        // ── Feature modals (Phase 14) ─────────────────────────────────────────
+        self.show_feature_modals(ctx);
 
         // ── Dock area ─────────────────────────────────────────────────────────
         let AppState {

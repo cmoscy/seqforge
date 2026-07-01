@@ -1,6 +1,8 @@
 //! Navigation, search, selection commands.
 
-use seqforge_core::{BioOps, DispatchError, EnzymeOp, Selection, ViewerRequest, ViewerResponse};
+use seqforge_core::{
+    BioOps, DispatchError, EnzymeOp, FeatureId, Selection, Strand, ViewerRequest, ViewerResponse,
+};
 
 use super::{
     active_selection, dispatch_active, emit_selection_diff, restore_focus_after_overlay,
@@ -9,7 +11,9 @@ use super::{
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
-use crate::overlay::{EnzymeBar, FindBar, GoToBar, Overlay};
+use crate::overlay::{
+    EnzymeBar, FeatureForm, FindBar, GoToBar, Overlay, RenameFeatureForm, TranslationView,
+};
 
 pub(super) fn apply_open_find(
     state: &mut AppState,
@@ -184,10 +188,76 @@ pub(super) fn apply_set_selection(
 
 pub(super) fn apply_select_feature(
     state: &mut AppState,
-    new_feat: Option<usize>,
+    new_feat: Option<FeatureId>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     if let Some(view) = state.workspace.active_view_mut() {
         view.selected_feature = new_feat;
     }
     Ok(None)
+}
+
+/// Open a modal overlay (feature editing / translation). Shared plumbing:
+/// snapshot focus for restore-on-dismiss, keep the active view focused so the
+/// modal's Escape (via the `"Overlay"` context tag) works, push uniquely.
+fn open_modal(
+    state: &mut AppState,
+    overlay: Overlay,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    snapshot_focus_for_overlay(state);
+    if let Some(vid) = state.workspace.active_view {
+        state.focus.set_scope(FocusScope::View(vid));
+    }
+    if let Some(tag) = state.overlays.push_unique(overlay) {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_open_feature_form(
+    state: &mut AppState,
+    id: Option<FeatureId>,
+    label: String,
+    kind: String,
+    strand: String,
+    start: usize,
+    end: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let form = match id {
+        Some(id) => FeatureForm::edit(id, label, kind, strand, start, end),
+        None => FeatureForm::create(start, end),
+    };
+    open_modal(state, Overlay::FeatureForm(form))
+}
+
+pub(super) fn apply_open_rename_feature(
+    state: &mut AppState,
+    id: FeatureId,
+    label: String,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    open_modal(
+        state,
+        Overlay::RenameFeature(RenameFeatureForm::new(id, label)),
+    )
+}
+
+pub(super) fn apply_open_translation(
+    state: &mut AppState,
+    title: String,
+    start: usize,
+    end: usize,
+    strand: Strand,
+    frame: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    open_modal(
+        state,
+        Overlay::Translation(TranslationView {
+            title,
+            start,
+            end,
+            strand,
+            frame,
+            all_frames: false,
+        }),
+    )
 }

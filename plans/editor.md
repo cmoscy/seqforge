@@ -681,16 +681,44 @@ cancels a pending stage. 64 `seqforge-app` tests + clippy + fmt green.
 
 ---
 
-### Phase 14 — Feature editing *(1 day)*
+### Phase 14 — Feature editing *(1 day)* — ✅ code done (manual GUI walk pending)
 
 **Goal:** Add, remove, rename features over a selection.
 
-- [ ] `Tools → New Feature from Selection…` dialog (label, kind dropdown, strand). Emits `ViewerRequest::AddFeature`.
-- [ ] Right-click on annotation bar: context menu `Rename…` / `Remove`. Emits `RenameFeature` / `RemoveFeature`.
-- [ ] `AddFeature` validates `start < end <= buf.len()`. Sets `raw_kind` to the GenBank vocabulary string for the chosen kind.
-- [ ] Per-view render caches that depend on `annotations.features` invalidate automatically via `buf.version` bump in `apply_insert` — but `AddFeature` / `RemoveFeature` don't touch the sequence. These need to bump `buf.version` too (or the feature-stacking cache needs to also key on `annotations.features.len()`). Decision: bump `buf.version` on any annotation mutation for simplicity.
+> **Status:** landed. Structural `FeatureId` (id-only `Annotations` API, `pub(crate)`
+> `Vec`), feature ops undoable via `workspace.edit_annotations` (empty splice delta +
+> annotation snapshot), `ViewerRequest::{Remove,Rename}Feature` now `--id`,
+> `AddFeature` returns `ViewerResponse::FeatureAdded { id, len }`, new read-op
+> `ViewerRequest::ListFeatures → ViewerResponse::Features` (CLI/agent id discovery —
+> added so the id-addressed ops are usable programmatically), `View.selected_feature:
+> Option<FeatureId>`. GUI: `Tools → New Feature from Selection…` modal, right-click
+> annotation-bar context menu (Rename…/Remove/Translate), read-only CDS translation in
+> the status bar + on-demand `Translation` window (strand/frame picker), `Tools →
+> Translate Selection…`, and a `seqforge translate <file>` CLI command. Modals submit
+> on Enter (Find-bar idiom) + dismiss on Escape (global overlay keymap; unit-tested).
+> Translation resolves IUPAC codons by consensus and offers an all-6-frames view. 194
+> workspace tests + clippy + fmt green.
 
-**Done when:** Create a CDS over a selection, rename it, delete it; reload the file and the change is on disk.
+- [x] **Structural `FeatureId` (do this first).** `FeatureId(u64)` newtype in `core`; `Feature.id` `#[serde(skip)]` + re-minted on load (session-scoped; GenBank/FASTA stay **positional** — ids are never persisted). `Annotations` owns a monotonic counter and mints ids on load + add. **Make the `Annotations` feature API id-only** — `get(id)` / `get_mut(id)` / `remove(id)` / `rename(id, …)` / ordered `iter()`; stop exposing the raw `Vec` and any `usize` index. Resolution is a scan (tiny N — no `HashMap`, `Vec` stays; swap for `IndexMap` later behind this same API only if profiling ever demands it). Rework the **already-implemented** ops (`apply_add/remove/rename_feature` + `ViewerRequest::{Remove,Rename}Feature`: `{index}` → `{id}`; `AddFeature` returns the new id in `ViewerResponse`) and change `View.selected_feature: Option<usize>` → `Option<FeatureId>` (fixes the stale-pointer bug: it persists across edits + restart today). Make feature ops **undoable** via the existing annotation-snapshot path (ids ride the snapshot free). Rationale: [`../docs/extensibility.md`](../docs/extensibility.md) + ROADMAP decisions 11–12.
+- [x] **New Feature = modal dialog** (`Tools → New Feature from Selection…`; label, kind dropdown, strand; Create/Cancel; start/end pre-filled from the selection). `Overlay::NewFeature` rendered as a centered `egui::Window` in `app.rs::show_feature_modals`; one `SubmitNewFeature` → one `AddFeature`.
+- [x] Right-click on annotation bar: context menu `Rename…` / `Remove` / `Translate` → one `RenameFeature` / `RemoveFeature` each (by `FeatureId`). The feature under the secondary click is captured into `SequenceView.context_feature` so the menu closure acts on a stable id.
+- [x] `AddFeature` validates `start < end <= buf.len()`. Sets `raw_kind` to the GenBank vocabulary string for the chosen kind (`FEATURE_KINDS` dropdown).
+- [x] **Read-only CDS translation display.** `seqforge-bio::translate` + hand-rolled codon table (NCBI transl_table 1 — rust-bio/gb-io ship no genetic code). **IUPAC ambiguity is resolved by consensus** (expand each degenerate base, translate all concrete combinations, emit the AA iff they agree else `X` — the EMBOSS/BioPython method; `GGN→G`, `MGR→R`, `TAR→*`). Selected CDS feature auto-shows a truncated protein in the status bar (frame from `/codon_start`, strand from the feature). On-demand `Translation` window: single strand+frame picker **or an "All 6 frames" grid** (+1/+2/+3, −1/−2/−3); opened from the context menu (prefilled for CDS) or `Tools → Translate Selection…`. `seqforge translate <file> --start --end --strand --frame` CLI command. *(The in-viewer translation lane is now in scope — see 14e below. Protein-level editing and per-feature colour override remain post-v0.2.)*
+- [x] Annotation mutations bump `buf.version` (via `workspace.edit_annotations`) so feature-stacking / minimap caches invalidate.
+
+**Done when:** Create a CDS over a selection (modal), rename it, delete it (right-click), undo each, see its translation, reload the file and the change is on disk; `remove-feature --id`/`rename-feature --id` and `seqforge translate` work from the CLI. *(CLI paths + unit tests verified; interactive GUI walk — modal/context-menu/window — pending manual confirmation.)*
+
+#### 14e — Feature geometry editing + in-viewer translation & ORF view *(ROADMAP decision 13)*
+
+**Goal:** Edit a feature's geometry (not just its label), and translate **in the canvas** — both feature-tied CDS lanes and a global 6-frame reading-frame view whose ORF runs are highlighted. ORFs are a *view*, never features (except by explicit opt-in).
+
+- [x] **Unified feature Edit.** `ViewerRequest::UpdateFeature { id, kind?, label?, strand?, start?, end?, view }` — undoable annotation edit (rides `workspace.edit_annotations`; only supplied fields change; validates `start < end <= len`). CLI `--id`. GUI: an **Edit Feature** modal (double-click a feature, or context-menu `Edit…`) pre-filled with all fields → one `UpdateFeature`; `Rename…` stays.
+- [x] **ORF engine (`seqforge-bio`).** `find_orfs(seq, min_aa, met_to_stop, include_reverse) -> Vec<Orf>` (forward-coord range, strand, frame, aa length); pure + tested (Met→stop default; reverse-strand coords mapped to forward). `seqforge orfs <file> --min-aa --stop-to-stop --forward-only` local CLI command.
+- [x] **Translation band (viewer).** Per-view `TranslationDisplay { frames: [bool; 6], show_cds, show_orfs }` (transient). Block layout grows a **translation band between the bottom strand and the annotation bars**; one **codon-aligned AA lane renderer** memoized on `(version, display)` (`SequenceView.translation_cache`) serves **global frame lanes** and a merged **CDS lane** (each CDS in its `/codon_start` frame). AA centered on its codon's middle column; reverse-frame AAs map back to forward columns. Suppressed while staging. `View → Translation` submenu toggles frames / CDS / Show ORFs.
+- [x] **ORF emphasis + promote.** With *Show ORFs*, frame lanes colour stops (red) and starts (green) and wash the Met→stop runs. Right-click an ORF run → **Annotate as CDS feature** (reuses `AddFeature`) — the only place an ORF becomes a feature.
+- [~] Colours: stop/start/ORF-wash currently fixed RGB in `viewer.rs` (red/green/faint-green); promoting them into theme entries (mirroring `BaseColors`/`StrandColors`) is a small follow-up.
+
+**Done when:** ✅ (code; 202 workspace tests + clippy + fmt green) Toggle any of the 6 frames and see AA lanes under the sequence; a CDS shows its protein in-canvas; ORFs highlight and one can be annotated; double-click a feature and change type + range + strand (undoable); `seqforge orfs`/`update-feature` work from the CLI. *Interactive GUI walk (band layout / menu / double-click / right-click promote) pending manual confirmation.*
 
 ---
 
@@ -763,3 +791,5 @@ Phase 9 (v0.1.0 tag) runs in parallel and does not block this plan.
 - **Primitive vs composed edits:** content-given edits (`apply_splice` + insert/delete/replace) live in `core`; edits whose bytes are *derived by `bio`* (revcomp, all cloning/primer ops) compose in `command/edit.rs`. Keeping `apply_*` byte-derivation out of `core` is what prevents a `core ──► bio` cycle.
 - **CLI surface:** every new `ViewerRequest` variant must have doc comments that read as CLI help text (`/// Insert bases at a position`).
 - **Feature kind:** always set `raw_kind` to the GenBank vocabulary string when creating features; use `classify(&raw_kind)` for display/coloring. Never store a bare `FeatureKind` variant as the authoritative kind.
+- **Feature addressing:** features are addressed **only by `FeatureId`**. A positional index is a private, within-frame render detail (immediate-mode stacking / hit-test) — it is never stored, serialized, or returned from a public API. Identity that crosses a frame, an edit, or the wire is always a `FeatureId`. (This makes the stale-index bug class unrepresentable rather than convention-guarded; see ROADMAP decision 12.)
+- **Translation is read-only derived data:** protein is a pure function of DNA + frame + strand (decision 8) — computed on demand in `seqforge-bio`, never stored, never on the mutation/undo path, never serialized. Auto-display defaults to CDS features only (`gene` spans introns/UTRs — don't auto-translate it). Compute rather than trust a stored `/translation`.

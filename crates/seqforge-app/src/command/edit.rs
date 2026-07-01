@@ -16,13 +16,13 @@
 //!   same shape. Byte-derivation lives here (the app layer), never in `core`,
 //!   so `core` never gains a `bio` dependency.
 //!
-//! Feature ops (add/remove/rename) mutate `Annotations` and bump `buf.version`
-//! (the cache-invalidation contract) but are **not** yet undoable — feature-op
-//! history is Phase 14. Copy is read-only and likewise records no history.
+//! Feature ops (add/remove/rename) mutate `Annotations` through the id-only
+//! API and are undoable via `workspace.edit_annotations` (empty splice delta +
+//! annotation snapshot; Phase 14). Copy is read-only and records no history.
 
 use std::ops::Range;
 
-use seqforge_core::{DispatchError, EditKind, Feature, Strand, ViewId, ViewerResponse};
+use seqforge_core::{DispatchError, EditKind, Feature, FeatureId, Strand, ViewId, ViewerResponse};
 
 use crate::app::AppState;
 use crate::command::{AppCommand, StagedEdit};
@@ -284,10 +284,12 @@ pub(super) fn apply_redo(
     }))
 }
 
-// ── Feature ops (12d) ──────────────────────────────────────────────────────────
+// ── Feature ops (Phase 14) ──────────────────────────────────────────────────────
 //
-// Annotation-only mutations: they bump `buf.version` (the cache-invalidation
-// contract — see editor.md Phase 14) but record no undo history yet.
+// Annotation-only mutations routed through `workspace.edit_annotations`, which
+// records an undoable history entry (empty splice delta + annotation snapshot)
+// and bumps `buf.version` (the cache-invalidation contract). Features are
+// addressed by `FeatureId` — never by a positional index (ROADMAP decision 12).
 
 fn parse_strand(s: &str) -> Strand {
     match s.trim() {
@@ -308,14 +310,15 @@ pub(super) fn apply_add_feature(
     strand: String,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    state.workspace.with_buffer_mut(vid, |_, buf, ann| {
+    let (id, len) = state.workspace.edit_annotations(vid, |ann, buf| {
         if start >= end || end > buf.text.len() {
             return Err(DispatchError::OutOfRange {
                 position: end,
                 seq_len: buf.text.len(),
             });
         }
-        ann.features.push(Feature {
+        let id = ann.add(Feature {
+            id: Default::default(), // reassigned by `add`
             range: start..end,
             raw_kind: kind,
             label,
@@ -323,52 +326,136 @@ pub(super) fn apply_add_feature(
             qualifiers: Default::default(),
             provenance: None,
         });
-        buf.version += 1;
-        Ok(())
-    })??;
-    Ok(Some(ViewerResponse::Ok))
+        Ok((id, buf.text.len()))
+    })?;
+    Ok(Some(ViewerResponse::FeatureAdded { id, len }))
 }
 
 pub(super) fn apply_remove_feature(
     state: &mut AppState,
     view: Option<ViewId>,
-    index: usize,
+    id: FeatureId,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    state.workspace.with_buffer_mut(vid, |_, buf, ann| {
-        if index >= ann.features.len() {
-            return Err(DispatchError::InvalidInput(format!(
-                "no feature at index {index} (have {})",
-                ann.features.len()
-            )));
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        if ann.remove(id) {
+            Ok(buf.text.len())
+        } else {
+            Err(DispatchError::InvalidInput(format!(
+                "no feature with id {id}"
+            )))
         }
-        ann.features.remove(index);
-        buf.version += 1;
-        Ok(())
-    })??;
-    Ok(Some(ViewerResponse::Ok))
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
 }
 
 pub(super) fn apply_rename_feature(
     state: &mut AppState,
     view: Option<ViewId>,
-    index: usize,
+    id: FeatureId,
     label: String,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    state
-        .workspace
-        .with_buffer_mut(vid, |_, buf, ann| match ann.features.get_mut(index) {
-            Some(f) => {
-                f.label = label;
-                buf.version += 1;
-                Ok(())
-            }
-            None => Err(DispatchError::InvalidInput(format!(
-                "no feature at index {index} (have {})",
-                ann.features.len()
-            ))),
-        })??;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        if ann.rename(id, label) {
+            Ok(buf.text.len())
+        } else {
+            Err(DispatchError::InvalidInput(format!(
+                "no feature with id {id}"
+            )))
+        }
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
+/// Edit a feature's geometry/type in place (`UpdateFeature`): only the
+/// `Some(_)` fields change. Undoable via `edit_annotations`; validates the
+/// (possibly-partial) new range against the buffer.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_update_feature(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    id: FeatureId,
+    kind: Option<String>,
+    label: Option<String>,
+    strand: Option<String>,
+    start: Option<usize>,
+    end: Option<usize>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        let cur = ann
+            .get(id)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no feature with id {id}")))?;
+        let new_start = start.unwrap_or(cur.range.start);
+        let new_end = end.unwrap_or(cur.range.end);
+        if new_start >= new_end || new_end > buf.text.len() {
+            return Err(DispatchError::OutOfRange {
+                position: new_end,
+                seq_len: buf.text.len(),
+            });
+        }
+        let f = ann.get_mut(id).expect("present — checked just above");
+        f.range = new_start..new_end;
+        if let Some(k) = kind {
+            f.raw_kind = k;
+        }
+        if let Some(l) = label {
+            f.label = l;
+        }
+        if let Some(s) = strand {
+            f.strand = parse_strand(&s);
+        }
+        Ok(buf.text.len())
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
+/// Commit the unified feature modal, then dismiss it. `id = None` creates a new
+/// feature (`AddFeature`); `id = Some` edits an existing one (`UpdateFeature`,
+/// all fields). The modal always targets the active view.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_submit_feature_form(
+    state: &mut AppState,
+    id: Option<FeatureId>,
+    label: String,
+    kind: String,
+    strand: String,
+    start: usize,
+    end: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    match id {
+        None => {
+            apply_add_feature(state, None, start, end, kind, label.clone(), strand)?;
+            super::nav::apply_dismiss_overlay(state)?;
+            let shown = if label.is_empty() { "feature" } else { &label };
+            state.toasts.success(format!("Added {shown}"));
+        }
+        Some(id) => {
+            apply_update_feature(
+                state,
+                None,
+                id,
+                Some(kind),
+                Some(label),
+                Some(strand),
+                Some(start),
+                Some(end),
+            )?;
+            super::nav::apply_dismiss_overlay(state)?;
+        }
+    }
+    Ok(Some(ViewerResponse::Ok))
+}
+
+/// Commit the Rename modal: one `RenameFeature`, dismiss the modal.
+pub(super) fn apply_submit_rename_feature(
+    state: &mut AppState,
+    id: FeatureId,
+    label: String,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    apply_rename_feature(state, None, id, label)?;
+    super::nav::apply_dismiss_overlay(state)?;
     Ok(Some(ViewerResponse::Ok))
 }
 
@@ -436,7 +523,7 @@ mod tests {
     fn feature_count(state: &mut AppState) -> usize {
         state
             .workspace
-            .with_active_buffer(|_, _, ann| ann.features.len())
+            .with_active_buffer(|_, _, ann| ann.len())
             .unwrap()
     }
 
@@ -559,21 +646,122 @@ mod tests {
         assert_eq!(text(&mut s), b"ATGATGC");
     }
 
+    /// Add a feature and return its minted id.
+    fn add_feat(state: &mut AppState, start: usize, end: usize, label: &str) -> FeatureId {
+        match apply_add_feature(
+            state,
+            None,
+            start,
+            end,
+            "CDS".into(),
+            label.into(),
+            "+".into(),
+        )
+        .unwrap()
+        {
+            Some(ViewerResponse::FeatureAdded { id, .. }) => id,
+            other => panic!("expected FeatureAdded, got {other:?}"),
+        }
+    }
+
+    fn first_label(state: &mut AppState) -> String {
+        state
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.iter().next().unwrap().label.clone())
+            .unwrap()
+    }
+
     #[test]
     fn add_remove_rename_feature() {
         let mut s = state_with(b"ATGCATGC");
-        apply_add_feature(&mut s, None, 0, 3, "CDS".into(), "gene1".into(), "+".into()).unwrap();
+        let id = add_feat(&mut s, 0, 3, "gene1");
         assert_eq!(feature_count(&mut s), 1);
 
-        apply_rename_feature(&mut s, None, 0, "renamed".into()).unwrap();
-        let label = s
+        apply_rename_feature(&mut s, None, id, "renamed".into()).unwrap();
+        assert_eq!(first_label(&mut s), "renamed");
+
+        apply_remove_feature(&mut s, None, id).unwrap();
+        assert_eq!(feature_count(&mut s), 0);
+    }
+
+    #[test]
+    fn submit_feature_form_create_adds_and_dismisses() {
+        use crate::overlay::{FeatureForm, Overlay};
+        let mut s = state_with(b"ATGCATGC");
+        s.overlays
+            .push_unique(Overlay::FeatureForm(FeatureForm::create(0, 3)));
+        // id = None → create path.
+        apply_submit_feature_form(&mut s, None, "gene1".into(), "CDS".into(), "+".into(), 0, 3)
+            .unwrap();
+        assert_eq!(feature_count(&mut s), 1);
+        // The modal was dismissed on submit.
+        assert!(s.overlays.is_empty());
+    }
+
+    #[test]
+    fn submit_feature_form_edit_updates_and_dismisses() {
+        use crate::overlay::{FeatureForm, Overlay};
+        let mut s = state_with(b"ATGCATGCATGC");
+        let id = add_feat(&mut s, 0, 3, "orig");
+        s.overlays
+            .push_unique(Overlay::FeatureForm(FeatureForm::edit(
+                id,
+                "orig".into(),
+                "CDS".into(),
+                "+".into(),
+                0,
+                3,
+            )));
+        // id = Some → update path.
+        apply_submit_feature_form(
+            &mut s,
+            Some(id),
+            "renamed".into(),
+            "gene".into(),
+            "-".into(),
+            4,
+            9,
+        )
+        .unwrap();
+        let (label, range) = s
             .workspace
-            .with_active_buffer(|_, _, ann| ann.features[0].label.clone())
+            .with_active_buffer(|_, _, ann| {
+                let f = ann.get(id).unwrap();
+                (f.label.clone(), f.range.clone())
+            })
             .unwrap();
         assert_eq!(label, "renamed");
+        assert_eq!(range, 4..9);
+        assert!(s.overlays.is_empty());
+    }
 
-        apply_remove_feature(&mut s, None, 0).unwrap();
+    #[test]
+    fn feature_ops_are_undoable() {
+        let mut s = state_with(b"ATGCATGC");
+        let vid = s.workspace.active_view().unwrap().id;
+
+        let id = add_feat(&mut s, 0, 3, "orig");
+        apply_rename_feature(&mut s, None, id, "renamed".into()).unwrap();
+        apply_remove_feature(&mut s, None, id).unwrap();
         assert_eq!(feature_count(&mut s), 0);
+
+        // Undo remove → feature back, still "renamed".
+        s.workspace.undo(vid).unwrap();
+        assert_eq!(feature_count(&mut s), 1);
+        assert_eq!(first_label(&mut s), "renamed");
+
+        // Undo rename → "orig".
+        s.workspace.undo(vid).unwrap();
+        assert_eq!(first_label(&mut s), "orig");
+
+        // Undo add → gone.
+        s.workspace.undo(vid).unwrap();
+        assert_eq!(feature_count(&mut s), 0);
+
+        // Redo add → back.
+        s.workspace.redo(vid).unwrap();
+        assert_eq!(feature_count(&mut s), 1);
+        assert_eq!(first_label(&mut s), "orig");
     }
 
     #[test]
@@ -600,9 +788,56 @@ mod tests {
     }
 
     #[test]
-    fn remove_feature_bad_index_errors() {
+    fn update_feature_partial_and_undoable() {
+        let mut s = state_with(b"ATGCATGCATGC");
+        let vid = s.workspace.active_view().unwrap().id;
+        let id = add_feat(&mut s, 0, 3, "orig");
+
+        // Change only the range + kind; label/strand left untouched.
+        apply_update_feature(
+            &mut s,
+            None,
+            id,
+            Some("misc_feature".into()),
+            None,
+            None,
+            Some(4),
+            Some(9),
+        )
+        .unwrap();
+        let (range, kind, label) = s
+            .workspace
+            .with_active_buffer(|_, _, ann| {
+                let f = ann.get(id).unwrap();
+                (f.range.clone(), f.raw_kind.clone(), f.label.clone())
+            })
+            .unwrap();
+        assert_eq!(range, 4..9);
+        assert_eq!(kind, "misc_feature");
+        assert_eq!(label, "orig", "unspecified fields are preserved");
+
+        // Undo restores the original geometry.
+        s.workspace.undo(vid).unwrap();
+        let range = s
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.get(id).unwrap().range.clone())
+            .unwrap();
+        assert_eq!(range, 0..3);
+    }
+
+    #[test]
+    fn update_feature_bad_range_errors() {
         let mut s = state_with(b"ATGC");
-        let err = apply_remove_feature(&mut s, None, 5).unwrap_err();
+        let id = add_feat(&mut s, 0, 3, "f");
+        let err = apply_update_feature(&mut s, None, id, None, None, None, Some(2), Some(99))
+            .unwrap_err();
+        assert!(matches!(err, DispatchError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn remove_feature_bad_id_errors() {
+        let mut s = state_with(b"ATGC");
+        let err = apply_remove_feature(&mut s, None, FeatureId(999)).unwrap_err();
         assert!(matches!(err, DispatchError::InvalidInput(_)));
     }
 

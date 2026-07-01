@@ -216,3 +216,56 @@ pub fn dispatch(focus: &FocusState, state: &AppState, ctx: &egui::Context) -> Ve
     });
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::overlay::{FeatureForm, Overlay};
+
+    /// Feed a single Escape key-press through a fresh egui context and run the
+    /// keymap once.
+    fn dispatch_escape(state: &AppState, focus: &FocusState) -> Vec<AppCommand> {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+        let _ = ctx.run(raw, |_| {});
+        // `run` moved the events into InputState; re-inject for the dispatch pass.
+        let ctx2 = egui::Context::default();
+        let mut raw2 = egui::RawInput::default();
+        raw2.events.push(egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+        ctx2.begin_pass(raw2);
+        dispatch(focus, state, &ctx2)
+    }
+
+    #[test]
+    fn escape_dismisses_open_feature_modal() {
+        let mut state = AppState::default();
+        state
+            .overlays
+            .push_unique(Overlay::FeatureForm(FeatureForm::create(0, 3)));
+        let mut focus = FocusState::default();
+        focus.rebuild_context(None, state.overlays.context_tags());
+        assert!(
+            focus.context.contains(Overlay::TAG_ACTIVE),
+            "an open modal must contribute the Overlay tag"
+        );
+
+        let cmds = dispatch_escape(&state, &focus);
+        assert!(
+            cmds.iter().any(|c| matches!(c, AppCommand::DismissOverlay)),
+            "Escape should emit DismissOverlay while a modal is open, got {cmds:?}"
+        );
+    }
+}

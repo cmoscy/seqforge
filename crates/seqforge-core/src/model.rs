@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CutSite, Feature, SearchHit, Selection, Topology};
+use crate::{CutSite, Feature, FeatureId, SearchHit, Selection, Topology};
 
 // ── Id newtypes ──────────────────────────────────────────────────────────────
 //
@@ -135,18 +135,108 @@ impl Buffer {
 /// One Annotations value per Buffer; lifetimes match. In Tier 3c the
 /// `Feature.range: Range<usize>` field becomes an anchor range so feature
 /// positions track edits without manual remapping.
+///
+/// **Features are addressed only by [`FeatureId`]** (ROADMAP decision 12). The
+/// backing `Vec` is `pub(crate)` — invisible outside `seqforge-core`, so no
+/// downstream crate can store or misuse a positional index; the public API is
+/// id-only (`add` / `get` / `get_mut` / `remove` / `rename` / ordered `iter`).
+/// Within `core`, the mutation primitive (`apply_splice`) and history sizing do
+/// bulk positional work over the `Vec`. Resolution is a linear scan — N is tiny;
+/// an `IndexMap<FeatureId, Feature>` can slot in behind this same API later on
+/// profiling evidence, with zero outside churn.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Annotations {
-    pub features: Vec<Feature>,
+    pub(crate) features: Vec<Feature>,
+    /// Monotonic id source, session-scoped. Not persisted — ids are re-minted
+    /// on load (`new` reassigns every feature), so GenBank/FASTA stay positional.
+    #[serde(skip)]
+    next_id: u64,
 }
 
 impl Annotations {
+    /// Build annotations from freshly-loaded features, **minting a new id for
+    /// each** (incoming ids, e.g. the `#[serde(skip)]` placeholder, are ignored).
+    /// This is the mint-on-load path; ids live only for this process.
     pub fn new(features: Vec<Feature>) -> Self {
-        Self { features }
+        let mut ann = Self {
+            features: Vec::with_capacity(features.len()),
+            next_id: 0,
+        };
+        for mut f in features {
+            f.id = ann.mint();
+            ann.features.push(f);
+        }
+        ann
+    }
+
+    /// Mint the next session-scoped id. Ids start at 1, so `FeatureId(0)` (the
+    /// `#[serde(skip)]` default) is always an unminted placeholder.
+    fn mint(&mut self) -> FeatureId {
+        self.next_id += 1;
+        FeatureId(self.next_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.features.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.features.is_empty()
+    }
+
+    /// Ordered iteration over features (definition order). The consumer may
+    /// `enumerate()` for within-frame positional work, but must never store the
+    /// index across a frame, an edit, or the wire — use the [`FeatureId`].
+    pub fn iter(&self) -> impl Iterator<Item = &Feature> {
+        self.features.iter()
+    }
+
+    /// Look up a feature by id (linear scan). `None` if it was removed.
+    pub fn get(&self, id: FeatureId) -> Option<&Feature> {
+        self.features.iter().find(|f| f.id == id)
+    }
+
+    /// Mutable lookup by id (linear scan).
+    pub fn get_mut(&mut self, id: FeatureId) -> Option<&mut Feature> {
+        self.features.iter_mut().find(|f| f.id == id)
+    }
+
+    /// Read-only positional access for the immediate-mode renderer/minimap
+    /// **only**. The position is a private within-frame detail (it changes on
+    /// any add/remove); resolve it fresh each frame and never persist it.
+    pub fn by_position(&self, pos: usize) -> Option<&Feature> {
+        self.features.get(pos)
+    }
+
+    /// Add a feature, minting and assigning its id (any incoming `feature.id`
+    /// is overwritten). Returns the new id.
+    pub fn add(&mut self, mut feature: Feature) -> FeatureId {
+        let id = self.mint();
+        feature.id = id;
+        self.features.push(feature);
+        id
+    }
+
+    /// Remove the feature with `id`. Returns `true` if one was removed.
+    pub fn remove(&mut self, id: FeatureId) -> bool {
+        match self.features.iter().position(|f| f.id == id) {
+            Some(pos) => {
+                self.features.remove(pos);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Rename the feature with `id`. Returns `true` if one was found.
+    pub fn rename(&mut self, id: FeatureId, label: String) -> bool {
+        match self.get_mut(id) {
+            Some(f) => {
+                f.label = label;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -190,7 +280,10 @@ pub struct View {
     pub buffer_id: BufferId,
     pub kind: ViewKind,
     pub selection: Option<Selection>,
-    pub selected_feature: Option<usize>,
+    /// The currently selected feature, by stable id (ROADMAP decision 12).
+    /// Was a positional `usize` — which dangled after any edit that shifted or
+    /// removed features. An id is resolved to a position fresh each frame.
+    pub selected_feature: Option<FeatureId>,
     /// Last persisted scroll offset, restored on tab switch / app restart.
     pub scroll_pos: Option<f32>,
     /// One-shot scroll request, consumed by the viewer each frame.
@@ -268,7 +361,7 @@ mod tests {
     fn view_clear_selection_drops_feature_too() {
         let mut v = View::new(ViewId(1), BufferId(1), ViewKind::TextView);
         v.selection = Some(Selection::range(0, 4));
-        v.selected_feature = Some(0);
+        v.selected_feature = Some(FeatureId(1));
         v.clear_selection();
         assert!(v.selection.is_none());
         assert!(v.selected_feature.is_none());
@@ -297,5 +390,45 @@ mod tests {
     #[test]
     fn view_kind_context_tag() {
         assert_eq!(ViewKind::TextView.context_tag(), "Pane:TextView");
+    }
+
+    fn feat(label: &str) -> Feature {
+        Feature {
+            id: Default::default(),
+            range: 0..3,
+            raw_kind: "CDS".into(),
+            label: label.into(),
+            strand: crate::Strand::Forward,
+            qualifiers: Default::default(),
+            provenance: None,
+        }
+    }
+
+    #[test]
+    fn annotations_mint_unique_ids_on_load() {
+        let ann = Annotations::new(vec![feat("a"), feat("b"), feat("c")]);
+        let ids: Vec<_> = ann.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![FeatureId(1), FeatureId(2), FeatureId(3)]);
+        // None is the placeholder default.
+        assert!(ids.iter().all(|id| *id != FeatureId(0)));
+    }
+
+    #[test]
+    fn annotations_id_api_add_get_remove_rename() {
+        let mut ann = Annotations::new(vec![]);
+        let id = ann.add(feat("first"));
+        assert_eq!(ann.get(id).unwrap().label, "first");
+
+        // Ids are never reused: removing then adding mints a fresh id.
+        assert!(ann.remove(id));
+        assert!(ann.get(id).is_none());
+        let id2 = ann.add(feat("second"));
+        assert_ne!(id, id2);
+
+        assert!(ann.rename(id2, "renamed".into()));
+        assert_eq!(ann.get(id2).unwrap().label, "renamed");
+        // Operating on a stale id is a no-op, not a panic.
+        assert!(!ann.rename(id, "ghost".into()));
+        assert!(!ann.remove(id));
     }
 }

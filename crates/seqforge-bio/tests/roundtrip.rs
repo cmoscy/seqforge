@@ -67,7 +67,7 @@ fn roundtrip_gb(name: &str) {
     let doc2 = load(out.path()).expect("reload gb");
     assert_eq!(buf.text, doc2.sequence, "sequence changed on round-trip");
     assert_eq!(buf.topology, doc2.topology, "topology changed");
-    assert_features_eq(&ann.features, &doc2.features);
+    assert_features_eq(&ann.iter().cloned().collect::<Vec<_>>(), &doc2.features);
 }
 
 #[test]
@@ -100,6 +100,7 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
     qualifiers.insert("pseudo".to_string(), None);
 
     let feature = Feature {
+        id: Default::default(),
         range: 10..40,
         raw_kind: "CDS".to_string(),
         label: "myCDS".to_string(),
@@ -124,7 +125,7 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
     save(&buf, &ann, out.path()).expect("save gb");
     let doc2 = load(out.path()).expect("reload gb");
 
-    assert_features_eq(&ann.features, &doc2.features);
+    assert_features_eq(&ann.iter().cloned().collect::<Vec<_>>(), &doc2.features);
     let reloaded = &doc2.features[0];
     assert_eq!(
         reloaded.provenance.as_ref().unwrap().operation,

@@ -138,6 +138,7 @@ mod tests {
 
     fn feat(start: usize, end: usize) -> Feature {
         Feature {
+            id: Default::default(),
             range: start..end,
             raw_kind: "misc_feature".into(),
             label: "f".into(),

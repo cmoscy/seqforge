@@ -2,7 +2,7 @@
 
 A Rust-based sequence viewer for molecular cloning workflows, with an embedded terminal and a unified command layer — every operation is invokable from both the GUI menu and the terminal.
 
-> **Status:** v0.1 read-only viewer shipped (file browser, embedded terminal, restriction-site detection, search); editor (v0.2) is next. See [ROADMAP.md](ROADMAP.md) for status across all tracks.
+> **Status:** v0.1 read-only viewer shipped (file browser, embedded terminal, restriction-site detection, search); editor (v0.2) is in progress — insert/delete/replace, undo, and save are working. See [ROADMAP.md](ROADMAP.md) for status across all tracks.
 
 ---
 
@@ -21,7 +21,7 @@ cargo build --release
 
 ### Making `seqforge` available system-wide (optional)
 
-By default the CLI is scoped to the SeqForge embedded terminal. To use it from any terminal window, install it via the GUI or a single flag:
+To also use `seqforge` from any terminal window (not just the embedded one), install it via the GUI or a single flag:
 
 **From the GUI:** `Tools → Install 'seqforge' CLI to PATH`
 
@@ -44,17 +44,10 @@ The viewer shows the dual-strand sequence with ATGC colouring, a position ruler,
 
 ### Terminal (embedded)
 
-The bottom pane is a real shell. Prefix a line with `:` to send a viewer command directly — it is intercepted before reaching the shell:
-
-```
-:open path/to/plasmid.gb      open a file in the viewer
-:goto 1234                    place cursor at position 1234
-:find ATGCNNNNGCAT            search (IUPAC; Phase 7)
-:enzymes EcoRI BamHI          show cut sites (also: unique, type IIs, golden gate, moclo)
-:close                        close the current document
-```
-
-Plain shell commands work normally — `:` is the only magic prefix.
+The bottom pane is an ordinary shell — no special prefix or syntax. It only
+differs from any other terminal in that `SEQFORGE_SOCKET` is already exported,
+so `seqforge` commands typed there route to the live window automatically (see
+[CLI](#cli-standalone-or-from-any-terminal) below).
 
 ### CLI (standalone or from any terminal)
 
@@ -73,14 +66,32 @@ seqforge open path/to/plasmid.gb
 seqforge goto 500
 seqforge close
 seqforge find ATGC
-seqforge enzymes EcoRI BamHI
-seqforge enzymes golden gate          # preset: BsaI, BsmBI, BbsI, SapI
+seqforge enzymes "EcoRI BamHI"        # quote multi-enzyme queries — it's one argument
+seqforge enzymes "golden gate"        # preset: BsaI, BsmBI, BbsI, SapI
+seqforge enzymes --op add SpeI        # union into the active set (also: --op remove)
 ```
 
-Enzyme queries accept individual names, comma/space lists, or named presets
-(`unique`, `unique+dual`, `non-cutters`, `type IIs`, `golden gate`, `moclo`,
-`all`, `none`). The same grammar is shared by the GUI enzyme bar (`⌘E`), the
-terminal `:enzymes`, and the CLI.
+The query is a **single argument**, so any value with a space — an enzyme list
+or a two-word preset — must be quoted (`"golden gate"`, `"EcoRI BamHI, SpeI"`).
+Within that argument, names may be separated by spaces or commas. Accepted
+presets: `unique`, `unique+dual`, `non-cutters`, `type IIs`, `golden gate`,
+`moclo`, `all`, `none`. The same grammar is shared by the GUI Restriction Sites
+panel (`⌘E`, where no shell quoting applies) and the CLI.
+
+**Editor commands** (require a running window; positions are 0-based):
+
+```bash
+seqforge insert 100 ATGC              # insert bases at a position
+seqforge delete 100 110               # delete the range [start, end)
+seqforge replace 100 110 GGGG         # replace a range
+seqforge reverse-complement 100 110   # revcomp a range in place
+seqforge cut 100 110                  # cut / copy / paste operate on the clipboard
+seqforge undo                         # also: redo
+seqforge save                         # also: save-as <path>
+```
+
+Feature editing (`add-feature`, `remove-feature`, `rename-feature`) is wired
+the same way. Run `seqforge --help` for the full, generated command list.
 
 When the GUI is running, it sets `SEQFORGE_SOCKET` in the embedded terminal's environment. Any `seqforge` viewer command executed there — or in any shell that has `SEQFORGE_SOCKET` set — routes to the live viewer. If the variable is absent, viewer commands exit with a clear error.
 
@@ -108,23 +119,21 @@ cargo build          # build everything (app + CLI)
 
 ### Testing workflow
 
-The embedded terminal requires both the app and CLI binaries to be present in the same `target/` directory. Build both once, then use `cargo run` for fast iteration:
+The embedded terminal finds the `seqforge` CLI as a sibling of the app binary in `target/`, so both must be built. Build once with `cargo build`, then iterate with `cargo run` — the CLI binary persists between runs:
 
 ```bash
 cargo build                        # first time: builds app + CLI
 cargo run -p seqforge-app          # subsequent runs: rebuilds only what changed
 ```
 
-The CLI binary (`target/debug/seqforge`) persists between `cargo run` invocations, so the embedded terminal continues to find it as a sibling of the app binary.
-
 The workspace has five crates:
 
 | Crate | Role |
 |-------|------|
-| `seqforge-core` | `Document`, `ViewerState`, `ViewerCommand`, `dispatch_*` — no GUI deps |
+| `seqforge-core` | data model (`Buffer`, `Annotations`, `View`), the typed command surface (`ViewerRequest`, `FileCommand`), and `dispatch`/`dispatch_file` — no GUI deps |
 | `seqforge-bio` | GenBank/FASTA loading, DNA utilities, sequence/cut-site search; wraps `gb-io`, `bio`, and `seqforge-restriction` |
 | `seqforge-restriction` | REBASE-derived restriction enzyme database + scanner + presets (Type IIs, Golden Gate, MoClo). Unpublished; see [plans/restriction.md](plans/restriction.md) |
 | `seqforge-app` | `eframe` + `egui_dock` + `egui_term` GUI shell |
 | `seqforge-cli` | Standalone `seqforge` binary |
 
-All user-visible actions go through `dispatch_viewer` or `dispatch_file` in `seqforge-core`. Menu clicks, terminal `:commands`, and CLI invocations all parse to the same `ViewerCommand`/`FileCommand` enum and call the same dispatch function.
+All user-visible actions go through `dispatch` or `dispatch_file` in `seqforge-core`. Menu clicks and CLI/socket invocations all parse to the same `ViewerRequest`/`FileCommand` enum and call the same dispatch path.
