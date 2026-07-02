@@ -35,6 +35,8 @@ pub struct Theme {
     pub strand: StrandColors,
     #[serde(default)]
     pub minimap: MinimapColors,
+    #[serde(default)]
+    pub translation: TranslationColors,
 }
 
 impl Default for Theme {
@@ -190,6 +192,29 @@ impl Default for StrandColors {
             forward: HexColor(Color32::from_rgba_unmultiplied(255, 190, 0, 110)),
             reverse: HexColor(Color32::from_rgba_unmultiplied(0, 190, 255, 110)),
             unknown: HexColor(Color32::from_rgba_unmultiplied(200, 200, 200, 90)),
+        }
+    }
+}
+
+/// Colours for the in-canvas translation band (frame lanes + feature CDS
+/// lanes) and the ORF emphasis painted over the frame lanes (Phase 14e).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TranslationColors {
+    /// Stop codons (`*`) in a frame/CDS lane.
+    pub stop: HexColor,
+    /// Start codons (`M`) in a frame/CDS lane.
+    pub start: HexColor,
+    /// Faint wash behind an ORF's Met→stop run when "Show ORFs" is on.
+    pub orf_wash: HexColor,
+}
+
+impl Default for TranslationColors {
+    fn default() -> Self {
+        Self {
+            stop: HexColor(Color32::from_rgb(210, 70, 70)),
+            start: HexColor(Color32::from_rgb(70, 175, 90)),
+            orf_wash: HexColor(Color32::from_rgba_unmultiplied(90, 175, 110, 26)),
         }
     }
 }

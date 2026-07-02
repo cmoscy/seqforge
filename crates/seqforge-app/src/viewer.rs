@@ -1931,9 +1931,9 @@ impl SequenceView {
                 // ── Translation band (frame + CDS amino-acid lanes) ───────
                 if let Some(tc) = &trans_cache {
                     let aa_normal = text_color.gamma_multiply(0.72);
-                    let aa_stop = Color32::from_rgb(210, 70, 70);
-                    let aa_start = Color32::from_rgb(70, 175, 90);
-                    let orf_wash = Color32::from_rgba_unmultiplied(90, 175, 110, 26);
+                    let aa_stop = cfg.theme.translation.stop.0;
+                    let aa_start = cfg.theme.translation.start.0;
+                    let orf_wash = cfg.theme.translation.orf_wash.0;
                     let show_orfs = self.translation.show_orfs;
                     for (lane_i, lane) in tc
                         .frame_lanes
