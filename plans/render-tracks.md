@@ -1,6 +1,6 @@
 # SeqForge Render-Track Plan — sequence-viewer rendering abstraction
 
-> **Status: design of record; migration not started.** Canonical cross-track
+> **Status: design of record; T0–T2 landed, T3 next.** Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). This plan owns the design +
 > phase checkboxes for turning `viewer.rs`'s monolithic render into a block-aware
 > **Track** abstraction. It changes **rendering/interaction only** — the domain
@@ -84,10 +84,23 @@ Each phase independently shippable; `build`/`test`/`clippy`/`fmt` green before t
   in priority order (feature → search → cut → codon → seqpos). `Hit::Feature` still carries
   the within-frame positional index (→ `FeatureId` at click time; a later phase may carry
   the id directly). Behaviour identical; test `find_hit_resolves_by_variant_then_order`.
-- [ ] **T2 — `Track` trait + `TrackStack`.** Split `viewer.rs` → `viewer/` submodules.
-  Migrate position-owned tracks: Ruler, CutSites (labels + staples), Translation (frame
-  lanes; reuse `build_translation_cache` + the codon-aligned painter). Sequence +
-  Features stay legacy.
+- [x] **T2 — `Track` trait + `TrackStack`.** *(Done.)* Split `viewer.rs` (~2940 lines)
+  into `viewer/{mod,track,translation}.rs` + `viewer/tracks/{ruler,cut_sites,translation,
+  sequence,features}.rs`. `track.rs` holds the `Track` trait (`block_height` / `paint` /
+  `hit_rects`), `BlockCtx` (per-block read-only inputs), `BlockGeom` (per-track y0 + strand
+  offsets so connector tracks reach the sequence rows), `Style` (shared sizing/fonts/colours),
+  and `TrackStack` — one virtualized block loop that sums each track's `block_height` into
+  its `y0`, then dispatches paint (z-order defers CutSites so its hover staple lands on top
+  of the strands) / `hit_rects`. Position tracks Ruler, CutSites (labels + staples),
+  Translation (whole band, reusing `build_translation_cache` + the codon painter) are
+  migrated; Sequence (strands + decorations) and Features (bars) are legacy-core `Track`
+  impls delegating to the extracted paint. Interaction (`find_hit` resolver, click/drag/
+  context menu) stays in `show()`, unchanged. New tests: co-location invariant
+  (`features_hit_rect_equals_painted_bar_rect` — hit rect == `annot_bar_rect` paint uses)
+  and `stack_block_height_equals_build_block_layouts` (Σ track heights + gap == layout
+  height). Behaviour identical; 85 app tests + clippy + fmt green.
+  *Deviation from the sketch:* the Translation track keeps the **whole** band
+  (frame + feature lanes) in T2; T3 moves `feature_lanes` out to the Features track.
 - [ ] **T3 — Features track (composite) + C2.** Greedy-stack bars (reuse `greedy_stack`)
   and paint a per-CDS AA sub-row directly under each bar (variable row heights owned in
   the track). Remove `feature_lanes` from the band; frames stay in Translation. Reuse
