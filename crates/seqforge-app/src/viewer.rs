@@ -776,6 +776,72 @@ struct OrfPromote {
     strand: Strand,
 }
 
+/// Unified hit-test payload for one interactive rect in the sequence canvas
+/// (T1 of the render-track refactor — see `plans/render-tracks.md`). Replaces
+/// the former five parallel per-element hit vectors: one `Vec<(Rect, Hit)>`,
+/// resolved by variant in priority order via [`find_hit`].
+#[derive(Debug, Clone)]
+enum Hit {
+    /// Annotation bar — within-frame positional feature index (resolved to a
+    /// `FeatureId` at click time via `render_ann.by_position`; a later phase can
+    /// carry the `FeatureId` directly).
+    Feature(usize),
+    /// Search-hit highlight — index into `view.search_hits`.
+    Search(usize),
+    /// Cut-site label — index into `view.cut_sites`.
+    CutSite(usize),
+    /// ORF run in a frame lane (right-click → Annotate as CDS).
+    Orf(OrfPromote),
+    /// Translation codon cell — the codon's forward nt range.
+    Codon(std::ops::Range<usize>),
+}
+
+impl Hit {
+    fn as_feature(&self) -> Option<usize> {
+        if let Hit::Feature(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+    fn as_search(&self) -> Option<usize> {
+        if let Hit::Search(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+    fn as_cut_site(&self) -> Option<usize> {
+        if let Hit::CutSite(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+    fn as_orf(&self) -> Option<OrfPromote> {
+        if let Hit::Orf(o) = self {
+            Some(*o)
+        } else {
+            None
+        }
+    }
+    fn as_codon(&self) -> Option<std::ops::Range<usize>> {
+        if let Hit::Codon(c) = self {
+            Some(c.clone())
+        } else {
+            None
+        }
+    }
+}
+
+/// First hit whose rect contains `pos` and matches `extract`, in collection
+/// order. Callers query by variant in priority order (feature → search → cut →
+/// codon → seqpos), preserving the pre-unification resolution semantics.
+fn find_hit<T>(hits: &[(Rect, Hit)], pos: Pos2, extract: impl Fn(&Hit) -> Option<T>) -> Option<T> {
+    hits.iter()
+        .find_map(|(r, h)| if r.contains(pos) { extract(h) } else { None })
+}
+
 /// Memoized translation lanes for the whole buffer, rebuilt only when the
 /// sequence version or the display toggles change.
 #[derive(Debug, Clone)]
@@ -1284,19 +1350,11 @@ impl SequenceView {
             let seq_x0 = rect.min.x + left_margin;
 
             // ── Pass 1: collect click-rects for all interactive elements ──
-
-            let mut annot_hits: Vec<(Rect, usize)> = Vec::new();
-            let mut search_hit_rects: Vec<(Rect, usize)> = Vec::new();
-            // `Vec<(label_rect, site_idx)>` — label is the click + hover
-            // target. The full staple only paints when this rect is
-            // hovered (or the site is the persistent click selection).
-            let mut cut_site_rects: Vec<(Rect, usize)> = Vec::new();
-            // ORF runs in the frame lanes — click targets for "Annotate as CDS".
-            let mut orf_hits: Vec<(Rect, OrfPromote)> = Vec::new();
-            // Codon cells in every translation lane — clicking a residue selects
-            // its 3 nucleotides. One rect per cell segment visible in this block;
-            // the payload is the codon's forward nt range.
-            let mut aa_hits: Vec<(Rect, std::ops::Range<usize>)> = Vec::new();
+            // One unified vec of `(Rect, Hit)` (T1); resolved by variant in
+            // priority order via `find_hit`. Cut-site labels double as the hover
+            // target (full staple reveals on hover); ORF runs are the
+            // "Annotate as CDS" targets; codon cells select their 3 nucleotides.
+            let mut hits: Vec<(Rect, Hit)> = Vec::new();
             for block_idx in 0..n_blocks {
                 let block_y = rect.min.y + block_offsets[block_idx];
                 let block_h = block_layouts[block_idx].height;
@@ -1329,7 +1387,7 @@ impl SequenceView {
                         char_width,
                         annot_row_h,
                     ) {
-                        annot_hits.push((r, feat_idx));
+                        hits.push((r, Hit::Feature(feat_idx)));
                     }
                 }
                 // ORF-run click targets in the translation band (one rect per
@@ -1344,16 +1402,16 @@ impl SequenceView {
                             if vis_s < vis_e {
                                 let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                                 let sw = (vis_e - vis_s) as f32 * char_width;
-                                orf_hits.push((
+                                hits.push((
                                     Rect::from_min_size(
                                         Pos2::new(sx, lane_y),
                                         Vec2::new(sw, aa_row_h),
                                     ),
-                                    OrfPromote {
+                                    Hit::Orf(OrfPromote {
                                         start: rs,
                                         end: re,
                                         strand: lane.strand,
-                                    },
+                                    }),
                                 ));
                             }
                         }
@@ -1375,12 +1433,12 @@ impl SequenceView {
                             if ncs < nce {
                                 let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
                                 let cw = (nce - ncs) as f32 * char_width;
-                                aa_hits.push((
+                                hits.push((
                                     Rect::from_min_size(
                                         Pos2::new(cx, lane_y),
                                         Vec2::new(cw, aa_row_h),
                                     ),
-                                    g.pos.saturating_sub(1)..(g.pos + 2).min(seq_len),
+                                    Hit::Codon(g.pos.saturating_sub(1)..(g.pos + 2).min(seq_len)),
                                 ));
                             }
                         }
@@ -1393,12 +1451,12 @@ impl SequenceView {
                         if vis_s < vis_e && vis_e > block_start {
                             let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                             let sw = (vis_e - vis_s) as f32 * char_width;
-                            search_hit_rects.push((
+                            hits.push((
                                 Rect::from_min_size(
                                     Pos2::new(sx, top_y),
                                     Vec2::new(sw, strand_h * 2.0),
                                 ),
-                                hit_idx,
+                                Hit::Search(hit_idx),
                             ));
                         }
                     }
@@ -1411,12 +1469,12 @@ impl SequenceView {
                     let site = &cut_sites[site_idx];
                     let cx = seq_x0 + (site.cut_pos - block_start) as f32 * char_width;
                     let label_w = site.enzyme.len() as f32 * label_char_w + 8.0;
-                    cut_site_rects.push((
+                    hits.push((
                         Rect::from_center_size(
                             Pos2::new(cx, block_y + (row as f32 + 0.5) * cut_label_row_h),
                             Vec2::new(label_w, cut_label_row_h),
                         ),
-                        site_idx,
+                        Hit::CutSite(site_idx),
                     ));
                 }
             }
@@ -1458,10 +1516,7 @@ impl SequenceView {
                         // two nt indices in `Selection` can't say which codon the
                         // anchor belongs to once extended, so `translation_anchor`
                         // remembers the origin codon (set on the residue click).
-                        let over_codon = aa_hits
-                            .iter()
-                            .find(|(r, _)| r.contains(pos))
-                            .map(|(_, c)| c.clone());
+                        let over_codon = find_hit(&hits, pos, Hit::as_codon);
                         let new_sel = match (over_codon, self.translation_anchor.clone()) {
                             (Some(codon), Some(ac)) => Some(codon_extend(&ac, &codon)),
                             // Residue click but no codon anchor yet: snap the focus
@@ -1496,9 +1551,7 @@ impl SequenceView {
                         // Any fresh (non-extending) click clears the codon anchor;
                         // a residue click re-sets it in that branch below.
                         self.translation_anchor = None;
-                        if let Some(&(_, feat_idx)) =
-                            annot_hits.iter().find(|(r, _)| r.contains(pos))
-                        {
+                        if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
                                 .by_position(feat_idx)
                                 .expect("feat_idx from this frame's layout");
@@ -1507,15 +1560,11 @@ impl SequenceView {
                                 Some(Selection::range(feat.range.start, feat.range.end)),
                             );
                             push_feat(cmds, Some(feat.id));
-                        } else if let Some(&(_, hit_idx)) =
-                            search_hit_rects.iter().find(|(r, _)| r.contains(pos))
-                        {
+                        } else if let Some(hit_idx) = find_hit(&hits, pos, Hit::as_search) {
                             let hit = &view.search_hits[hit_idx];
                             push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
                             push_feat(cmds, None);
-                        } else if let Some(&(_, site_idx)) =
-                            cut_site_rects.iter().find(|(r, _)| r.contains(pos))
-                        {
+                        } else if let Some(site_idx) = find_hit(&hits, pos, Hit::as_cut_site) {
                             let site = &cut_sites[site_idx];
                             push_sel(
                                 cmds,
@@ -1525,9 +1574,7 @@ impl SequenceView {
                                 )),
                             );
                             push_feat(cmds, None);
-                        } else if let Some((_, codon)) =
-                            aa_hits.iter().find(|(r, _)| r.contains(pos))
-                        {
+                        } else if let Some(codon) = find_hit(&hits, pos, Hit::as_codon) {
                             // Click a residue → select its codon and anchor to it.
                             self.translation_anchor = Some(codon.clone());
                             push_sel(cmds, Some(Selection::range(codon.start, codon.end)));
@@ -1546,10 +1593,8 @@ impl SequenceView {
             // ── Double-click a feature → Edit dialog ──────────────────────
             if response.double_clicked() {
                 if let Some(p) = ptr {
-                    if let Some(fc) = annot_hits
-                        .iter()
-                        .find(|(r, _)| r.contains(p))
-                        .and_then(|&(_, fi)| render_ann.by_position(fi))
+                    if let Some(fc) = find_hit(&hits, p, Hit::as_feature)
+                        .and_then(|fi| render_ann.by_position(fi))
                         .map(|f| FeatureContext {
                             id: f.id,
                             start: f.range.start,
@@ -1571,10 +1616,8 @@ impl SequenceView {
             // secondary click; the menu below reads this stable snapshot.
             if response.secondary_clicked() {
                 self.context_feature = ptr.and_then(|p| {
-                    annot_hits
-                        .iter()
-                        .find(|(r, _)| r.contains(p))
-                        .and_then(|&(_, fi)| render_ann.by_position(fi))
+                    find_hit(&hits, p, Hit::as_feature)
+                        .and_then(|fi| render_ann.by_position(fi))
                         .map(|f| FeatureContext {
                             id: f.id,
                             start: f.range.start,
@@ -1596,12 +1639,7 @@ impl SequenceView {
                 self.context_orf = if self.context_feature.is_some() {
                     None
                 } else {
-                    ptr.and_then(|p| {
-                        orf_hits
-                            .iter()
-                            .find(|(r, _)| r.contains(p))
-                            .map(|(_, o)| *o)
-                    })
+                    ptr.and_then(|p| find_hit(&hits, p, Hit::as_orf))
                 };
             }
             let ctx_feat = self.context_feature.clone();
@@ -1699,11 +1737,9 @@ impl SequenceView {
             });
 
             if response.drag_started() {
-                let on_annot = ptr.is_some_and(|p| annot_hits.iter().any(|(r, _)| r.contains(p)));
-                let on_hit =
-                    ptr.is_some_and(|p| search_hit_rects.iter().any(|(r, _)| r.contains(p)));
-                let on_site =
-                    ptr.is_some_and(|p| cut_site_rects.iter().any(|(r, _)| r.contains(p)));
+                let on_annot = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_feature).is_some());
+                let on_hit = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_search).is_some());
+                let on_site = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_cut_site).is_some());
                 if !on_annot && !on_hit && !on_site {
                     // drag_start is view-local (not document state) so it
                     // stays on `self`.
@@ -2128,12 +2164,9 @@ impl SequenceView {
                 // sites keep their tick + label.
                 // `interact_pointer_pos` only fires during click/drag;
                 // `hover_pos` covers idle mouse-over which is what we want.
-                let hovered_site_idx = response.hover_pos().and_then(|p| {
-                    cut_site_rects
-                        .iter()
-                        .find(|(r, _)| r.contains(p))
-                        .map(|(_, idx)| *idx)
-                });
+                let hovered_site_idx = response
+                    .hover_pos()
+                    .and_then(|p| find_hit(&hits, p, Hit::as_cut_site));
                 if let Some(idx) = hovered_site_idx {
                     let site = &view.cut_sites[idx];
                     let top_cut = site.cut_pos;
@@ -2409,9 +2442,10 @@ fn paint_feature_label(
 #[cfg(test)]
 mod tests {
     use super::{
-        AaKind, TranslationDisplay, build_translation_cache, codon_extend, frame_glyphs,
-        iupac_filter,
+        AaKind, Hit, TranslationDisplay, build_translation_cache, codon_extend, find_hit,
+        frame_glyphs, iupac_filter,
     };
+    use egui::{Pos2, Rect, Vec2};
     use seqforge_core::Strand;
 
     #[test]
@@ -2481,6 +2515,30 @@ mod tests {
                 .map(|g| g.ch)
                 .collect::<String>(),
             "MK*"
+        );
+    }
+
+    #[test]
+    fn find_hit_resolves_by_variant_then_order() {
+        // Two overlapping rects at the same point: a Feature and a CutSite.
+        // `find_hit` filters by the requested variant, and returns the first in
+        // collection order — so callers get the intended type regardless of
+        // which rect happens to overlap.
+        let r = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(10.0, 10.0));
+        let p = Pos2::new(5.0, 5.0);
+        let hits = vec![
+            (r, Hit::CutSite(7)),
+            (r, Hit::Feature(3)),
+            (r, Hit::Codon(6..9)),
+        ];
+        assert_eq!(find_hit(&hits, p, Hit::as_feature), Some(3));
+        assert_eq!(find_hit(&hits, p, Hit::as_cut_site), Some(7));
+        assert_eq!(find_hit(&hits, p, Hit::as_codon), Some(6..9));
+        assert_eq!(find_hit(&hits, p, Hit::as_search), None);
+        // Outside every rect → no hit.
+        assert_eq!(
+            find_hit(&hits, Pos2::new(50.0, 50.0), Hit::as_feature),
+            None
         );
     }
 
