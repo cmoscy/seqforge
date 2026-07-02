@@ -47,9 +47,10 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 |---|---|---|---|
 | **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 | (complete — no retroactive tag, see Tagging policy) |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
-| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–14 done incl. 14e (feature Edit dialog + in-viewer translation/ORF view, decision 13); GUI walk pending | Phase 15 — dirty/save UX |
+| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
+| **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | 📋 not started | T1 — geometry + `Hit` unification |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 📋 not started | Phase 0.1 — `seqforge-thermo` + `seqforge tm` |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 📋 not started (build on render tracks) | Phase 0.1 — `seqforge-thermo` + `seqforge tm` |
 
 ---
 
@@ -109,6 +110,13 @@ can advance any time. Primers Phase 0–1 are **pre-editor** (read-side, no
 mutation) and independent; Primer Phase 2 (creation/design) waits on the editor's
 mutation rails; Primer Phase 3 converges with Restriction Tier 3 into a single
 cloning layer.
+
+**Render tracks precede primers' *view* work.** The [render-track refactor](plans/render-tracks.md)
+(rendering/interaction only — no domain change) lands **before** primers/thermo so
+the primer + Tm/GC display surfaces are built native to the `Track` trait instead of
+threaded through the current `viewer.rs` monolith. It also folds in the deferred
+editor 14e "CDS-under-feature" item and the per-frame layout perf fix. It does **not**
+block restriction, `seqforge tm`, or any non-view primer/thermo core work.
 
 ---
 

@@ -339,3 +339,30 @@ Key rules:
 - For caches whose computation cost exceeds the per-paint budget,
   consider moving to a background task and storing the result back
   via `AppCommand::TaskResult`.
+
+## Render layer: block-aware Track abstraction
+
+The sequence viewer renders through a **Track** abstraction (design +
+migration in [`../plans/render-tracks.md`](../plans/render-tracks.md)). It is a
+**rendering/interaction concern only** — it does not touch the domain model. The
+model stays **sequence/position-centric**: `Buffer` owns bytes, features are
+position-ranged annotations addressed by `FeatureId`, and translation / cut-sites /
+ORFs are derived-on-demand and never stored (see "Derived sequence data" above and
+editor decisions 8/12/13).
+
+Key rules:
+- A track owns its own **block height + paint + hit-test from one geometry**.
+  Painting and hit-testing must not re-derive geometry independently — that
+  divergence is the bug class the abstraction exists to remove. Assert the
+  co-location invariant (painted rect == hit rect) in tests.
+- Tracks are **mostly position-owned** (ruler, strands, global frame translation,
+  cut sites). Exactly one — **Features** — is composite/feature-owned: it draws each
+  bar plus that feature's CDS translation sub-lane. Global reading-frame translation
+  stays position-owned (a band hugging the sequence); it is *not* attached to a
+  feature.
+- Selection, cursor, search-hit wash, and the staged preview diff are **decorations
+  owned by the Sequence track**, not standalone stacked tracks.
+- Hit results use one `Hit` enum resolved in one place; do not reintroduce parallel
+  per-element hit vectors.
+- Derived per-track data (translation lanes, layout) follows the Cache pattern above
+  (version-keyed); block layout is memoized, not recomputed per frame for all blocks.
