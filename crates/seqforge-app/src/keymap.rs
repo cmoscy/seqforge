@@ -67,6 +67,29 @@ pub const KEYMAP: &[Binding] = &[
         when_context: &[KeyContext::WORKSPACE],
         command: || AppCommand::CloseDoc,
     },
+    // Save / Save-As / Quit are workspace-scoped so they fire regardless of
+    // which pane holds focus (Phase 15). is_enabled greys Save when the buffer
+    // is clean.
+    Binding {
+        chord: (Modifiers::COMMAND, Key::S),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || {
+            AppCommand::Viewer(seqforge_core::ViewerRequest::Save {
+                force: false,
+                view: None,
+            })
+        },
+    },
+    Binding {
+        chord: (Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::OpenSaveAs { view: None },
+    },
+    Binding {
+        chord: (Modifiers::COMMAND, Key::Q),
+        when_context: &[KeyContext::WORKSPACE],
+        command: || AppCommand::Quit,
+    },
     Binding {
         chord: (Modifiers::COMMAND, Key::F),
         when_context: &[KeyContext::WORKSPACE],

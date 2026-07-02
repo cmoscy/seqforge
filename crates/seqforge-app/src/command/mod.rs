@@ -32,7 +32,7 @@ use crate::event::AppEvent;
 use crate::focus::FocusScope;
 
 mod edit;
-mod file;
+pub(crate) mod file;
 mod layout;
 mod nav;
 
@@ -61,6 +61,19 @@ pub enum AppCommand {
     /// Close the active view. ⌘W. Routes through `CloseTab` for the
     /// active view id.
     CloseDoc,
+    /// Quit the app (`File → Quit`, ⌘Q). Sets `quit_requested`; the update loop
+    /// routes it through the same dirty-buffer intercept as an OS window close,
+    /// so unsaved work raises the confirm modal instead of exiting silently.
+    Quit,
+    /// Open the confirm modal for `File → Revert to Saved`.
+    OpenRevertConfirm {
+        view: Option<ViewId>,
+    },
+    /// Reload the target view's buffer from disk (`File → Revert`), discarding
+    /// in-memory edits + annotations + undo history. GUI-only (needs `bio.load`).
+    RevertBuffer {
+        view: Option<ViewId>,
+    },
 
     // ── Tabs ─────────────────────────────────────────────────────────
     SwitchTab {
@@ -232,7 +245,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | CloseDoc
         | SplitPane { .. } => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
-        SwitchTab { .. } | CloseTab { .. } => true,
+        SwitchTab { .. } | CloseTab { .. } | Quit => true,
+        // Revert only makes sense for a file-backed buffer.
+        RevertBuffer { .. } | OpenRevertConfirm { .. } => active_has_source_path(state),
         // Editor write-ops carry their own enablement so menus / keymap grey
         // correctly (Phase 12f). Read-scoped variants and the position-explicit
         // ops just need an open view.
@@ -355,6 +370,15 @@ fn active_dirty(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn active_has_source_path(state: &AppState) -> bool {
+    state
+        .workspace
+        .active_view()
+        .and_then(|v| state.workspace.buffers.get(v.buffer_id))
+        .and_then(|arc| arc.read().ok().map(|b| b.source_path.is_some()))
+        .unwrap_or(false)
+}
+
 pub(super) fn emit_selection_diff(state: &AppState, before: Option<Selection>) {
     let after = active_selection(state);
     if after != before {
@@ -451,6 +475,9 @@ pub fn apply<B: BioOps>(
         OpenFile(path) => file::apply_open_file(state, bio, path),
         ClearRecent => file::apply_clear_recent(state),
         CloseDoc => file::apply_close_doc(state),
+        Quit => file::apply_quit(state),
+        OpenRevertConfirm { view } => file::apply_open_revert_confirm(state, view),
+        RevertBuffer { view } => file::apply_revert(state, bio, view),
 
         // ── Tabs ────────────────────────────────────────────────────
         SwitchTab { view } => layout::apply_switch_tab(state, view),
@@ -645,7 +672,7 @@ pub fn apply<B: BioOps>(
                 end,
                 view,
             } => edit::apply_update_feature(state, view, id, kind, label, strand, start, end),
-            ViewerRequest::Save { view } => edit::apply_save(state, view),
+            ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.
                 file::apply_save_document(state, view, path)

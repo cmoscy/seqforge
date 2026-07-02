@@ -376,16 +376,14 @@ fn handle_keyboard(
     let cmd = Modifiers::COMMAND;
     let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
     let mut direct: Option<AppCommand> = None;
+    // Save / Save-As (⌘S / ⇧⌘S) are handled app-level in the KEYMAP so they
+    // fire regardless of which pane holds focus (Phase 15 B3).
     if ui.input_mut(|i| i.consume_key(cmd, Key::Z)) {
         direct = Some(AppCommand::Viewer(ViewerRequest::Undo { view: Some(vid) }));
     } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::Z))
         || ui.input_mut(|i| i.consume_key(cmd, Key::Y))
     {
         direct = Some(AppCommand::Viewer(ViewerRequest::Redo { view: Some(vid) }));
-    } else if ui.input_mut(|i| i.consume_key(cmd, Key::S)) {
-        direct = Some(AppCommand::Viewer(ViewerRequest::Save { view: Some(vid) }));
-    } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::S)) {
-        direct = Some(AppCommand::OpenSaveAs { view: Some(vid) });
     }
     if let Some(c) = direct {
         *pending = None;

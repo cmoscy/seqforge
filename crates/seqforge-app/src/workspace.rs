@@ -33,6 +33,19 @@ use seqforge_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Hash the raw bytes of a file on disk, for the external-change guard.
+/// Returns `None` if the file can't be read (treated as "no baseline" —
+/// the guard then can't fire). `DefaultHasher` is fine: the value only ever
+/// lives in memory and is compared within a single session, so cross-version
+/// hash stability is irrelevant.
+pub(crate) fn hash_file_bytes(path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 /// User-facing label for a buffer: the source file's basename when the
 /// buffer is backed by a file, otherwise the sequence name from the
 /// record (e.g. for socket-injected or in-memory buffers). Single
@@ -127,12 +140,14 @@ impl BufferStore {
             return Ok(existing);
         }
         let doc = bio.load(path)?;
-        let buffer = Buffer::new(
+        let mut buffer = Buffer::new(
             doc.name.clone(),
             doc.source_path.clone(),
             doc.sequence,
             doc.topology,
         );
+        // Snapshot the on-disk bytes for the external-change guard (§Phase 15).
+        buffer.loaded_hash = hash_file_bytes(path);
         let annotations = Annotations::new(doc.features);
 
         let id = self.alloc_id();
@@ -140,6 +155,29 @@ impl BufferStore {
         self.annotations.insert(id, annotations);
         self.by_path.insert(path.to_path_buf(), id);
         Ok(id)
+    }
+
+    /// Reload a buffer's contents from disk in place (File → Revert). Keeps the
+    /// same `BufferId` + `Arc` so open views stay valid; replaces text +
+    /// annotations, clears undo history, and re-baselines `dirty` + `loaded_hash`.
+    pub fn reload(&mut self, id: BufferId, path: &Path, bio: &dyn BioOps) -> Result<(), String> {
+        let doc = bio.load(path)?;
+        let arc = self.buffers.get(&id).ok_or("buffer not found")?;
+        {
+            let mut buf = arc
+                .write()
+                .map_err(|_| "buffer lock poisoned".to_string())?;
+            buf.name = doc.name.clone();
+            buf.text = doc.sequence;
+            buf.topology = doc.topology;
+            buf.source_path = doc.source_path.clone();
+            buf.dirty = false;
+            buf.version += 1;
+            buf.loaded_hash = hash_file_bytes(path);
+        }
+        self.annotations.insert(id, Annotations::new(doc.features));
+        self.histories.remove(&id);
+        Ok(())
     }
 
     /// Create a buffer from raw inputs — used by tests.
@@ -234,6 +272,23 @@ impl Workspace {
     /// Mutable view-by-id accessor.
     pub fn view_mut(&mut self, view_id: ViewId) -> Option<&mut View> {
         self.views.get_mut(&view_id)
+    }
+
+    /// Reload `view_id`'s buffer from disk (File → Revert), discarding
+    /// in-memory edits, annotations, and undo history.
+    pub fn revert_from_disk(
+        &mut self,
+        view_id: ViewId,
+        path: &Path,
+        bio: &dyn BioOps,
+    ) -> Result<(), DispatchError> {
+        let bid = self
+            .view(view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        self.buffers
+            .reload(bid, path, bio)
+            .map_err(DispatchError::BioError)
     }
 
     /// Resolve the active view's buffer handle.

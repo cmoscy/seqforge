@@ -467,6 +467,7 @@ pub(super) fn apply_submit_rename_feature(
 pub(super) fn apply_save(
     state: &mut AppState,
     view: Option<ViewId>,
+    force: bool,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
     let path = state
@@ -474,7 +475,7 @@ pub(super) fn apply_save(
         .with_buffer(vid, |_, buf, _| buf.source_path.clone())?;
     match path {
         Some(path) => {
-            super::file::save_buffer(state, vid, &path).map(|()| Some(ViewerResponse::Ok))
+            super::file::save_buffer(state, vid, &path, force).map(|()| Some(ViewerResponse::Ok))
         }
         None => {
             // No path yet — route to Save-As (GUI dialog). Headless callers get
@@ -865,7 +866,10 @@ mod tests {
 
         let mut s = state_with(b"ATGC");
         let undo = AppCommand::Viewer(ViewerRequest::Undo { view: None });
-        let save = AppCommand::Viewer(ViewerRequest::Save { view: None });
+        let save = AppCommand::Viewer(ViewerRequest::Save {
+            force: false,
+            view: None,
+        });
         let paste = AppCommand::Viewer(ViewerRequest::Paste { pos: 0, view: None });
         let cut = AppCommand::Viewer(ViewerRequest::Cut {
             start: 0,

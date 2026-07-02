@@ -108,6 +108,14 @@ pub(super) fn apply_close_view(
     state: &mut AppState,
     view_id: ViewId,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Data-loss guard: closing the *last* view onto a dirty buffer drops the
+    // buffer (and its edits). Prompt first. The modal's Discard path clears
+    // `dirty` before re-issuing CloseTab, so this doesn't loop.
+    if view_dirty_and_last_ref(state, view_id) {
+        push_dirty_close_confirm(state, view_id, false);
+        return Ok(None);
+    }
+
     let sel_before = active_selection(state);
 
     // Capture per-file state under the buffer's path so a later
@@ -165,11 +173,33 @@ pub(super) fn save_buffer(
     state: &mut AppState,
     vid: ViewId,
     path: &Path,
+    force: bool,
 ) -> Result<(), DispatchError> {
+    // External-change guard: if the file changed on disk since we loaded (or
+    // last saved) it, block the write unless `force`. The GUI gets a modal to
+    // resolve it; a returned SaveConflict feeds CLI/agent callers (its toast is
+    // suppressed in app.rs since the modal already explains it).
+    if !force {
+        let loaded = state
+            .workspace
+            .with_buffer(vid, |_, buf, _| buf.loaded_hash)?;
+        if let Some(loaded) = loaded {
+            if let Some(disk) = crate::workspace::hash_file_bytes(path) {
+                if disk != loaded {
+                    push_save_conflict(state, vid, path);
+                    return Err(DispatchError::SaveConflict(path.display().to_string()));
+                }
+            }
+        }
+    }
+
     let result = state.workspace.with_buffer_mut(vid, |_, buf, ann| {
         let r = seqforge_bio::save(buf, ann, path);
         if r.is_ok() {
             buf.dirty = false;
+            // Re-baseline the on-disk hash to what we just wrote, so a later
+            // save doesn't spuriously flag our own write as an external change.
+            buf.loaded_hash = crate::workspace::hash_file_bytes(path);
         }
         r
     })?;
@@ -185,6 +215,97 @@ pub(super) fn save_buffer(
     }
 }
 
+/// Push the Overwrite/Reload/Cancel conflict modal for a save blocked by the
+/// external-change guard.
+fn push_save_conflict(state: &mut AppState, view_id: ViewId, path: &Path) {
+    if let Some(tag) = state.overlays.push_unique(Overlay::SaveConflict {
+        view_id,
+        path: path.to_path_buf(),
+    }) {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+}
+
+/// Is `view_id`'s buffer dirty *and* is this the only view referencing it?
+/// (Closing a non-last view loses nothing — the buffer stays alive.)
+pub(super) fn view_dirty_and_last_ref(state: &AppState, view_id: ViewId) -> bool {
+    let Some(view) = state.workspace.view(view_id) else {
+        return false;
+    };
+    let bid = view.buffer_id;
+    let dirty = state
+        .workspace
+        .buffers
+        .get(bid)
+        .and_then(|arc| arc.read().ok().map(|b| b.dirty))
+        .unwrap_or(false);
+    if !dirty {
+        return false;
+    }
+    state
+        .workspace
+        .views
+        .values()
+        .filter(|v| v.buffer_id == bid)
+        .count()
+        == 1
+}
+
+/// Push the Save/Discard/Cancel modal for closing/quitting with unsaved work.
+pub(crate) fn push_dirty_close_confirm(state: &mut AppState, view_id: ViewId, quitting: bool) {
+    snapshot_focus_for_overlay(state);
+    if let Some(tag) = state
+        .overlays
+        .push_unique(Overlay::DirtyCloseConfirm { view_id, quitting })
+    {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+}
+
+/// Handle `AppCommand::Quit`: flag the request; the update loop routes it
+/// through the same dirty-buffer intercept as an OS window close.
+pub(super) fn apply_quit(state: &mut AppState) -> Result<Option<ViewerResponse>, DispatchError> {
+    state.quit_requested = true;
+    Ok(None)
+}
+
+/// Handle `AppCommand::OpenRevertConfirm`: raise the revert confirm modal.
+pub(super) fn apply_open_revert_confirm(
+    state: &mut AppState,
+    view: Option<ViewId>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = edit::resolve_target(state, view)?;
+    snapshot_focus_for_overlay(state);
+    if let Some(tag) = state
+        .overlays
+        .push_unique(Overlay::ConfirmRevert { view_id: vid })
+    {
+        state.events.emit(AppEvent::OverlayPushed(tag));
+    }
+    Ok(None)
+}
+
+/// Handle `AppCommand::RevertBuffer`: reload the target buffer from disk,
+/// discarding in-memory text, annotations, and undo history.
+pub(super) fn apply_revert(
+    state: &mut AppState,
+    bio: &dyn BioOps,
+    view: Option<ViewId>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = edit::resolve_target(state, view)?;
+    let path = state
+        .workspace
+        .with_buffer(vid, |_, buf, _| buf.source_path.clone())?
+        .ok_or_else(|| {
+            DispatchError::InvalidInput("buffer has no source file to revert to".into())
+        })?;
+    state.workspace.revert_from_disk(vid, &path, bio)?;
+    state
+        .toasts
+        .success(format!("Reverted to {}", path.display()));
+    Ok(Some(ViewerResponse::Ok))
+}
+
 /// Handle `AppCommand::SaveDocument`: resolve the view and save to `path`.
 pub(super) fn apply_save_document(
     state: &mut AppState,
@@ -192,7 +313,9 @@ pub(super) fn apply_save_document(
     path: PathBuf,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = edit::resolve_target(state, view)?;
-    save_buffer(state, vid, &path)?;
+    // Save-As targets a user-chosen path — the guard is about the *original*
+    // source; writing to a new/confirmed path is always intended, so force.
+    save_buffer(state, vid, &path, true)?;
     Ok(Some(ViewerResponse::Ok))
 }
 
@@ -243,4 +366,126 @@ pub(super) fn apply_install_cli(
         state.events.emit(AppEvent::OverlayPushed(tag));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod phase15_tests {
+    use super::*;
+    use seqforge_core::{CutSite, Document, SearchHit};
+
+    /// Minimal `BioOps` that loads real files via `seqforge_bio` and no-ops the
+    /// scan methods (unused by the save/close/revert paths under test).
+    struct TestBio;
+    impl BioOps for TestBio {
+        fn load(&self, path: &Path) -> Result<Document, String> {
+            seqforge_bio::load(path).map_err(|e| e.to_string())
+        }
+        fn find_matches(&self, _: &[u8], _: &[u8], _: u8, _: bool) -> Vec<SearchHit> {
+            vec![]
+        }
+        fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<CutSite> {
+            vec![]
+        }
+        fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
+            vec![]
+        }
+    }
+
+    fn temp_fasta(seq: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("seqforge_ph15_{nanos}.fasta"));
+        std::fs::write(&p, format!(">test\n{seq}\n")).unwrap();
+        p
+    }
+
+    /// Open `path` into a fresh headless state, returning the active view id.
+    fn open(path: &Path) -> (AppState, ViewId) {
+        let mut state = AppState::default();
+        let vid = state.workspace.open_path(path, &TestBio).unwrap();
+        state.workspace.focus_view(vid);
+        (state, vid)
+    }
+
+    #[test]
+    fn dirty_close_pushes_confirm_instead_of_closing() {
+        let path = temp_fasta("ACGTACGT");
+        let (mut state, vid) = open(&path);
+        state
+            .workspace
+            .with_buffer_mut(vid, |_, buf, _| buf.dirty = true)
+            .unwrap();
+
+        apply_close_view(&mut state, vid).unwrap();
+
+        assert_eq!(state.overlays.dirty_close_confirm(), Some((vid, false)));
+        assert!(
+            state.workspace.view(vid).is_some(),
+            "the view must not close while the confirm modal is up"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn external_change_guard_blocks_then_forces() {
+        let path = temp_fasta("ACGTACGT");
+        let (mut state, vid) = open(&path);
+
+        // Someone edits the file on disk behind our back.
+        std::fs::write(&path, ">test\nTTTTTTTT\n").unwrap();
+
+        let blocked = save_buffer(&mut state, vid, &path, false);
+        assert!(
+            matches!(blocked, Err(DispatchError::SaveConflict(_))),
+            "an external change must block a non-forced save, got {blocked:?}"
+        );
+        assert!(state.overlays.save_conflict().is_some());
+
+        let forced = save_buffer(&mut state, vid, &path, true);
+        assert!(forced.is_ok(), "--force must overwrite, got {forced:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn revert_resets_text_dirty_and_history() {
+        let path = temp_fasta("ACGTACGT");
+        let (mut state, vid) = open(&path);
+        let bid = state.workspace.view(vid).unwrap().buffer_id;
+        let original = state
+            .workspace
+            .with_buffer(vid, |_, buf, _| buf.text.clone())
+            .unwrap();
+
+        // Dirty the buffer + fabricate undo history.
+        state
+            .workspace
+            .with_buffer_mut(vid, |_, buf, _| {
+                buf.text = b"XXXX".to_vec();
+                buf.dirty = true;
+            })
+            .unwrap();
+        state.workspace.buffers.history_mut(bid).record(
+            0,
+            Vec::new(),
+            b"XXXX".to_vec(),
+            &Default::default(),
+            seqforge_core::EditKind::Other,
+        );
+
+        apply_revert(&mut state, &TestBio, Some(vid)).unwrap();
+
+        let (text, dirty) = state
+            .workspace
+            .with_buffer(vid, |_, buf, _| (buf.text.clone(), buf.dirty))
+            .unwrap();
+        assert_eq!(text, original, "revert restores the on-disk sequence");
+        assert!(!dirty, "revert clears the dirty flag");
+        assert!(
+            state.workspace.buffers.history(bid).is_none(),
+            "revert clears undo history"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }

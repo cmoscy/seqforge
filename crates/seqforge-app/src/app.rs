@@ -3,7 +3,8 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use seqforge_core::{
-    BioOps, CutSite, Document, FeatureKind, SearchHit, ViewId, ViewerRequest, ViewerResponse,
+    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, ViewId, ViewerRequest,
+    ViewerResponse,
 };
 
 use std::sync::Arc;
@@ -131,6 +132,15 @@ pub struct AppState {
     /// pick. Discriminates the save-mode dialog from an open-mode one in the
     /// shared file-dialog pick handler. Cleared on pick or cancel.
     pub(crate) pending_save_as: Option<ViewId>,
+    /// Set by `AppCommand::Quit`; the update loop reads it and routes an app
+    /// quit through the same dirty-buffer intercept as an OS window close.
+    pub(crate) quit_requested: bool,
+    /// Last window title sent via `ViewportCommand::Title`, so the dirty-`*`
+    /// title is refreshed only when it actually changes (not every frame).
+    pub(crate) last_title: Option<String>,
+    /// Set once a dirty-quit has been confirmed/cleared, so the OS close is
+    /// allowed to proceed on the next `close_requested` without re-prompting.
+    pub(crate) allow_close: bool,
 }
 
 impl Default for AppState {
@@ -163,6 +173,9 @@ impl Default for AppState {
             config: Arc::new(Config::default()),
             clipboard: None,
             pending_save_as: None,
+            quit_requested: false,
+            last_title: None,
+            allow_close: false,
         }
     }
 }
@@ -588,12 +601,285 @@ impl SeqForgeApp {
                 enqueue(&mut self.state, AppCommand::DismissOverlay);
             }
         }
+
+        // ── Dirty-close / dirty-quit confirm ──
+        if let Some((view_id, quitting)) = self.state.overlays.dirty_close_confirm() {
+            let name = self.buffer_display_name(view_id);
+            let mut choice: Option<DirtyChoice> = None;
+            let mut open = true;
+            let title = if quitting { "Quit" } else { "Close" };
+            egui::Window::new(format!("Unsaved changes — {title}"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!("\"{name}\" has unsaved changes."));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            choice = Some(DirtyChoice::Save);
+                        }
+                        if ui.button("Discard").clicked() {
+                            choice = Some(DirtyChoice::Discard);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            choice = Some(DirtyChoice::Cancel);
+                        }
+                    });
+                });
+            if !open {
+                choice = choice.or(Some(DirtyChoice::Cancel));
+            }
+            if let Some(choice) = choice {
+                self.resolve_dirty_close(view_id, quitting, choice);
+            }
+        }
+
+        // ── Save conflict (external change) ──
+        if let Some((view_id, path)) = self.state.overlays.save_conflict() {
+            let mut choice: Option<ConflictChoice> = None;
+            let mut open = true;
+            egui::Window::new("File changed on disk")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "\"{}\" changed on disk since it was opened.",
+                        path.display()
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Overwrite").clicked() {
+                            choice = Some(ConflictChoice::Overwrite);
+                        }
+                        if ui.button("Reload").clicked() {
+                            choice = Some(ConflictChoice::Reload);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            choice = Some(ConflictChoice::Cancel);
+                        }
+                    });
+                });
+            if !open {
+                choice = choice.or(Some(ConflictChoice::Cancel));
+            }
+            if let Some(choice) = choice {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+                match choice {
+                    ConflictChoice::Overwrite => enqueue(
+                        &mut self.state,
+                        AppCommand::Viewer(ViewerRequest::Save {
+                            force: true,
+                            view: Some(view_id),
+                        }),
+                    ),
+                    ConflictChoice::Reload => enqueue(
+                        &mut self.state,
+                        AppCommand::RevertBuffer {
+                            view: Some(view_id),
+                        },
+                    ),
+                    ConflictChoice::Cancel => {}
+                }
+            }
+        }
+
+        // ── Confirm Revert ──
+        if let Some(view_id) = self.state.overlays.confirm_revert() {
+            let name = self.buffer_display_name(view_id);
+            let mut do_revert = false;
+            let mut cancel = false;
+            let mut open = true;
+            egui::Window::new("Revert to Saved")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Discard all in-memory changes to \"{name}\" and reload from disk?"
+                    ));
+                    ui.label(
+                        egui::RichText::new("This clears the undo history and cannot be undone.")
+                            .weak(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Revert").clicked() {
+                            do_revert = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if !open {
+                cancel = true;
+            }
+            if do_revert {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+                enqueue(
+                    &mut self.state,
+                    AppCommand::RevertBuffer {
+                        view: Some(view_id),
+                    },
+                );
+            } else if cancel {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+            }
+        }
     }
+
+    /// Resolve the dirty-close/quit modal. `Save` writes then re-issues the
+    /// close/quit *only* for a path-backed buffer (a pathless Save opens the
+    /// async Save-As dialog, so we don't auto-close underneath it). `Discard`
+    /// clears the dirty flag so the re-issued close doesn't re-prompt.
+    fn resolve_dirty_close(&mut self, view_id: ViewId, quitting: bool, choice: DirtyChoice) {
+        enqueue(&mut self.state, AppCommand::DismissOverlay);
+        match choice {
+            DirtyChoice::Cancel => {}
+            DirtyChoice::Save => {
+                let has_path = self
+                    .state
+                    .workspace
+                    .view(view_id)
+                    .and_then(|v| self.state.workspace.buffers.get(v.buffer_id))
+                    .and_then(|arc| arc.read().ok().map(|b| b.source_path.is_some()))
+                    .unwrap_or(false);
+                enqueue(
+                    &mut self.state,
+                    AppCommand::Viewer(ViewerRequest::Save {
+                        force: false,
+                        view: Some(view_id),
+                    }),
+                );
+                if has_path {
+                    self.enqueue_close_or_quit(view_id, quitting);
+                }
+            }
+            DirtyChoice::Discard => {
+                if let Some(v) = self.state.workspace.view(view_id) {
+                    if let Some(arc) = self.state.workspace.buffers.get(v.buffer_id) {
+                        if let Ok(mut b) = arc.write() {
+                            b.dirty = false;
+                        }
+                    }
+                }
+                self.enqueue_close_or_quit(view_id, quitting);
+            }
+        }
+    }
+
+    fn enqueue_close_or_quit(&mut self, view_id: ViewId, quitting: bool) {
+        if quitting {
+            self.state.quit_requested = true;
+        } else {
+            enqueue(&mut self.state, AppCommand::CloseTab { view: view_id });
+        }
+    }
+
+    /// Display name for a buffer behind a view (for modal copy).
+    fn buffer_display_name(&self, view_id: ViewId) -> String {
+        self.state
+            .workspace
+            .view(view_id)
+            .and_then(|v| self.state.workspace.buffers.get(v.buffer_id))
+            .and_then(|arc| arc.read().ok().map(|b| crate::workspace::display_name(&b)))
+            .unwrap_or_else(|| "Untitled".to_string())
+    }
+}
+
+/// User choice from the dirty-close/quit confirm modal.
+#[derive(Clone, Copy)]
+enum DirtyChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// User choice from the external-change conflict modal.
+#[derive(Clone, Copy)]
+enum ConflictChoice {
+    Overwrite,
+    Reload,
+    Cancel,
 }
 
 /// Convenience: push a command with no response channel.
 fn enqueue(state: &mut AppState, cmd: AppCommand) {
     state.pending_commands.push((cmd, None));
+}
+
+impl SeqForgeApp {
+    /// Refresh the window title, prefixing `*` when the active buffer is dirty.
+    /// Sends `ViewportCommand::Title` only when the title actually changes.
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
+        let title = match self.state.workspace.active_view() {
+            Some(v) => self
+                .state
+                .workspace
+                .buffers
+                .get(v.buffer_id)
+                .and_then(|arc| {
+                    let b = arc.read().ok()?;
+                    let name = crate::workspace::display_name(&b);
+                    let star = if b.dirty { "*" } else { "" };
+                    Some(format!("{star}{name} — SeqForge"))
+                })
+                .unwrap_or_else(|| "SeqForge".to_string()),
+            None => "SeqForge".to_string(),
+        };
+        if self.state.last_title.as_deref() != Some(title.as_str()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.state.last_title = Some(title);
+        }
+    }
+
+    /// Route an OS window-close or `AppCommand::Quit` through the dirty guard:
+    /// with unsaved buffers, cancel the close and raise the confirm modal;
+    /// otherwise let it proceed.
+    fn handle_quit_intercept(&mut self, ctx: &egui::Context) {
+        let os_close = ctx.input(|i| i.viewport().close_requested());
+        let want_quit = os_close || std::mem::take(&mut self.state.quit_requested);
+        if !want_quit {
+            return;
+        }
+        // A prior confirm already cleared us to exit — let the close proceed.
+        if self.state.allow_close {
+            if !os_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
+        if let Some(view_id) = self.first_dirty_view() {
+            if os_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            command::file::push_dirty_close_confirm(&mut self.state, view_id, true);
+        } else if os_close {
+            // Nothing dirty — allow the OS close to proceed.
+        } else {
+            self.state.allow_close = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The first view whose buffer is dirty (any pane), if any.
+    fn first_dirty_view(&self) -> Option<ViewId> {
+        self.state.workspace.views.iter().find_map(|(id, v)| {
+            let dirty = self
+                .state
+                .workspace
+                .buffers
+                .get(v.buffer_id)
+                .and_then(|arc| arc.read().ok().map(|b| b.dirty))
+                .unwrap_or(false);
+            dirty.then_some(*id)
+        })
+    }
 }
 
 impl eframe::App for SeqForgeApp {
@@ -615,6 +901,10 @@ impl eframe::App for SeqForgeApp {
         if let Some(rx) = &self.state.event_rx {
             self.state.event_log.drain_from(rx);
         }
+
+        // ── Dirty title bar + quit/close intercept ────────────────────────────
+        self.sync_window_title(ctx);
+        self.handle_quit_intercept(ctx);
 
         // ── Rebuild key context ───────────────────────────────────────────────
         // Workspace base + generic pane tag + ViewKind-specific tag
@@ -707,7 +997,10 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    let save_req = ViewerRequest::Save { view: None };
+                    let save_req = ViewerRequest::Save {
+                        force: false,
+                        view: None,
+                    };
                     let can_save =
                         command::is_enabled(&AppCommand::Viewer(save_req.clone()), &self.state);
                     if ui
@@ -724,6 +1017,16 @@ impl eframe::App for SeqForgeApp {
                         .clicked()
                     {
                         menu_cmds.push(AppCommand::OpenSaveAs { view: None });
+                        ui.close_menu();
+                    }
+                    // ── Revert (reload from disk) ──
+                    let revert = AppCommand::OpenRevertConfirm { view: None };
+                    let can_revert = command::is_enabled(&revert, &self.state);
+                    if ui
+                        .add_enabled(can_revert, egui::Button::new("Revert to Saved"))
+                        .clicked()
+                    {
+                        menu_cmds.push(revert);
                         ui.close_menu();
                     }
                     if !recent_snapshot.is_empty() {
@@ -745,6 +1048,11 @@ impl eframe::App for SeqForgeApp {
                                 ui.close_menu();
                             }
                         });
+                    }
+                    ui.separator();
+                    if ui.button("Quit  ⌘Q").clicked() {
+                        menu_cmds.push(AppCommand::Quit);
+                        ui.close_menu();
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -1217,7 +1525,12 @@ impl eframe::App for SeqForgeApp {
             let result = command::apply(cmd, &mut self.state, &AppBio);
             if let Err(e) = &result {
                 eprintln!("[apply error] {e}");
-                self.state.toasts.error(e.to_string());
+                // A SaveConflict already raised the Overwrite/Reload/Cancel modal
+                // (and the socket client sees the structured error); don't also
+                // toast it in the GUI.
+                if !matches!(e, DispatchError::SaveConflict(_)) {
+                    self.state.toasts.error(e.to_string());
+                }
             }
             if let Some(tx) = resp_tx {
                 // Socket-facing oneshot expects a concrete ViewerResponse.

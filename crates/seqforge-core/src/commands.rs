@@ -97,6 +97,11 @@ pub enum DispatchError {
     /// (sequence-position bounds) and `BioError` (a bio op that ran but failed).
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// A `Save` was blocked because the file changed on disk since it was
+    /// loaded/last saved (external-change guard). CLI/agent callers can retry
+    /// with `--force`; the GUI raises an Overwrite/Reload/Cancel modal.
+    #[error("file changed on disk since load: {0} (re-run with --force to overwrite)")]
+    SaveConflict(String),
 }
 
 // ── Typed request/response schema ─────────────────────────────────────────────
@@ -310,6 +315,11 @@ pub enum ViewerRequest {
     },
     /// Save the active buffer to its source path.
     Save {
+        /// Overwrite even if the file changed on disk since it was loaded
+        /// (skips the external-change guard). For non-interactive callers.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
@@ -893,7 +903,13 @@ mod tests {
     fn viewer_request_serde_round_trip_undo_save() {
         for (req, tag) in [
             (ViewerRequest::Undo { view: None }, "undo"),
-            (ViewerRequest::Save { view: None }, "save"),
+            (
+                ViewerRequest::Save {
+                    force: false,
+                    view: None,
+                },
+                "save",
+            ),
         ] {
             let json = serde_json::to_string(&req).unwrap();
             assert_eq!(json, format!(r#"{{"method":"{tag}"}}"#));

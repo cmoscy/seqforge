@@ -91,6 +91,13 @@ pub struct Buffer {
     /// it is not persisted.
     #[serde(skip)]
     pub dirty: bool,
+    /// Hash of the on-disk file bytes as last seen by SeqForge (at load, and
+    /// re-set after each successful save). Powers the external-change guard:
+    /// on save, the file is re-read and re-hashed; a mismatch means the file
+    /// changed on disk underneath us. In-memory only (no format involvement),
+    /// so it is never serialized and only ever compared within one session.
+    #[serde(skip)]
+    pub loaded_hash: Option<u64>,
 }
 
 impl Buffer {
@@ -112,6 +119,7 @@ impl Buffer {
             topology,
             version: 0,
             dirty: false,
+            loaded_hash: None,
         }
     }
 

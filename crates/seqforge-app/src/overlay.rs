@@ -29,9 +29,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use std::path::PathBuf;
+
 use egui::Key;
 use egui_file_dialog::FileDialog;
-use seqforge_core::{CutSite, FeatureId, Strand};
+use seqforge_core::{CutSite, FeatureId, Strand, ViewId};
 
 use crate::command::AppCommand;
 
@@ -280,6 +282,23 @@ pub enum Overlay {
     FeatureForm(FeatureForm),
     RenameFeature(RenameFeatureForm),
     Translation(TranslationView),
+    /// Confirm modal shown when closing a tab or quitting the app with an
+    /// unsaved buffer. `quitting` distinguishes "close this tab" from "quit
+    /// the whole app" so the resolution re-issues the right follow-up.
+    DirtyCloseConfirm {
+        view_id: ViewId,
+        quitting: bool,
+    },
+    /// Conflict modal shown when a `Save` is blocked because the file changed
+    /// on disk since load (external-change guard). Offers Overwrite/Reload/Cancel.
+    SaveConflict {
+        view_id: ViewId,
+        path: PathBuf,
+    },
+    /// Confirm modal for `File → Revert to Saved` (discards in-memory edits).
+    ConfirmRevert {
+        view_id: ViewId,
+    },
 }
 
 impl Overlay {
@@ -291,6 +310,9 @@ impl Overlay {
     pub const TAG_FEATURE_FORM: &'static str = "FeatureForm";
     pub const TAG_RENAME_FEATURE: &'static str = "RenameFeature";
     pub const TAG_TRANSLATION: &'static str = "Translation";
+    pub const TAG_DIRTY_CLOSE: &'static str = "DirtyCloseConfirm";
+    pub const TAG_SAVE_CONFLICT: &'static str = "SaveConflict";
+    pub const TAG_CONFIRM_REVERT: &'static str = "ConfirmRevert";
     /// Generic "any overlay" marker — pushed onto the KeyContext stack
     /// whenever [`OverlayStack`] is non-empty. The keymap's Escape
     /// binding matches on this so one binding dismisses every kind.
@@ -306,6 +328,9 @@ impl Overlay {
             Overlay::FeatureForm(_) => Self::TAG_FEATURE_FORM,
             Overlay::RenameFeature(_) => Self::TAG_RENAME_FEATURE,
             Overlay::Translation(_) => Self::TAG_TRANSLATION,
+            Overlay::DirtyCloseConfirm { .. } => Self::TAG_DIRTY_CLOSE,
+            Overlay::SaveConflict { .. } => Self::TAG_SAVE_CONFLICT,
+            Overlay::ConfirmRevert { .. } => Self::TAG_CONFIRM_REVERT,
         }
     }
 }
@@ -427,6 +452,30 @@ impl OverlayStack {
     pub fn translation_mut(&mut self) -> Option<&mut TranslationView> {
         self.overlays.iter_mut().find_map(|o| match o {
             Overlay::Translation(t) => Some(t),
+            _ => None,
+        })
+    }
+
+    /// `(view_id, quitting)` for an open dirty-close confirm modal, if any.
+    pub fn dirty_close_confirm(&self) -> Option<(ViewId, bool)> {
+        self.overlays.iter().find_map(|o| match o {
+            Overlay::DirtyCloseConfirm { view_id, quitting } => Some((*view_id, *quitting)),
+            _ => None,
+        })
+    }
+
+    /// `(view_id, path)` for an open save-conflict modal, if any.
+    pub fn save_conflict(&self) -> Option<(ViewId, PathBuf)> {
+        self.overlays.iter().find_map(|o| match o {
+            Overlay::SaveConflict { view_id, path } => Some((*view_id, path.clone())),
+            _ => None,
+        })
+    }
+
+    /// `view_id` for an open revert-confirm modal, if any.
+    pub fn confirm_revert(&self) -> Option<ViewId> {
+        self.overlays.iter().find_map(|o| match o {
+            Overlay::ConfirmRevert { view_id } => Some(*view_id),
             _ => None,
         })
     }
