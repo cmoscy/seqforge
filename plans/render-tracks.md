@@ -1,6 +1,6 @@
 # SeqForge Render-Track Plan — sequence-viewer rendering abstraction
 
-> **Status: design of record; T0–T2 landed, T3 next.** Canonical cross-track
+> **Status: design of record; T0–T3 landed, T4 next.** Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). This plan owns the design +
 > phase checkboxes for turning `viewer.rs`'s monolithic render into a block-aware
 > **Track** abstraction. It changes **rendering/interaction only** — the domain
@@ -101,10 +101,18 @@ Each phase independently shippable; `build`/`test`/`clippy`/`fmt` green before t
   height). Behaviour identical; 85 app tests + clippy + fmt green.
   *Deviation from the sketch:* the Translation track keeps the **whole** band
   (frame + feature lanes) in T2; T3 moves `feature_lanes` out to the Features track.
-- [ ] **T3 — Features track (composite) + C2.** Greedy-stack bars (reuse `greedy_stack`)
-  and paint a per-CDS AA sub-row directly under each bar (variable row heights owned in
-  the track). Remove `feature_lanes` from the band; frames stay in Translation. Reuse
-  `cds_glyphs`. **Lands the deferred editor 14e C2.**
+- [x] **T3 — Features track (composite) + C2.** *(Done.)* The Features track is now
+  composite/feature-owned: greedy-stacked bars (via `build_block_layouts`) each with the
+  feature's own CDS translation painted directly under its bar. `TranslationCache` swaps
+  the packed `feature_lanes` band for per-feature `feature_glyphs` (`FeatureAa { id, glyphs }`,
+  reusing `cds_glyphs`); `feature_lanes` are gone from the band — the Translation track now
+  paints global frame lanes only (`frame_band_rows`). Feature stack rows have **variable
+  height**: `build_block_layouts` grows a row by one AA row when it holds a translated
+  feature (`feat_row_offsets` / `feat_band_h`, keyed on the memoized cache). Shared
+  `paint_aa_lane` / `aa_codon_hits` helpers keep the codon outline + residue glyph + codon
+  hit-rect identical between the two tracks (co-location preserved). Codon selection under a
+  feature moves with its sub-row. Behaviour otherwise identical; 82 app tests + clippy + fmt
+  green. **Lands editor 14e C2.**
 - [ ] **T4 — Sequence track + decorations + retire monolith + perf.** Strands (reuse
   `build_strand_galley`) + selection/cursor/search-wash/preview-diff as Sequence-track
   paint; delete the dual passes + monolithic `build_block_layouts`; **memoize/virtualize

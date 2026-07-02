@@ -1,20 +1,27 @@
-//! Features track — the annotation bars below the strands (+ their labels).
+//! Features track — the annotation bars below the strands, each with its own
+//! **CDS translation sub-row** directly beneath it (T3 / editor 14e C2).
 //!
-//! **Legacy core** in T2: it paints one flat greedy-stacked bar row band using
-//! the per-block `layout.feat_rows`. T3 turns this into the composite,
-//! feature-owned track (bar + per-CDS AA sub-row, variable row heights) and
-//! lands the deferred editor 14e C2.
+//! This is the one **composite / feature-owned** track: a translated feature's
+//! protein rides under its bar (proximity to source; the SnapGene/Benchling
+//! idiom that disambiguates feature-dense plasmids), rather than pooling into
+//! the global-frame band. Row heights are variable — a stack row with a
+//! translated feature is taller by one AA row (`layout.feat_row_offsets`, sized
+//! in `build_block_layouts`). Global frame translation stays position-owned in
+//! the Translation track; `cds_glyphs` is reused unchanged.
 
 use egui::{Color32, Painter, Rect, Stroke};
 use seqforge_core::FeatureKind;
 
-use crate::viewer::track::{BlockCtx, BlockGeom, Hit, Track, annot_bar_rect, paint_feature_label};
+use crate::viewer::track::{
+    BlockCtx, BlockGeom, Hit, Track, aa_codon_hits, annot_bar_rect, paint_aa_lane,
+    paint_feature_label,
+};
 
 pub(crate) struct FeaturesTrack;
 
 impl Track for FeaturesTrack {
     fn block_height(&self, ctx: &BlockCtx) -> f32 {
-        ctx.layout.n_feat_rows as f32 * ctx.style.annot_row_h
+        ctx.layout.feat_band_h
     }
 
     fn hit_rects(&self, ctx: &BlockCtx, geom: &BlockGeom, hits: &mut Vec<(Rect, Hit)>) {
@@ -24,7 +31,7 @@ impl Track for FeaturesTrack {
                 .render_ann
                 .by_position(feat_idx)
                 .expect("feat_idx from this frame's layout");
-            let bar_row_y = geom.y0 + row as f32 * style.annot_row_h;
+            let bar_row_y = geom.y0 + ctx.layout.feat_row_offsets[row];
             if let Some(r) = annot_bar_rect(
                 feat,
                 ctx.block_start,
@@ -36,6 +43,22 @@ impl Track for FeaturesTrack {
             ) {
                 hits.push((r, Hit::Feature(feat_idx)));
             }
+            // Codon click targets for this feature's CDS sub-row (if any).
+            if let Some(glyphs) = ctx
+                .trans_cache
+                .and_then(|tc| tc.feature_glyphs_for(feat.id))
+            {
+                aa_codon_hits(
+                    style,
+                    ctx.block_start,
+                    ctx.block_end,
+                    ctx.seq_len,
+                    geom.seq_x0,
+                    bar_row_y + style.annot_row_h,
+                    glyphs,
+                    hits,
+                );
+            }
         }
     }
 
@@ -46,7 +69,27 @@ impl Track for FeaturesTrack {
                 .render_ann
                 .by_position(feat_idx)
                 .expect("feat_idx from this frame's layout");
-            let bar_row_y = geom.y0 + row as f32 * style.annot_row_h;
+            let bar_row_y = geom.y0 + ctx.layout.feat_row_offsets[row];
+
+            // ── CDS translation sub-row, directly under this feature's bar ──
+            // Painted before the bar so a wrapped feature's residues never sit
+            // over an adjacent bar in the same row; clamped to the block.
+            if let Some(glyphs) = ctx
+                .trans_cache
+                .and_then(|tc| tc.feature_glyphs_for(feat.id))
+            {
+                paint_aa_lane(
+                    painter,
+                    style,
+                    ctx.block_start,
+                    ctx.block_end,
+                    geom.seq_x0,
+                    bar_row_y + style.annot_row_h,
+                    glyphs,
+                    ctx.show_orfs,
+                );
+            }
+
             let Some(bar) = annot_bar_rect(
                 feat,
                 ctx.block_start,

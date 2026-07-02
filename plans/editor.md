@@ -725,14 +725,13 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
   fixed RGB in `viewer.rs` into a `TranslationColors` theme struct
   (`#[serde(default)]`, `HexColor` fields), added as `Theme.translation`; read via
   `cfg.theme.translation.*`.
-- [→] **Feature-CDS lane attaches to its feature — folded into the render-track
-  refactor (phase T3).** Today all AA lanes (global frame + feature-CDS) pool into one
-  **band**; a feature-CDS lane should sit with **its own feature bar** (proximity-to-
-  source; SnapGene idiom; disambiguates feature-dense plasmids). Rather than bolt a
-  per-feature sub-row onto the current monolith, this lands as the **composite Features
-  track** in [`render-tracks.md`](render-tracks.md) T3, where one owner does
-  height+paint+hit — see that plan. Global frame translation stays a position-owned
-  track; `cds_glyphs` is reused unchanged.
+- [x] **Feature-CDS lane attaches to its feature — landed in render-track T3.**
+  A feature-CDS translation now sits under **its own feature bar** (proximity-to-source;
+  SnapGene idiom; disambiguates feature-dense plasmids), not pooled into the global band.
+  Implemented as the **composite Features track** in [`render-tracks.md`](render-tracks.md)
+  T3: one owner does height+paint+hit, feature stack rows grow to fit the CDS sub-row, and
+  `TranslationCache` stores per-feature `feature_glyphs` instead of packed band lanes.
+  Global frame translation stays a position-owned track; `cds_glyphs` reused unchanged.
 
 **Done when:** ✅ (code; 202 workspace tests + clippy + fmt green) Toggle any of the 6 frames and see AA lanes under the sequence; a CDS shows its protein in-canvas; ORFs highlight and one can be annotated; double-click a feature and change type + range + strand (undoable); `seqforge orfs`/`update-feature` work from the CLI. *Interactive GUI walk (band layout / menu / double-click / right-click promote) pending manual confirmation.*
 

@@ -9,9 +9,7 @@
 
 use std::collections::HashSet;
 
-use seqforge_core::{Annotations, Feature, FeatureId, FeatureKind, Selection, Strand};
-
-use super::track::greedy_stack;
+use seqforge_core::{Annotations, FeatureId, FeatureKind, Selection, Strand};
 
 /// Which in-canvas translation lanes are active.
 ///
@@ -101,29 +99,51 @@ pub(crate) struct OrfPromote {
     pub strand: Strand,
 }
 
-/// Memoized translation lanes for the whole buffer, rebuilt only when the
-/// sequence version or the display toggles change.
+/// A feature's own CDS translation — its amino-acid glyphs, painted by the
+/// composite Features track directly under that feature's bar (T3 / editor 14e
+/// C2). Unlike a global frame lane, this is *feature-owned*: it reads from the
+/// feature's start/strand, so it needs no packing into a shared band.
+#[derive(Debug, Clone)]
+pub(crate) struct FeatureAa {
+    pub id: FeatureId,
+    pub glyphs: Vec<AaGlyph>,
+}
+
+/// Memoized translation for the whole buffer, rebuilt only when the sequence
+/// version or the display toggles change.
+///
+/// The two kinds of translation live apart, matching where they're drawn: the
+/// **global frame lanes** are a position-owned band hugging the sequence (the
+/// Translation track), while each **feature CDS translation** rides under its
+/// own bar (the Features track).
 #[derive(Debug, Clone)]
 pub(crate) struct TranslationCache {
     pub version: u64,
     pub display: TranslationDisplay,
     /// Forward frame lanes then reverse frame lanes, in display order.
     pub frame_lanes: Vec<TransLane>,
-    /// Feature-anchored lanes (auto-CDS + toggled features), each read from
-    /// its own start/strand and packed so overlapping features never share a
-    /// lane (same greedy interval stacking as the annotation bars).
-    pub feature_lanes: Vec<TransLane>,
+    /// Per-feature CDS translations (auto-CDS + toggled features), keyed by id;
+    /// each read from its own start/strand. Drawn under the feature's bar.
+    pub feature_glyphs: Vec<FeatureAa>,
 }
 
 impl TranslationCache {
-    /// Total lane count (frame lanes + feature lanes) — the band's row count.
-    pub fn band_rows(&self) -> usize {
-        self.frame_lanes.len() + self.feature_lanes.len()
+    /// Number of global frame lanes — the position-owned band's row count.
+    pub fn frame_band_rows(&self) -> usize {
+        self.frame_lanes.len()
     }
 
-    /// Iterate every lane in paint order: frame lanes, then feature lanes.
-    pub fn lanes(&self) -> impl Iterator<Item = &TransLane> {
-        self.frame_lanes.iter().chain(self.feature_lanes.iter())
+    /// This feature's CDS amino-acid glyphs, if it is translated.
+    pub fn feature_glyphs_for(&self, id: FeatureId) -> Option<&[AaGlyph]> {
+        self.feature_glyphs
+            .iter()
+            .find(|fa| fa.id == id)
+            .map(|fa| fa.glyphs.as_slice())
+    }
+
+    /// Whether this feature has a (non-empty) CDS sub-row to reserve space for.
+    pub fn feature_has_aa(&self, id: FeatureId) -> bool {
+        self.feature_glyphs_for(id).is_some_and(|g| !g.is_empty())
     }
 }
 
@@ -259,49 +279,35 @@ pub(crate) fn build_translation_cache(
         });
     }
 
-    // Feature-anchored translation lanes: every feature the display wants
-    // (auto-CDS + individually toggled), each read from its own start/strand.
-    // Overlapping features are packed onto separate lanes via the same greedy
-    // interval stacking the annotation bars use, so their residues never
-    // collide in a shared row.
-    let wanted: Vec<&Feature> = annotations
+    // Per-feature CDS translations: every feature the display wants (auto-CDS +
+    // individually toggled), each read from its own start/strand. No packing —
+    // each rides under its own bar (the Features track owns that geometry).
+    let feature_glyphs: Vec<FeatureAa> = annotations
         .iter()
         .filter(|f| {
             let is_cds = matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds);
             display.wants_feature(f.id, is_cds)
         })
-        .collect();
-    let ranges: Vec<(usize, usize)> = wanted
-        .iter()
-        .map(|f| (f.range.start, f.range.end))
-        .collect();
-    let (rows, n_rows) = greedy_stack(&ranges);
-    let mut feature_lanes: Vec<TransLane> = (0..n_rows)
-        .map(|_| TransLane {
-            label: "aa".to_string(),
-            strand: Strand::Forward,
-            glyphs: Vec::new(),
-            orf_runs: Vec::new(),
+        .map(|f| {
+            let cs = f
+                .qualifiers
+                .get("codon_start")
+                .and_then(|v| v.as_deref())
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .filter(|n| (1..=3).contains(n))
+                .unwrap_or(1);
+            FeatureAa {
+                id: f.id,
+                glyphs: cds_glyphs(seq, f.range.clone(), f.strand, cs),
+            }
         })
         .collect();
-    for (i, f) in wanted.iter().enumerate() {
-        let cs = f
-            .qualifiers
-            .get("codon_start")
-            .and_then(|v| v.as_deref())
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|n| (1..=3).contains(n))
-            .unwrap_or(1);
-        feature_lanes[rows[i]]
-            .glyphs
-            .extend(cds_glyphs(seq, f.range.clone(), f.strand, cs));
-    }
 
     TranslationCache {
         version,
         display,
         frame_lanes,
-        feature_lanes,
+        feature_glyphs,
     }
 }
 
@@ -338,7 +344,7 @@ mod tests {
         d.frames[0] = true; // +1 only
         let cache = build_translation_cache(seq, &ann, 1, d);
         assert_eq!(cache.frame_lanes.len(), 1);
-        assert!(cache.feature_lanes.is_empty());
+        assert!(cache.feature_glyphs.is_empty());
     }
 
     #[test]
@@ -359,19 +365,19 @@ mod tests {
         let mut d = TranslationDisplay::default();
         assert!(
             build_translation_cache(seq, &ann, 1, d.clone())
-                .feature_lanes
+                .feature_glyphs
                 .is_empty()
         );
         d.features.insert(id);
         let cache = build_translation_cache(seq, &ann, 1, d);
         assert_eq!(
-            cache.feature_lanes.len(),
+            cache.feature_glyphs.len(),
             1,
             "toggled feature must translate"
         );
         // ATG AAA TAA anchored at the feature start → M K *.
         assert_eq!(
-            cache.feature_lanes[0]
+            cache.feature_glyphs[0]
                 .glyphs
                 .iter()
                 .map(|g| g.ch)
@@ -399,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_translated_features_get_separate_lanes() {
+    fn each_translated_feature_gets_its_own_glyphs() {
         use seqforge_core::{Feature, Strand};
         let seq = b"ATGAAATAAATGCCCTAA";
         let mut ann = seqforge_core::Annotations::new(vec![]);
@@ -413,17 +419,16 @@ mod tests {
             provenance: None,
         };
         // Two overlapping CDS features (0..12 and 6..18 share columns 6..12).
-        ann.add(mk(0..12));
-        ann.add(mk(6..18));
+        // No band packing now — each owns its glyphs, drawn under its own bar.
+        let id0 = ann.add(mk(0..12));
+        let id1 = ann.add(mk(6..18));
         let d = TranslationDisplay {
             show_cds: true,
             ..Default::default()
         };
         let cache = build_translation_cache(seq, &ann, 1, d);
-        assert_eq!(
-            cache.feature_lanes.len(),
-            2,
-            "overlapping features must be packed onto separate lanes"
-        );
+        assert_eq!(cache.feature_glyphs.len(), 2);
+        assert!(cache.feature_has_aa(id0));
+        assert!(cache.feature_has_aa(id1));
     }
 }

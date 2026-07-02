@@ -12,7 +12,7 @@
 //! This is **rendering/interaction only** — no domain-model change (decisions
 //! 8/12/13). Sequence + Features stay "legacy core" paint calls until T3/T4.
 
-use egui::{Color32, FontId, Painter, Pos2, Rect, Vec2};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 use seqforge_core::{
     Annotations, CutSite, Feature, FeatureId, FeatureKind, SearchHit, Selection, Strand,
 };
@@ -20,7 +20,7 @@ use seqforge_core::{
 use crate::command::AppCommand;
 use crate::config::{LabelOverflow, Theme};
 
-use super::translation::{OrfPromote, TranslationCache};
+use super::translation::{AaGlyph, AaKind, OrfPromote, TranslationCache};
 
 // ── Hit vocabulary ─────────────────────────────────────────────────────────────
 
@@ -139,12 +139,17 @@ pub(crate) fn greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize) {
 pub(crate) struct BlockLayout {
     /// `(feat_idx, row_in_block)` for features overlapping this block.
     pub feat_rows: Vec<(usize, usize)>,
+    /// Y offset (within the feature band) of each stack row's top. A row whose
+    /// features carry a CDS translation is taller (bar + AA sub-row), so row
+    /// offsets are a prefix sum of variable heights, not `row * annot_row_h`.
+    pub feat_row_offsets: Vec<f32>,
+    /// Total feature-band height (Σ row heights); the Features track's
+    /// `block_height`.
+    pub feat_band_h: f32,
     /// `(site_idx, row_in_block)` for cut sites whose `cut_pos` lies in
     /// `[block_start, block_end]`.
     pub cut_rows: Vec<(usize, usize)>,
     pub n_cut_rows: usize,
-    /// Number of feature stack rows in this block.
-    pub n_feat_rows: usize,
     /// Total height including ruler + both strands + gap.
     pub height: f32,
 }
@@ -163,9 +168,12 @@ pub(crate) fn build_block_layouts(
     cut_sites: &[CutSite],
     seq_len: usize,
     style: &Style,
-    // Height of the translation band (0 when no lanes shown). Sits between the
-    // bottom strand and the annotation bars in every block.
+    // Height of the global-frame translation band (0 when no frame lanes). Sits
+    // between the bottom strand and the annotation bars in every block.
     trans_band_h: f32,
+    // Memoized translation (`None` while staging / off): a feature with a CDS
+    // sub-row makes its bar's stack row taller by `aa_row_h`.
+    trans: Option<&TranslationCache>,
 ) -> (Vec<BlockLayout>, Vec<f32>) {
     let line_width = style.line_width;
     let n_blocks = seq_len.div_ceil(line_width).max(1);
@@ -189,8 +197,33 @@ pub(crate) fn build_block_layouts(
             }
         }
         let (feat_local_rows, n_feat_rows) = greedy_stack(&feat_ranges);
-        let feat_rows: Vec<(usize, usize)> =
-            feat_idx_list.into_iter().zip(feat_local_rows).collect();
+        let feat_rows: Vec<(usize, usize)> = feat_idx_list
+            .iter()
+            .copied()
+            .zip(feat_local_rows.iter().copied())
+            .collect();
+
+        // Variable feature-row heights: a row gains an AA sub-row iff one of its
+        // features carries a (non-empty) CDS translation (T3 / editor 14e C2).
+        let mut row_has_aa = vec![false; n_feat_rows];
+        if let Some(tc) = trans {
+            for (&idx, &row) in feat_idx_list.iter().zip(&feat_local_rows) {
+                let id = annotations
+                    .by_position(idx)
+                    .expect("feat idx from this scan")
+                    .id;
+                if tc.feature_has_aa(id) {
+                    row_has_aa[row] = true;
+                }
+            }
+        }
+        let mut feat_row_offsets = Vec::with_capacity(n_feat_rows);
+        let mut fy = 0.0f32;
+        for &has_aa in &row_has_aa {
+            feat_row_offsets.push(fy);
+            fy += style.annot_row_h + if has_aa { style.aa_row_h } else { 0.0 };
+        }
+        let feat_band_h = fy;
 
         // Cut sites whose top-strand cut sits in this block. Stacking
         // intervals use label half-width converted to base columns so
@@ -209,20 +242,20 @@ pub(crate) fn build_block_layouts(
         let cut_rows: Vec<(usize, usize)> = cut_idx_list.into_iter().zip(cut_local_rows).collect();
 
         let cut_label_h = n_cut_rows as f32 * style.cut_label_row_h;
-        let annot_section_h = n_feat_rows as f32 * style.annot_row_h;
         let height = cut_label_h
             + style.ruler_h
             + style.strand_h * 2.0
             + trans_band_h
-            + annot_section_h
+            + feat_band_h
             + style.block_gap;
 
         offsets.push(offsets.last().copied().unwrap_or(0.0) + height);
         layouts.push(BlockLayout {
             feat_rows,
+            feat_row_offsets,
+            feat_band_h,
             cut_rows,
             n_cut_rows,
-            n_feat_rows,
             height,
         });
     }
@@ -591,6 +624,97 @@ pub(crate) fn paint_feature_label(
     );
 }
 
+// ── Amino-acid lane rendering (shared by Translation + Features tracks) ─────────
+
+/// Paint one AA lane's codon outlines + centred residue glyphs at `lane_y`.
+/// Shared by the Translation track (global frame lanes) and the Features track
+/// (per-CDS sub-rows). ORF wash + lane labels are the caller's concern.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_aa_lane(
+    painter: &Painter,
+    style: &Style,
+    block_start: usize,
+    block_end: usize,
+    seq_x0: f32,
+    lane_y: f32,
+    glyphs: &[AaGlyph],
+    show_orfs: bool,
+) {
+    let text_color = style.text_color;
+    let aa_normal = text_color.gamma_multiply(0.72);
+    let char_width = style.char_width;
+    let aa_row_h = style.aa_row_h;
+    for g in glyphs {
+        if g.pos < block_start || g.pos >= block_end {
+            continue;
+        }
+        let color = if show_orfs {
+            match g.kind {
+                AaKind::Stop => style.aa_stop,
+                AaKind::Start => style.aa_start,
+                AaKind::Normal => aa_normal,
+            }
+        } else {
+            aa_normal
+        };
+        // Codon cell spanning the residue's 3 nucleotides (clamped to the block
+        // at a wrap). The faint outline groups the codon and marks the click
+        // target (hit-rect emitted by `aa_codon_hits`).
+        let ncs = g.pos.saturating_sub(1).max(block_start);
+        let nce = (g.pos + 2).min(block_end);
+        if ncs < nce {
+            let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
+            let cw = (nce - ncs) as f32 * char_width;
+            painter.rect_stroke(
+                Rect::from_min_size(Pos2::new(cx, lane_y), Vec2::new(cw, aa_row_h)),
+                2.0,
+                Stroke::new(1.0, text_color.gamma_multiply(0.16)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let x = seq_x0 + (g.pos - block_start) as f32 * char_width + char_width * 0.5;
+        painter.text(
+            Pos2::new(x, lane_y),
+            Align2::CENTER_TOP,
+            g.ch,
+            style.font_id.clone(),
+            color,
+        );
+    }
+}
+
+/// Emit `Hit::Codon` rects for an AA lane's residues at `lane_y` (same geometry
+/// `paint_aa_lane` outlines — the co-location invariant).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn aa_codon_hits(
+    style: &Style,
+    block_start: usize,
+    block_end: usize,
+    seq_len: usize,
+    seq_x0: f32,
+    lane_y: f32,
+    glyphs: &[AaGlyph],
+    hits: &mut Vec<(Rect, Hit)>,
+) {
+    let char_width = style.char_width;
+    let aa_row_h = style.aa_row_h;
+    for g in glyphs {
+        if g.pos < block_start || g.pos >= block_end {
+            continue;
+        }
+        let ncs = g.pos.saturating_sub(1).max(block_start);
+        let nce = (g.pos + 2).min(block_end);
+        if ncs < nce {
+            let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
+            let cw = (nce - ncs) as f32 * char_width;
+            hits.push((
+                Rect::from_min_size(Pos2::new(cx, lane_y), Vec2::new(cw, aa_row_h)),
+                Hit::Codon(g.pos.saturating_sub(1)..(g.pos + 2).min(seq_len)),
+            ));
+        }
+    }
+}
+
 // ── Feature context menu plumbing (shared by show + Features track) ─────────────
 
 /// Snapshot of a right-clicked feature, driving the annotation-bar context
@@ -744,9 +868,10 @@ mod tests {
         let ann = Annotations::new(vec![feat(2..8)]);
         let layout = BlockLayout {
             feat_rows: vec![(0, 0)],
+            feat_row_offsets: vec![0.0],
+            feat_band_h: 14.0,
             cut_rows: vec![],
             n_cut_rows: 0,
-            n_feat_rows: 1,
             height: 0.0,
         };
         let ctx = BlockCtx {
@@ -805,7 +930,7 @@ mod tests {
         let style = test_style();
         let theme = crate::config::Theme::default();
         let ann = Annotations::new(vec![feat(1..30), feat(2..5)]);
-        let (layouts, _off) = build_block_layouts(&ann, &[], 40, &style, 0.0);
+        let (layouts, _off) = build_block_layouts(&ann, &[], 40, &style, 0.0, None);
         let layout = &layouts[0];
         let ctx = BlockCtx {
             block_idx: 0,

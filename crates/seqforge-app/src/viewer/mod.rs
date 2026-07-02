@@ -730,8 +730,10 @@ impl SequenceView {
             trans_cache = None;
         }
         let aa_row_h = char_height;
-        let band_rows = trans_cache.as_ref().map_or(0, |c| c.band_rows());
-        let trans_band_h = band_rows as f32 * aa_row_h;
+        // Only the global frame lanes form the position-owned band; per-feature
+        // CDS translations ride under their own bar (Features track, T3).
+        let frame_band_rows = trans_cache.as_ref().map_or(0, |c| c.frame_band_rows());
+        let trans_band_h = frame_band_rows as f32 * aa_row_h;
 
         // Shared per-frame render style (sizing + fonts + colours).
         let style = Style {
@@ -761,9 +763,16 @@ impl SequenceView {
             orf_wash: cfg.theme.translation.orf_wash.0,
         };
 
-        // Per-block layout: each block sizes itself to the items it contains.
-        let (block_layouts, block_offsets) =
-            build_block_layouts(render_ann, cut_sites, seq_len, &style, trans_band_h);
+        // Per-block layout: each block sizes itself to the items it contains
+        // (feature rows grow to fit a translated feature's CDS sub-row).
+        let (block_layouts, block_offsets) = build_block_layouts(
+            render_ann,
+            cut_sites,
+            seq_len,
+            &style,
+            trans_band_h,
+            trans_cache.as_ref(),
+        );
         let total_height = *block_offsets.last().unwrap_or(&0.0);
         let content_width = left_margin + line_width as f32 * char_width + right_margin;
         let alloc_width = content_width.max(ui.available_width());

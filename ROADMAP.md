@@ -48,7 +48,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 | (complete — no retroactive tag, see Tagging policy) |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
-| **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | 🟡 T0 (docs) + T1 (`Hit` unification) + T2 (`Track` trait + `TrackStack` + position tracks; `viewer/` split) done | T3 — composite Features track (bar + per-CDS AA sub-row; lands editor 14e C2) |
+| **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | 🟡 T0–T2 + T3 (composite Features track; per-CDS AA sub-row under its bar; editor 14e C2 landed) done | T4 — Sequence track decorations + retire monolith + memoize/virtualize layout (perf) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
 | **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 📋 not started (build on render tracks) | Phase 0.1 — `seqforge-thermo` + `seqforge tm` |
 
