@@ -24,8 +24,8 @@ use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 
 use track::{
-    BlockCtx, FeatureContext, Hit, Style, TrackStack, build_block_layouts, find_hit,
-    open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
+    BlockCtx, FeatureContext, Hit, LayoutCache, LayoutKey, Style, TrackStack, build_block_layouts,
+    find_hit, open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
 };
 use translation::{OrfPromote, TranslationCache, build_translation_cache, codon_extend};
 
@@ -517,6 +517,11 @@ pub struct SequenceView {
     /// Memoized translation lanes, rebuilt only when `(buffer.version, translation)`
     /// changes — never per frame. `None` when no lanes are shown.
     translation_cache: Option<TranslationCache>,
+    /// Memoized per-block layout (T4 perf), rebuilt only when its fingerprint
+    /// (`buffer.version`, wrap width, layout dims, cut-site set, translation
+    /// display) changes — not per frame. Bypassed while staging (the preview
+    /// buffer differs each keystroke); `None` until the first non-staging frame.
+    layout_cache: Option<LayoutCache>,
     /// The codon a translation selection is anchored to (forward nt range),
     /// set when a residue is clicked. Shift-clicking another residue keeps this
     /// whole codon selected in *either* direction — the two nt indices in
@@ -532,6 +537,9 @@ impl SequenceView {
         self.drag_start = None;
         self.pending = None;
         self.preview = None;
+        // A different document invalidates the memoized layout (its fingerprint
+        // is version-keyed to the old buffer).
+        self.layout_cache = None;
     }
 
     // ── Stage a destructive edit from outside the canvas (Edit menu) ──────
@@ -765,14 +773,56 @@ impl SequenceView {
 
         // Per-block layout: each block sizes itself to the items it contains
         // (feature rows grow to fit a translated feature's CDS sub-row).
-        let (block_layouts, block_offsets) = build_block_layouts(
-            render_ann,
-            cut_sites,
-            seq_len,
-            &style,
-            trans_band_h,
-            trans_cache.as_ref(),
-        );
+        //
+        // Memoized (T4): `build_block_layouts` is O(blocks × features), so it is
+        // rebuilt only when the fingerprint changes — not every repaint. While
+        // staging, the preview buffer differs each keystroke and the committed
+        // memo must survive (staging may cancel), so compute fresh into a local
+        // and leave `layout_cache` untouched.
+        let mut layout_cache = self.layout_cache.take();
+        let staging_layout: Option<(Vec<_>, Vec<f32>)> = if staging {
+            Some(build_block_layouts(
+                render_ann,
+                cut_sites,
+                seq_len,
+                &style,
+                trans_band_h,
+                trans_cache.as_ref(),
+            ))
+        } else {
+            let key = LayoutKey::new(
+                buffer.version,
+                seq_len,
+                &style,
+                cut_sites,
+                &self.translation,
+            );
+            if layout_cache.as_ref().is_none_or(|c| c.key != key) {
+                let (layouts, offsets) = build_block_layouts(
+                    render_ann,
+                    cut_sites,
+                    seq_len,
+                    &style,
+                    trans_band_h,
+                    trans_cache.as_ref(),
+                );
+                layout_cache = Some(LayoutCache {
+                    key,
+                    layouts,
+                    offsets,
+                });
+            }
+            None
+        };
+        let (block_layouts, block_offsets): (&[_], &[f32]) = match &staging_layout {
+            Some((l, o)) => (l, o),
+            None => {
+                let c = layout_cache
+                    .as_ref()
+                    .expect("layout cache filled when not staging");
+                (&c.layouts, &c.offsets)
+            }
+        };
         let total_height = *block_offsets.last().unwrap_or(&0.0);
         let content_width = left_margin + line_width as f32 * char_width + right_margin;
         let alloc_width = content_width.max(ui.available_width());
@@ -861,7 +911,7 @@ impl SequenceView {
                     char_width,
                     line_width,
                     seq_len,
-                    &block_offsets,
+                    block_offsets,
                     left_margin,
                 )
             });
@@ -1129,19 +1179,22 @@ impl SequenceView {
             // Visible range for the minimap viewport indicator.
             let scroll_top = (clip.min.y - rect.min.y).max(0.0);
             let scroll_bot = scroll_top + clip.height();
-            let first_block = y_to_block(scroll_top, &block_offsets).unwrap_or(0);
+            let first_block = y_to_block(scroll_top, block_offsets).unwrap_or(0);
             let last_block =
-                y_to_block(scroll_bot, &block_offsets).unwrap_or(n_blocks.saturating_sub(1));
+                y_to_block(scroll_bot, block_offsets).unwrap_or(n_blocks.saturating_sub(1));
             computed_visible = Some((
                 (first_block * line_width).min(seq_len),
                 ((last_block + 1) * line_width).min(seq_len),
             ));
         });
         view.visible_range = computed_visible;
-        // Put the memoized preview + translation cache back (taken out above so
-        // the render closure could mutate `self`).
+        // Put the memoized preview + translation + layout caches back (taken out
+        // above so the render closure could mutate `self`). While staging,
+        // `layout_cache` still holds the committed entry — valid once staging
+        // ends or cancels (an actual commit bumps `version`, invalidating it).
         self.preview = preview;
         self.translation_cache = trans_cache;
+        self.layout_cache = layout_cache;
     }
 }
 

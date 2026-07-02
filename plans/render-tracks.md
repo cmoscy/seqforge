@@ -1,6 +1,6 @@
 # SeqForge Render-Track Plan — sequence-viewer rendering abstraction
 
-> **Status: design of record; T0–T3 landed, T4 next.** Canonical cross-track
+> **Status: design of record; T0–T4 landed (core refactor complete), T5 optional.** Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). This plan owns the design +
 > phase checkboxes for turning `viewer.rs`'s monolithic render into a block-aware
 > **Track** abstraction. It changes **rendering/interaction only** — the domain
@@ -113,12 +113,22 @@ Each phase independently shippable; `build`/`test`/`clippy`/`fmt` green before t
   hit-rect identical between the two tracks (co-location preserved). Codon selection under a
   feature moves with its sub-row. Behaviour otherwise identical; 82 app tests + clippy + fmt
   green. **Lands editor 14e C2.**
-- [ ] **T4 — Sequence track + decorations + retire monolith + perf.** Strands (reuse
-  `build_strand_galley`) + selection/cursor/search-wash/preview-diff as Sequence-track
-  paint; delete the dual passes + monolithic `build_block_layouts`; **memoize/virtualize
-  per-block layout** on a fingerprint (`version`, `line_width`, `display`, cut-site set)
-  to kill the per-frame O(blocks×features) rescan. Keep `preview`/`translation_cache`
-  memoization intact.
+- [x] **T4 — Sequence track + decorations + retire monolith + perf.** *(Done.)* The
+  Sequence-track strands + selection/cursor/search-wash/preview-diff decorations and the
+  hit/paint co-location landed already in T2 (one geometry per track — the two-pass
+  *divergence* bug class is gone; the remaining two block loops are just phase-separated by
+  interaction, hits→resolve→paint, not duplicated geometry). T4 lands the **perf** half:
+  `build_block_layouts` (O(blocks×features)) is now memoized behind a `LayoutCache` keyed on
+  a `LayoutKey` fingerprint (`buffer.version` — captures sequence *and* annotation edits,
+  both bump it — plus `seq_len`, wrap width, a hash of the layout dims, a hash of the
+  cut-site set, and the `TranslationDisplay`). It rebuilds only when an input changes, not on
+  every repaint / scroll / cursor blink. Staging bypasses the memo (the preview buffer
+  differs each keystroke) and leaves the committed entry intact so a cancelled stage reuses
+  it; `reset()` clears it on document change. `preview` / `translation_cache` memoization
+  intact. Test `layout_key_invalidates_on_each_input`; 83 app tests + clippy + fmt green.
+  *(`build_block_layouts` is kept as the compute fn but is no longer a per-frame monolith —
+  it runs on cache miss only. Full per-block virtualization isn't possible: the prefix-sum
+  offsets need every block's height for the scrollbar.)*
 - [ ] **T5 — (optional) minimap.** Evaluate reuse of track geometry; likely stays
   separate (different projection). Note-only unless trivial.
 

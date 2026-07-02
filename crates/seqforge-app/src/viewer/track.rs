@@ -12,6 +12,8 @@
 //! This is **rendering/interaction only** — no domain-model change (decisions
 //! 8/12/13). Sequence + Features stay "legacy core" paint calls until T3/T4.
 
+use std::hash::{Hash, Hasher};
+
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 use seqforge_core::{
     Annotations, CutSite, Feature, FeatureId, FeatureKind, SearchHit, Selection, Strand,
@@ -20,7 +22,7 @@ use seqforge_core::{
 use crate::command::AppCommand;
 use crate::config::{LabelOverflow, Theme};
 
-use super::translation::{AaGlyph, AaKind, OrfPromote, TranslationCache};
+use super::translation::{AaGlyph, AaKind, OrfPromote, TranslationCache, TranslationDisplay};
 
 // ── Hit vocabulary ─────────────────────────────────────────────────────────────
 
@@ -261,6 +263,88 @@ pub(crate) fn build_block_layouts(
     }
 
     (layouts, offsets)
+}
+
+// ── Layout memoization (T4 perf) ───────────────────────────────────────────────
+//
+// `build_block_layouts` is O(blocks × features). The pre-refactor monolith ran it
+// every frame for every block; this memoizes the whole result on a fingerprint of
+// its inputs, so it rebuilds only when one changes (typically an edit, a resize,
+// or a translation toggle) — not on every repaint / scroll / cursor blink.
+
+/// Fingerprint of every input `build_block_layouts` reads. `buffer.version`
+/// captures sequence **and** annotation edits (both bump it — the cache-key
+/// contract); the rest capture the wrap width, layout dimensions, cut-site set,
+/// and translation display (which features get a CDS sub-row + how many frame
+/// lanes the band has).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LayoutKey {
+    version: u64,
+    seq_len: usize,
+    line_width: usize,
+    dims: u64,
+    cut_fp: u64,
+    display: TranslationDisplay,
+}
+
+impl LayoutKey {
+    pub fn new(
+        version: u64,
+        seq_len: usize,
+        style: &Style,
+        cut_sites: &[CutSite],
+        display: &TranslationDisplay,
+    ) -> Self {
+        LayoutKey {
+            version,
+            seq_len,
+            line_width: style.line_width,
+            dims: dims_fingerprint(style),
+            cut_fp: cut_fingerprint(cut_sites),
+            display: display.clone(),
+        }
+    }
+}
+
+/// Hash the layout-affecting `Style` dimensions (row heights, char/label
+/// advances) so a font/settings change invalidates the memo.
+fn dims_fingerprint(style: &Style) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in [
+        style.char_width,
+        style.label_char_w,
+        style.ruler_h,
+        style.strand_h,
+        style.annot_row_h,
+        style.cut_label_row_h,
+        style.aa_row_h,
+        style.block_gap,
+    ] {
+        v.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Hash the cut-site set (positions + label widths drive the stacking). Cut
+/// sites are view-derived from the enzyme selection, so an enzyme toggle doesn't
+/// bump `version` — this catches it.
+fn cut_fingerprint(cut_sites: &[CutSite]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    cut_sites.len().hash(&mut h);
+    for s in cut_sites {
+        s.cut_pos.hash(&mut h);
+        s.enzyme.len().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Memoized per-block layout: the block layouts + prefix-sum offsets, valid as
+/// long as `key` matches the current frame's inputs.
+#[derive(Debug)]
+pub(crate) struct LayoutCache {
+    pub key: LayoutKey,
+    pub layouts: Vec<BlockLayout>,
+    pub offsets: Vec<f32>,
 }
 
 /// Locate the block containing a given y-coordinate (relative to the
@@ -967,6 +1051,39 @@ mod tests {
             "Σ track heights + gap ({sum}) must equal build_block_layouts height ({})",
             layout.height
         );
+    }
+
+    /// The layout memo rebuilds only when an input changes: equal inputs →
+    /// equal key (cache hit); a version / cut-site / wrap / display change →
+    /// different key (rebuild).
+    #[test]
+    fn layout_key_invalidates_on_each_input() {
+        use seqforge_core::CutSite;
+        let style = test_style();
+        let display = TranslationDisplay::default();
+        let cuts = vec![CutSite {
+            enzyme: "EcoRI".into(),
+            recognition: "GAATTC".into(),
+            recognition_start: 0,
+            recognition_end: 6,
+            cut_pos: 1,
+            bottom_cut_pos: 5,
+        }];
+        let base = LayoutKey::new(3, 100, &style, &cuts, &display);
+        // Identical inputs → equal (cache hit).
+        assert_eq!(base, LayoutKey::new(3, 100, &style, &cuts, &display));
+        // Version bump (a sequence or annotation edit).
+        assert_ne!(base, LayoutKey::new(4, 100, &style, &cuts, &display));
+        // Cut-site set change (enzyme toggle — doesn't bump version).
+        assert_ne!(base, LayoutKey::new(3, 100, &style, &[], &display));
+        // Wrap width change (resize).
+        let mut narrow = test_style();
+        narrow.line_width = 10;
+        assert_ne!(base, LayoutKey::new(3, 100, &narrow, &cuts, &display));
+        // Translation toggle (affects which features get a CDS sub-row).
+        let mut d2 = TranslationDisplay::default();
+        d2.frames[0] = true;
+        assert_ne!(base, LayoutKey::new(3, 100, &style, &cuts, &d2));
     }
 
     #[test]
