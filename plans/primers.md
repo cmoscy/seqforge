@@ -1,7 +1,10 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: NOT STARTED.** Architecture agreed; begins after current cleanup.
-> First concrete step is Phase 0.1 (`seqforge-thermo` crate + `seqforge tm`).
+> **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
+> sourcing, and consistency-with-the-implemented-model all worked out (see
+> "Decisions locked" and "Consistency with the implemented model" below). Phase
+> 0.1 (vendor seqfold → `seqforge-thermo` + `seqforge tm`) is **done**; next
+> concrete step is Phase 0.2 (`core`: `Primer` + `PrimerId` + `Annotations.primers`).
 > Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
@@ -10,129 +13,372 @@ Display, ingest, evaluate, and (later) design primers, backed by a shared,
 sequence-agnostic thermodynamics layer. Every operation has a `seqforge` CLI
 equivalent with text output, so agents and scripts get parity with the GUI.
 
-## Ecosystem findings (why we build, not adopt)
+Scope for the current milestone (v0.2 rounding-out): primers become **first-class
+objects** — imported, displayed as directional arrows, QC-evaluated (Tm/GC/self-
+structure), and manually attached/edited through the editor's single mutation
+path. Deferred: generative *design*, PCR/primer-pair logic, and cloning
+convergence (Phase 2.2 / Phase 3 and "Out of scope").
 
-Studied before proposing (2026):
+## Ecosystem findings (why we build on seqfold, not primer3)
 
-- **No Rust library** covers molecular-cloning formats + primers. `noodles` is
-  NGS/genomics only (BAM/VCF/GFF/FASTA…); `rust-bio` has no primer concept.
-- **PlasCAD** (`plascad`, by `na_seq`'s author) is the only Rust project in our
-  domain — but it's a **binary GUI app (egui), MIT**, not a reusable library.
-  Useful as **port/reference source**, not a dependency.
-- **No maintained Rust Primer3 binding / primer-design crate.** Primer3 is C
-  (GPL) with Python bindings. Reserved only as an optional escape hatch for
-  full primer *selection* (Phase 3), never a core dependency.
-- **Tm reference of record:** SantaLucia 1998 (NN params) + a salt correction
-  (SantaLucia & Hicks 2004 / Owczarzy). Validate against **Biopython
-  `Bio.SeqUtils.MeltingTemp`** (permissive, authoritative — generate test
-  vectors from it). Port code from **PlasCAD (Rust, MIT)** / **tg-oss (JS,
-  MIT)**. **Never copy Primer3 source** (GPL — verify before reuse).
+Studied + verified (2026):
+
+- **No Rust primer/thermo library on crates.io.** `noodles` is NGS-only;
+  `rust-bio` has no primer concept. We still build.
+- **`seqfold` (Lattice Automation) is now a native-Rust MIT engine.** Its Rust
+  core (`src/core/{tm,fold,data,energies}.rs`) implements NN Tm (SantaLucia +
+  Owczarzy-2008 salt), GC, and Zuker MFE folding (`fold`/`dg`) with
+  stack/bulge/internal-loop/hairpin energetics, for **DNA and RNA**. `tm(seq1,
+  seq2, pcr)` handles a **two-sequence duplex with internal mismatches** — i.e.
+  ungapped primer:template annealing. PyO3 is an optional off-by-default feature;
+  deps are `rayon` + `smallvec`. **This is our engine** (vendored, see below).
+- **primer3 / `ntthal` is GPL-2 and heavy — dropped as a dependency.** Its only
+  capabilities beyond seqfold (gapped heteroduplex alignment, hetero-dimer,
+  primer *selection*) are exactly the things we defer. Retained **only as an
+  optional offline validation oracle** for the future gapped-bulge routine —
+  never linked, never in CI, never copied.
+- **What the apps do:** SnapGene does **not** check hairpins/dimers/specificity
+  (annotate-a-selection + Tm only). Benchling **does** — hairpin/dimer detection,
+  secondary-structure view, ΔG. Our QC lands *ahead of SnapGene, at Benchling
+  parity*, while pair/PCR design stays deferred.
+- **Tm validation:** seqfold's own `tm_test`/`fold_test` vectors + Biopython
+  `Bio.SeqUtils.MeltingTemp` (permissive). primer3-py as an extra offline oracle
+  for the deferred bulge work only.
 
 ## Architecture
 
 ```
-seqforge-thermo (NEW, pure, zero-dep)        seqforge-restriction (exists, zero-dep)
-  NN energetics → tm, gc, hairpin,             enzyme table, scan, presets
-  dimer, end_stability (sequence-agnostic)            │
-        └────────────────┬───────────────────────────┘
+seqforge-thermo (NEW)                          seqforge-restriction (exists, zero-dep)
+  VENDORED seqfold core (MIT, attributed):       enzyme table, scan, presets
+  tm · gc · fold/dg (self-structure ΔG) ·               │
+  ungapped heteroduplex tm(seq1,seq2).                  │
+  Deps stripped (rayon→serial, smallvec→Vec,            │
+  pyo3 dropped) → pure, zero-dep, extractable.          │
+        └────────────────┬───────────────────────────────┘
                          ▼
                   seqforge-bio  (exists)
-                    + `primer` module: anneal, evaluate, generate;
-                      primer_bind round-trip
+                    + `primer` module: anneal (seed-and-extend, own result type),
+                      evaluate (Tm/GC/QC), decompose (annealed/tail/mismatch),
+                      staleness pass; primer_bind round-trip
                          │  (BioOps trait)
                          ▼
                   seqforge-core (exists)
-                    + Primer type, Annotations.primers, dispatch
+                    + Primer type + PrimerId, Annotations.primers (id-API),
+                      primer-specific binding-shift handler (never drops)
                    ┌─────┴─────┐
             seqforge-app    seqforge-cli
-            overlay/track    primer commands
+            PrimerTrack +    primer commands (list/find/add/update/remove, tm);
+            staged dialog    apply_add_primer/… in command/edit.rs (write-ops)
 ```
 
 ### Invariants (the anti-conflict rules)
 
-1. **One thermodynamics implementation.** All Tm/structure math lives in
-   `seqforge-thermo`; primer evaluation and future sequence-design both consume
-   it. No second Tm anywhere.
-2. **Primers are persistent annotations in `core`** (like `Feature`), so their
-   *mutation* rides the editor's single applier + history (Phase 2) — never a
-   parallel mutation path.
-3. **Tm/GC are derived, never stored.** `core::Primer` carries no Tm field, so
-   `core` needs no `thermo` dependency.
+1. **One thermodynamics implementation.** All Tm/structure math is the vendored
+   seqfold core in `seqforge-thermo`. No second Tm anywhere.
+2. **Primers are persistent, authored annotations in `core`** (like `Feature`),
+   so their *mutation* rides the editor's single applier + history — never a
+   parallel mutation path. Write-ops are hand-routed in `command/edit.rs`
+   (`apply_add_primer`/`_update`/`_remove`), exactly like the feature ops
+   (`command/mod.rs:652`), per decision 11. `AddPrimer` is content-given → needs
+   **no `bio`** (no `core→bio` edge), same as `apply_add_feature`.
+3. **Authored object vs. derived interpretation.** Decision 8 ("pure function of
+   `text` → derived, never stored") governs *template projections* (complement,
+   Tm-of-a-range, translation, overhangs). It does **not** range over authored
+   annotations. A primer is an independent oligo (a reagent) with a *relation* to
+   the template; its sequence + attachment are authored, its interpretation is
+   derived (see Data model).
 4. **No duplicate enzyme data.** Restriction-site tails reuse
-   `seqforge-restriction` recognition sequences.
-5. **CLI/GUI parity via one dispatch.** Pure ops (`tm`) are doc-free like
-   `info`; doc ops mirror the `Enzymes` request shape.
-6. **Reuse `RevealRange`** for jump-to-binding (already built for enzymes).
+   `seqforge-restriction` recognition sequences (Phase 2.2, deferred).
+5. **CLI/GUI parity via one dispatch.** Pure ops (`tm`) are doc-free like `info`;
+   doc ops mirror the feature request shapes (`AddFeature` → `AddPrimer`, etc.).
+6. **Reuse the right rails — mechanism, not lossy types:**
+   - jump-to-binding reuses the **reveal mechanism** (`View.scroll_to`), not a
+     nonexistent "RevealRange" type;
+   - annealing gets its **own result type** (`PrimerBinding { range, strand,
+     mismatches, three_prime_match }`) — do **not** overload `core::SearchHit`
+     (`document.rs:10`; it carries only `{start,end,strand}` and would lose
+     mismatch/anchor data → a second track);
+   - hit-testing reuses the **one `Hit` enum + one resolver** (`track.rs:35`) by
+     adding `Hit::Primer(PrimerId)` — carrying the **id directly** (see decision
+     on ids below), not a positional index;
+   - binding position reuses the splice offset math but through a **primer-
+     specific handler** (never the verbatim `shift_features`, which *drops*
+     collapsed ranges — see #1 below).
+7. **seqfold vendored + attributed; primer3 oracle-only.** The `seqforge-thermo`
+   crate carries no non-std deps and `publish = false` until extraction — same
+   constraint as `seqforge-restriction`.
+8. **Primers are within-buffer**, addressed by a stable `PrimerId`. Not an
+   app-wide shared library (deliberate divergence from SnapGene — see Deferred).
 
-### Data model (core)
+## Data model (core)
+
+A primer is an **authored object attached relationally** to the template. Split
+by what is authored (persisted) vs. derived (never stored, version-cached):
 
 ```rust
+/// Session-scoped stable handle; addressed by id at rest (see "ids" below).
+/// Never persisted (#[serde(skip)]); re-minted on load.
+pub struct PrimerId(pub u64);
+
 pub struct Primer {
+    #[serde(skip)]
+    pub id: PrimerId,
     pub name: String,
-    pub sequence: String,        // full oligo 5'→3', tail included
-    pub binding: Range<usize>,   // annealing region on the template
+    /// Full oligo 5'→3', tail included. AUTHORED — the intrinsic identity of the
+    /// reagent; may contain bases that appear nowhere in the template (5' tail).
+    /// A reverse primer's bases are the revcomp of the top strand at `binding`.
+    pub sequence: String,
+    /// Last-known annealing footprint, AUTHORED relational state (like a
+    /// Feature.range) — but the load-bearing anchor is the **3' terminus** (where
+    /// priming/extension begins), NOT the range length. Rides a primer-specific
+    /// shift handler that tracks edits and **never drops** the primer (see #1).
+    /// `None` = a detached/floating oligo (no current attachment). Matches
+    /// GenBank primer_bind location when present.
+    pub binding: Option<Range<usize>>,
     pub strand: Strand,
-    pub qualifiers: BTreeMap<String, String>, // preserve extra GenBank notes
+    /// Preserve extra GenBank notes (flag-qualifiers as None value).
+    pub qualifiers: BTreeMap<String, Option<String>>,
 }
-pub struct Annotations { pub features: Vec<Feature>, pub primers: Vec<Primer> }
 ```
 
-### Lossless story
+`Annotations` gains `primers: Vec<Primer>` behind an **id-only API** exactly like
+features (`add`/`get`/`get_mut`/`remove`/`rename`/ordered `iter`), plus a separate
+`next_primer_id` counter (`PrimerId` is a distinct newtype from `FeatureId`). Ids
+re-minted on load; GenBank/FASTA stay positional.
 
-- **Within our files:** lossless — `primers` ↔ GenBank `primer_bind` + `/note`
-  for the full oligo/tail (tg-oss convention).
-- **Cross-tool:** binding site preserved; tails are best-effort in `/note`
-  (a universal GenBank limitation). Full fidelity needs `.dna` (separate, later).
+### Ids: id-at-rest (decision 12), carry the id in the hit
+
+Decision 12's rule is **"addressed by id at rest; a positional `Vec` index is a
+private within-frame render detail, never stored/serialized/returned."** That
+dictates `PrimerId` for `View.selected_primer`, undo, the dialog, and the CLI
+`--id` flag. For the transient render hit, primers are greenfield, so we **carry
+`PrimerId` directly** in `Hit::Primer` — cleaner than the legacy `Hit::Feature`
+positional index (`track.rs:36`, whose own comment flags "carry the id directly"
+as the intended direction). No `by_position` accessor is needed for primers.
+
+### Derived (never stored; `Cache` keyed on `buffer.version` + the stringency setting)
+
+Computed by aligning the authored `sequence` against the current template,
+**anchored on the 3' terminus** (do **not** trust `binding.len()` — the shift
+handler can grow/shrink the stored range independently of the fixed oligo length):
+
+- **Decomposition** → `Vec<Segment { Annealed | Tail | Mismatch }>`: align the
+  fixed-length oligo at the 3' anchor; leading bases with no template pairing =
+  5' tail; disagreements within the annealed span = mismatches. Two ranges exist
+  post-edit — *stored/expected* (shift-tracked) vs *derived/actual*; rendering
+  picks by state (below). Ungapped for v0.2; the same `Vec<Segment>` interface
+  accepts a gapped aligner later (Deferred).
+- **QC:** Tm (annealing region), %GC, self-hairpin ΔG, self-dimer ΔG (seqfold).
+- **Attachment state** (primary): re-anneal (seed-and-extend) and classify:
+
+  | State | Meaning | Marking |
+  |---|---|---|
+  | `Confirmed` | derived footprint == stored `binding` | normal arrow |
+  | `Drifted` | still anchored + anneals within tolerance, but moved / has mismatches | amber "moved"/mismatch marks |
+  | `Detached` | 3' anchor destroyed **or** annealing below the stringency threshold → `binding = None` | panel-only, no arrow (floating oligo) |
+
+- **Additional binding sites** (an *orthogonal* flag, not a state — a `Confirmed`
+  primer can also have off-targets): seed on the 3'-terminal k-mer (exact, O(N)
+  candidate find), score the few candidates. Change-scoped: an edit can only
+  create a new site near the splice → rescan the edited window; re-verify known
+  sites in place. Runs on version change and/or an on-demand "check specificity";
+  never a heavy always-on full fuzzy scan.
+
+**Tolerances are settings with defaults** (match SnapGene/Benchling): binding
+stringency (min 3' match / max mismatch — also gates `Detached`) and Tm params
+(Na⁺/Mg²⁺/oligo conc, default = seqfold Owczarzy-2008). Defaulted now, exposed
+later.
+
+## Thermo engine — vendoring seqfold
+
+- **Copy (vendor), not submodule.** seqfold's Rust core is `cdylib+rlib`, not on
+  crates.io, and pulls pyo3/rayon/smallvec — a git dep would drag that in and
+  break the zero-dep/extractable invariant. **Source: `github.com/Lattice-
+  Automation/seqfold` @ v0.10.1 (MIT).** Copy `src/core/{tm,fold,data,
+  energies}.rs` into `seqforge-thermo`, **strip** pyo3 (drop the feature),
+  **rayon** (serial DP — instant at primer/short-window sizes), **smallvec**
+  (→`Vec`). Retain seqfold's `LICENSE` + copyright (all MIT requires).
+- **Covers, out of the box:** `tm(oligo)` and `gc` (0.1); `dg(oligo)`/`fold`
+  self-hairpin & self-dimer ΔG (1.2); `tm(seq1, seq2)` ungapped primer:template
+  annealing with mismatches (1.1 — no new heteroduplex code for the in-scope case).
+- **Orientation footgun:** `tm(seq1, seq2)` hybridises the two strands
+  **antiparallel** — feed the primer (5'→3') and the template strand it binds in
+  the correct sense, or the Tm is wrong. One helper owns both this and
+  extension-direction = arrow-direction (decision on 5'→3' below).
+- **Our thin API:** `tm`, `gc`, `hairpin_dg`, `self_dimer_dg`,
+  `anneal_tm(primer, template_region)`. Feature-stable so a later gapped/
+  heterodimer impl is a drop-in.
+- **Validation:** seqfold vectors + Biopython (primary); primer3-py/`ntthal`
+  offline oracle for deferred bulge work only.
+
+## Rendering (PrimerTrack — native to the `Track` trait)
+
+A position-owned track (sibling of CutSites), forward arrows above / reverse
+below the strand rows. Aligned to the SnapGene/Benchling idiom:
+
+- **Annealed bases:** on-grid, column-aligned to the footprint; solid half-arrow
+  with the **arrowhead at the 3' end** (extension direction).
+- **5' tail / overhang:** no template column → **lifts slightly off the grid**
+  (small vertical rise + a kink where it peels off), same hue, lighter/hatched so
+  the eye reads "not on the template." Long tail → **collapse to a stub + length
+  badge**, full tail on hover / in the panel.
+- **Mismatch columns:** marked within the annealed region (warning-accent cell) —
+  the visual counterpart of `Drifted`.
+- **State:** `Confirmed` normal; `Drifted` amber badge + mismatch marks;
+  `Detached` **not drawn on the sequence** (no binding) — listed in the panel as a
+  floating oligo. Additional-sites → off-target count badge.
+- **Track trait:** `block_height` reserves the arrow row (+ a sliver for a
+  floating tail); `paint` draws annealed body + tail ribbon + mismatch marks;
+  `hit_test` returns `Hit::Primer(id)` across the annealed footprint **and** the
+  tail ribbon (co-location invariant: paint rect == hit rect). Theme-driven.
+- **Future internal bulge** (deferred) reuses the identical lift-off vocabulary,
+  anchored internally — paint layer needs no rethink.
+
+## Editing UX (staged dialog — sibling of the feature Edit dialog)
+
+- **Same rails:** `AddPrimer` / `UpdatePrimer` / `RemovePrimer` `ViewerRequest`s,
+  **staged** (arm → preview → commit on `Enter`, decision 10), through the single
+  applier + history. Siblings of the feature ops — no new mechanism.
+- **Detach-on-destroy uses the existing staging, no new modal.** A staged edit
+  that would destroy a primer's 3' anchor surfaces **"detaches primer X"** in the
+  realized preview; the existing **commit-on-Enter is the confirmation** (decision
+  10). CLI/agent edits have no preview loop → they detach and **report it in
+  structured output** ("primer X detached"). Neither path silently corrupts; the
+  primer object always survives (binding → `None`), never deleted.
+- **Dialog field set** (differs from a feature's): name, **full oligo sequence**,
+  **5' tail** (visually distinguished / auto-derived from binding), binding range
+  (pre-filled from the current selection, editable), strand, and a **live
+  Tm/%GC/self-structure QC panel** (shares the Phase 0.5 computation).
+- **Create-from-selection is the primary path:** select region → "Add Primer" →
+  dialog pre-filled (binding = selection, oligo = `template[selection]`).
+- **Deferred "optimize/design"** button (auto-extend to a target Tm) is a disabled
+  affordance pointing at Phase 2.2/3.
+
+## Lossless story (GenBank round-trip)
+
+- **Binding** ↔ GenBank `primer_bind` location (native, authoritative; reverse
+  strand = `complement(x..y)`). A `Detached` primer (`binding = None`) has no
+  `primer_bind` record — it round-trips via the note alone (an unattached oligo).
+- **Full oligo + tail** ↔ a single JSON-valued `/seqforge_primer` qualifier note,
+  **mirroring the existing `/seqforge_provenance` pattern**. Schema: full oligo
+  5'→3' (+ tail boundary once bulges land). On load, `primer_bind` → `binding`,
+  the note → `sequence`; a stale/non-annealing import still round-trips (binding
+  preserved, state derived).
+- **Diversion is a behavior change** (see Consistency §): `primer_bind` currently
+  parses to a `Feature` (`genbank.rs:45`). It now routes to `Primer`; the writer
+  must emit it from `primers` **only** (no double-emit from `features`).
+- **Within our files:** lossless. **Cross-tool:** binding preserved; tail
+  best-effort in `/note`. Full fidelity needs `.dna` (separate, later).
+
+## Consistency with the implemented model (fixes the audit found)
+
+Each item cites the code it must stay consistent with.
+
+1. **Primer binding shift must never `retain_mut`-drop.** `shift_features`
+   (`mutations.rs:83`) drops ranges destroyed by an edit (`:105`, `:125`) — right
+   for features, **wrong for a reagent**. A primer-specific handler shares the
+   offset math but, on 3'-anchor loss, sets `binding = None` (`Detached`) and
+   **keeps** the primer. Clamp/compare against the edit point like the straddle
+   case (`:111-119`).
+2. **Decomposition anchors on the 3' terminus, never `binding.len()`** — the shift
+   handler can grow/shrink the stored range (`:114`) independently of the fixed
+   oligo. Stored-vs-derived footprint reconciled by state.
+3. **`Hit::Primer(PrimerId)`** in the one `Hit` enum (`track.rs:35`), id carried
+   directly (id-at-rest, decision 12); no `by_position` for primers.
+4. **Own `PrimerBinding` result type**, not `core::SearchHit` (`document.rs:10`);
+   reuse only the `View.scroll_to` reveal mechanism.
+5. **`apply_add_primer`/`_update`/`_remove` in `command/edit.rs`**, routed like
+   `apply_add_feature` (`command/mod.rs:652`), through applier + history
+   (decision 11). Content-given → no `bio`.
+6. **`primer_bind` diversion:** parser routes it to `primers`; writer emits from
+   `primers` only. **Undo** snapshots whole `Annotations` (derives `Clone`, so
+   `primers` ride along free); extend the byte-budget *estimate* at
+   `history.rs:78` to count primers (benign if missed — estimate only).
+7. **`View.selected_primer: Option<PrimerId>`** mirroring `selected_feature`
+   (`model.rs:294`); clear it in `clear_selection`.
+8. **`tm(seq1, seq2)` antiparallel** orientation owned by one helper (see Thermo).
 
 ## Roadmap / tracker
 
-### Phase 0 — Foundation (pre-editor, zero mutation)
-- [ ] 0.1 `seqforge-thermo` crate: `tm(seq, params)` (SantaLucia 1998 + salt),
-      `gc(seq)`. Zero deps. Tests validated against Biopython vectors.
-- [ ] 0.1 `seqforge tm <oligo>` CLI (pure, no doc) — first shippable slice.
-- [ ] 0.2 `core`: `Primer` type + `Annotations.primers` (serde, empty default).
-- [ ] 0.3 `bio`: GenBank `primer_bind` ↔ `Primer` round-trip (lossless via notes).
-      Recognise `primer_bind` (currently collapses to `FeatureKind::Other`).
-- [ ] 0.4 `app`: render primers as a distinct directional arrow track (read-only).
-- [ ] 0.4 `seqforge info` reports primer count.
+### Phase 0 — Foundation (read-side, minimal mutation)
+- [x] 0.1 `seqforge-thermo`: **vendor seqfold core** (deps stripped, MIT
+      attribution); expose `tm`, `gc`. Validated vs seqfold + Biopython vectors.
+      *(seqfold v0.10.1; `pyo3` dropped, `rayon`→serial, `smallvec`→`Vec`; pure,
+      zero-dep, `publish = false`. `bio` re-exports the thin `tm`/`gc` surface.)*
+- [x] 0.1 `seqforge tm <oligo>` CLI (pure, no doc) — first shippable slice.
+- [ ] 0.2 `core`: `Primer` + `PrimerId` + `Annotations.primers` id-API (serde,
+      empty default); **primer-specific binding-shift handler** (never drops;
+      `Detached` on anchor loss); `View.selected_primer`.
+- [ ] 0.3 `bio`: GenBank `primer_bind` ↔ `Primer` round-trip (lossless via
+      `/seqforge_primer` note); route `primer_bind` → `primers` (parser + writer).
+- [ ] 0.4 `app`: `PrimerTrack` — directional arrow track (annealed on-grid, tail
+      lift-off, `Hit::Primer(id)`, read-only). `seqforge info` reports primer count.
+- [ ] 0.5 **Live selection Tm/%GC/length status readout** (no primer object) —
+      ships/validates thermo early; shared by the dialog QC panel.
 
 ### Phase 1 — Read-side interaction (no buffer mutation)
-- [ ] 1.1 `bio` annealing: find an oligo's binding sites (3′-exact + mismatch).
-- [ ] 1.2 `seqforge-thermo`: `hairpin`, `dimer`, `end_stability` (simple
-      complementarity scan — not Primer3 `thal`).
-- [ ] 1.3 Primer overlay/panel: list (name/binding/Tm/strand + QC), jump-to-
-      binding (reuse `RevealRange`), toggle visibility.
-- [ ] 1.4 CLI: `seqforge primers list`, `seqforge primers find <oligo>` (transient).
+- [ ] 1.1 `bio` annealing: seed-and-extend binding-site find (own `PrimerBinding`
+      type, reuse `scroll_to`). Decomposition (3'-anchored) + attachment-state pass.
+- [ ] 1.2 `thermo`: self-hairpin ΔG, self-dimer ΔG (seqfold `fold`/`dg`).
+- [ ] 1.3 Primer panel: list (name/binding/Tm/GC/strand + QC + state, incl.
+      floating oligos), jump-to-binding, toggle visibility, "check specificity".
+- [ ] 1.4 CLI: `seqforge primers list`, `seqforge primers find <oligo>`.
 
-### Phase 2 — Creation / editing (requires the editor)
-- [ ] 2.1 `primers add` / `primers remove` / design-from-selection — through the
-      editor's applier + history (single mutation path).
-- [ ] 2.2 Constructive generation (`bio::primer`): random oligos w/ sane
-      defaults, barcodes (min Hamming distance), restriction-site tails (reuse
-      `seqforge-restriction` recognition data).
-- [ ] 2.3 CLI: `seqforge oligo random …`, `seqforge primers add …`, etc.
+### Phase 2 — Creation / editing (uses the editor)
+- [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; staged
+      **primer dialog** (sibling of the feature dialog); create-from-selection;
+      detach-on-destroy surfaced in the staged preview / reported by CLI.
+- [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
+      (min Hamming), restriction-site tails (reuse `seqforge-restriction`).
+- [ ] 2.3 CLI: `seqforge primers add/update/remove …`, `seqforge oligo random …`.
 
 ### Phase 3 — Cloning convergence (Tier 3 territory)
-- [ ] 3.1 PCR product simulation; primer-pair / amplicon logic.
-- [ ] 3.2 Converge primer generation with `seqforge-restriction` Tier 3
-      (ligation / Gibson / Golden Gate) into one cloning layer.
-- [ ] 3.3 (Optional) Primer3 escape hatch for full primer *selection*
-      (feature-gated FFI or subprocess) — only if heuristics prove insufficient.
+- [ ] 3.1 PCR product simulation; primer-pair / amplicon logic; **hetero-dimer**
+      QC (needs the pair/reaction context introduced here — seqfold concat-fold).
+- [ ] 3.2 **Gapped heteroduplex** decomposition (indel-mutagenesis bulge) — custom
+      NN-param DP over seqfold's tables, behind the same `Vec<Segment>` interface;
+      internal-bulge render. primer3 offline oracle here.
+- [ ] 3.3 Converge with `seqforge-restriction` Tier 3 into one cloning layer.
+- [ ] 3.4 (Optional) Primer3 escape hatch for full primer *selection*.
 
-## Out of scope (for now)
+## Out of scope / deferred directions
 
-- SnapGene `.dna` parsing (separate; richest primer source — port from
-  PlasCAD/tg-oss when `.dna` lands).
-- Primer3-grade `thal` secondary-structure DP (simple heuristics suffice).
-- Codon optimization / synthesis design (a future `thermo` consumer; the
-  shared layer is built to support it without rework).
+- **App-wide primer library** (SnapGene-style shared DB matched across files).
+  v0.2 is within-buffer (GenBank-native); a cross-file library is later; `.dna`
+  import would feed it.
+- **Hetero-dimer** until the pair/PCR context exists (Phase 3.1).
+- **Gapped/bulge heteroduplex** rendering + energetics (Phase 3.2).
+- **SnapGene `.dna` parsing** (separate; richest primer source).
+- **Codon optimization / synthesis design** (a future `thermo` consumer).
 
-## Open questions
+## Decisions locked (this track)
 
-- New crate name: `seqforge-thermo` (narrow, extractable) vs broadening to
-  `seqforge-analysis` later if it accretes ORF/translation/codon work. Start
-  narrow.
-- Which salt correction to default to (SantaLucia 2004 vs Owczarzy). Pick one,
-  match NEB/common-tool expectations, expose as a setting later.
-- Editor-era: confirm `Primer` mutation slots onto the same `AppCommand` +
-  history machinery the editor introduces (see [`editor.md`](editor.md)).
+1. **Thermo engine = vendored seqfold core** (MIT, deps stripped, attributed);
+   primer3 dropped as a dependency, optional offline oracle only.
+2. **Primer = authored object attached relationally.** Authoritative: `name`,
+   full `sequence` (tail incl.), `binding: Option<Range>` (3'-anchored last-known
+   footprint), `strand`, `qualifiers`. Derived (version-cached): decomposition,
+   Tm/GC/QC, attachment state, additional sites. Decision 8 governs template
+   projections, not authored annotations.
+3. **Addressed by `PrimerId` at rest** (decision 12); `Hit::Primer` carries the id
+   directly (no positional index, no `by_position`). Within-buffer, not an
+   app-wide library.
+4. **Edits never delete a primer.** Anchor-destroying / below-threshold edits set
+   `binding = None` (`Detached`); GUI surfaces this in the staged preview (commit-
+   on-Enter = confirm; no new modal), CLI reports it. Never `retain_mut`-drop.
+5. **Ungapped heteroduplex is in scope, covered by seqfold** (`tm(seq1,seq2)`);
+   gapped/bulge + hetero-dimer + selection are deferred (Phase 3).
+6. **Oligos stored 5'→3'** (universal convention); one helper owns
+   extension-direction = arrow-direction **and** `tm(seq1,seq2)` orientation.
+7. **Tolerances (binding stringency, Tm salt/conc) are defaulted settings**
+   (Owczarzy-2008), modifiable later.
+8. **Reuse mechanism, not lossy types:** one `Hit` enum, own `PrimerBinding` type
+   (not `SearchHit`), primer-specific shift handler (not `shift_features`),
+   `command/edit.rs` routing (like features).
+
+## Resolved (previously open) questions
+
+- Crate name: **`seqforge-thermo`** (start narrow).
+- Salt correction default: **Owczarzy-2008** (inherited from seqfold).
+- `Primer` mutation on the applier + history: **confirmed** — editor is complete;
+  Add/Update/RemovePrimer are `ViewerRequest`s routed like the feature ops.

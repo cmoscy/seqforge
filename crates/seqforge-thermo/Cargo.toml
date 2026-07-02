@@ -1,0 +1,9 @@
+[package]
+name = "seqforge-thermo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Sequence thermodynamics (Tm/GC, and vendored seqfold MFE folding) for SeqForge. Pure, zero-dep; not yet published."
+license = "MIT"
+
+[dependencies]

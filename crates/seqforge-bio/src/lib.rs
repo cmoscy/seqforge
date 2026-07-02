@@ -8,10 +8,17 @@ mod search;
 mod translate;
 
 pub use dna::{complement, reverse_complement};
+// Thermodynamics live in the pure, zero-dep `seqforge-thermo` crate (vendored
+// seqfold). `bio → thermo` is the only cross-crate edge the primer/thermo work
+// adds; `core` never depends on thermo (Tm/GC are derived, never stored). The
+// thin `tm`/`gc` surface is re-exported here so `-cli`/`-app` reach it through
+// `bio` without naming `thermo` directly — the same boundary shape as
+// `restriction` (see docs/architecture.md).
 pub use enzyme_query::{
     EnzymePreset, EnzymeQuery, parse_enzyme_query, resolve_query, resolve_query_names,
 };
 pub use search::{find_cut_sites, find_iupac_matches};
+pub use seqforge_thermo::{TmError, gc, tm};
 pub use translate::{Orf, find_orfs, translate};
 
 use seqforge_core::{Annotations, Buffer, Document};

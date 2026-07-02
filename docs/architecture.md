@@ -17,7 +17,7 @@ flowchart TD
     core["seqforge-core<br/><i>Buffer · Annotations · View<br/>ViewerRequest · dispatch · BioOps</i><br/><b>no GUI, no bio deps</b>"]
     bio["seqforge-bio<br/><i>gb-io/FASTA parse · search<br/>impl BioOps</i>"]
     restr["seqforge-restriction<br/><i>REBASE table · scanner · presets</i><br/><b>zero workspace deps</b>"]
-    thermo["seqforge-thermo (planned)<br/><i>Tm · GC · hairpin · dimer</i><br/><b>pure, zero-dep</b>"]
+    thermo["seqforge-thermo<br/><i>Tm · GC (· hairpin · dimer, later)</i><br/><b>pure, zero-dep</b>"]
 
     app --> core
     cli --> core
@@ -25,12 +25,10 @@ flowchart TD
     cli -.-> bio
     bio --> core
     bio --> restr
-    bio -.->|planned| thermo
+    bio --> thermo
 
     classDef pure fill:#def,stroke:#06a,color:#000;
-    classDef planned stroke-dasharray:4 3;
     class core,restr,thermo pure;
-    class thermo planned;
 ```
 
 **Invariants the arrows encode:**
@@ -43,8 +41,14 @@ flowchart TD
 - **`seqforge-restriction` is reachable only via `seqforge-bio`** (see
   "Restriction backend boundary" below) and carries no workspace deps —
   the constraint that keeps a crates.io extraction a one-file change.
-- **`seqforge-thermo` (planned)** is pure and sequence-agnostic; `core`
-  never depends on it (Tm is *derived*, never stored). See
+- **`seqforge-thermo`** is pure and sequence-agnostic; `core` never
+  depends on it (Tm is *derived*, never stored). It is the **vendored
+  `seqfold` Rust core** (MIT, attributed; `rayon`/`smallvec`/`pyo3`
+  stripped → zero-dep, `publish = false`, extractable — the same shape as
+  `seqforge-restriction`). It is reached **only via `seqforge-bio`**,
+  which re-exports the thin `tm`/`gc` surface (Phase 0.1); `bio → thermo`
+  is the sole new cross-crate edge the primer/thermo work adds. `primer3`
+  (GPL) is never a dependency — an offline validation oracle only. See
   [`../plans/primers.md`](../plans/primers.md).
 
 ## Derived sequence data: computed, never stored on `core`
@@ -73,6 +77,24 @@ authoritative copy. Don't reach for that until a profile demands it.
 Consequence: `core` never needs a biology dependency to maintain a
 derived field, because it stores no derived fields. This is what keeps
 `core ◄── bio` (and the forbidden `core ──► bio` cycle) a non-issue.
+
+### Scope of the rule: template projections, not authored annotations
+
+The "derived, never stored" rule ranges over **pure functions of
+`Buffer.text`** — *template projections* (complement, Tm-of-a-range,
+translation, overhangs, cut sites). It does **not** range over **authored
+annotations** — `Feature`s and `Primer`s — which are first-class stored
+state, not projections of the sequence. A `Primer` is an independent oligo
+(a reagent) that holds a *relation* to the template: its `name` + full 5'→3'
+`sequence` (which may include a 5' tail with **no** template counterpart) and
+its `binding` attachment are **authored**; its annealed/tail/mismatch
+decomposition, Tm/GC/QC, and attachment state are **derived** (via
+`bio` + `thermo`, version-cached). This is why a primer cannot be modelled as
+a `Feature` (a labelled sub-range) — the tail has no position to occupy — and
+why editing away a primer's binding site **detaches** it (`binding = None`)
+rather than deleting the reagent. Full contract + the implemented-model
+consistency notes: [`../plans/primers.md`](../plans/primers.md) and ROADMAP
+decision 14.
 
 ## Edit operations: primitive (`core`) vs composed (command layer)
 

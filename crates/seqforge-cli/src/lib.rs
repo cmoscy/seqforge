@@ -96,6 +96,24 @@ pub fn run_orfs(
     Ok(())
 }
 
+/// Melting temperature + GC of an oligo — a pure, local derivation (no running
+/// GUI, no file). Reaches the vendored seqfold engine through `seqforge-bio`'s
+/// thin `tm`/`gc` surface (`bio → thermo`; `core` never sees thermo). Tm is the
+/// nearest-neighbour model (SantaLucia NN + Owczarzy-2008 salt), in °C.
+pub fn run_tm(oligo: &str) -> anyhow::Result<()> {
+    let tm = seqforge_bio::tm(oligo)
+        .map_err(|e| anyhow::anyhow!("cannot compute Tm for {oligo:?}: {}", e.0))?;
+    let out = serde_json::json!({
+        "kind": "oligo_tm",
+        "oligo": oligo.to_uppercase(),
+        "length": oligo.len(),
+        "tm": tm,
+        "gc": seqforge_bio::gc(oligo),
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 // ── Viewer command socket dispatch ────────────────────────────────────────────
 
 /// Send a `ViewerRequest` to a running SeqForge GUI via the Unix domain socket

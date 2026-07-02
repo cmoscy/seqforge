@@ -3568,6 +3568,7 @@ dependencies = [
  "gb-io",
  "seqforge-core",
  "seqforge-restriction",
+ "seqforge-thermo",
  "serde_json",
  "thiserror 2.0.18",
 ]
@@ -3595,6 +3596,10 @@ dependencies = [
 
 [[package]]
 name = "seqforge-restriction"
+version = "0.1.0"
+
+[[package]]
+name = "seqforge-thermo"
 version = "0.1.0"
 
 [[package]]

@@ -59,6 +59,11 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         frame: usize,
     },
+    /// Melting temperature + GC of an oligo (nearest-neighbour; no GUI needed).
+    Tm {
+        /// The oligo sequence, 5'→3' (e.g. `GGGACCGCCT`).
+        oligo: String,
+    },
     /// Find open reading frames in a sequence file (no GUI needed).
     Orfs {
         input: PathBuf,
@@ -94,6 +99,7 @@ fn main() -> anyhow::Result<()> {
             strand,
             frame,
         } => seqforge_cli::run_translate(&input, start, end, &strand, frame),
+        Cmd::Tm { oligo } => seqforge_cli::run_tm(&oligo),
         Cmd::Orfs {
             input,
             min_aa,
