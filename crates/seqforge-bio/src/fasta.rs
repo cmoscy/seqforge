@@ -38,6 +38,7 @@ pub fn load(path: &Path) -> Result<Document, BioError> {
         sequence,
         topology: Topology::Linear,
         features: Vec::new(),
+        primers: Vec::new(),
         source_path: Some(path.to_owned()),
     })
 }

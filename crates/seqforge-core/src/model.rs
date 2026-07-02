@@ -179,14 +179,26 @@ impl Annotations {
     /// each** (incoming ids, e.g. the `#[serde(skip)]` placeholder, are ignored).
     /// This is the mint-on-load path; ids live only for this process.
     pub fn new(features: Vec<Feature>) -> Self {
+        Self::from_parts(features, Vec::new())
+    }
+
+    /// Build annotations from freshly-loaded features **and primers**, minting a
+    /// fresh id for each (incoming ids ignored — the mint-on-load path). This is
+    /// the GenBank load entry point once `primer_bind` round-trip lands
+    /// (Phase 0.3); `new` is the features-only convenience.
+    pub fn from_parts(features: Vec<Feature>, primers: Vec<Primer>) -> Self {
         let mut ann = Self {
             features: Vec::with_capacity(features.len()),
-            next_id: 0,
+            primers: Vec::with_capacity(primers.len()),
             ..Default::default()
         };
         for mut f in features {
             f.id = ann.mint();
             ann.features.push(f);
+        }
+        for mut p in primers {
+            p.id = ann.mint_primer();
+            ann.primers.push(p);
         }
         ann
     }

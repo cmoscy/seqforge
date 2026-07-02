@@ -3,10 +3,11 @@
 > **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
 > sourcing, and consistency-with-the-implemented-model all worked out (see
 > "Decisions locked" and "Consistency with the implemented model" below). Phase
-> 0.1 (thermo + `seqforge tm`), 0.5 (live selection Tm/%GC readout), and 0.2
-> (`core`: `Primer` + `PrimerId` + `Annotations.primers` + shift handler) are
-> **done**; next concrete step is Phase 0.3 (GenBank `primer_bind` ↔ `Primer`
-> round-trip). Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
+> 0.1 (thermo + `seqforge tm`), 0.5 (live selection Tm/%GC readout), 0.2
+> (`core` `Primer` model + shift handler), and 0.3 (GenBank `primer_bind` ↔
+> `Primer` round-trip) are **done**; next concrete step is Phase 0.4 (`app`:
+> `PrimerTrack` directional-arrow render). Canonical cross-track status:
+> [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -314,8 +315,12 @@ Each item cites the code it must stay consistent with.
       Forward, `binding.start` for Reverse — else clamps like the feature
       straddle; history byte-budget counts primers; `GoTo`/`clear_selection`
       clear `selected_primer`.)*
-- [ ] 0.3 `bio`: GenBank `primer_bind` ↔ `Primer` round-trip (lossless via
+- [x] 0.3 `bio`: GenBank `primer_bind` ↔ `Primer` round-trip (lossless via
       `/seqforge_primer` note); route `primer_bind` → `primers` (parser + writer).
+      *(parser diverts `primer_bind`→`Primer` — full oligo/tail from the note, or
+      best-effort from the template on foreign import; writer emits from `primers`
+      only + a `/label` fallback for authored names; `Document.primers` +
+      `Annotations::from_parts`; `seqforge info` now reports the primer count.)*
 - [ ] 0.4 `app`: `PrimerTrack` — directional arrow track (annealed on-grid, tail
       lift-off, `Hit::Primer(id)`, read-only). `seqforge info` reports primer count.
 - [x] 0.5 **Live selection Tm/%GC/length status readout** (no primer object) —

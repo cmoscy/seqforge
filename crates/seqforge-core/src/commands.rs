@@ -670,6 +670,7 @@ mod tests {
                 sequence: b"ATGCATGC".to_vec(),
                 topology: crate::Topology::Linear,
                 features: vec![],
+                primers: vec![],
                 source_path: None,
             })
         }

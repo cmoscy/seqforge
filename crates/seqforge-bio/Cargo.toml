@@ -10,4 +10,5 @@ seqforge-thermo = { path = "../seqforge-thermo" }
 thiserror = { workspace = true }
 gb-io = { workspace = true }
 bio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }

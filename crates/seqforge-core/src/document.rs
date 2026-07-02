@@ -205,6 +205,11 @@ pub struct Document {
     pub sequence: Vec<u8>,
     pub topology: Topology,
     pub features: Vec<Feature>,
+    /// Authored primers parsed from the source (GenBank `primer_bind`; decision
+    /// 14). Empty for formats that carry none (FASTA). `#[serde(default)]` keeps
+    /// older serialized `Document`s loadable.
+    #[serde(default)]
+    pub primers: Vec<Primer>,
     pub source_path: Option<PathBuf>,
 }
 

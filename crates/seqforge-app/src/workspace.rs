@@ -148,7 +148,7 @@ impl BufferStore {
         );
         // Snapshot the on-disk bytes for the external-change guard (§Phase 15).
         buffer.loaded_hash = hash_file_bytes(path);
-        let annotations = Annotations::new(doc.features);
+        let annotations = Annotations::from_parts(doc.features, doc.primers);
 
         let id = self.alloc_id();
         self.buffers.insert(id, Arc::new(RwLock::new(buffer)));
@@ -175,7 +175,8 @@ impl BufferStore {
             buf.version += 1;
             buf.loaded_hash = hash_file_bytes(path);
         }
-        self.annotations.insert(id, Annotations::new(doc.features));
+        self.annotations
+            .insert(id, Annotations::from_parts(doc.features, doc.primers));
         self.histories.remove(&id);
         Ok(())
     }

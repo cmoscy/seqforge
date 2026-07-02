@@ -3,7 +3,7 @@
 //! qualifiers and provenance.
 
 use seqforge_bio::{load, save};
-use seqforge_core::{Annotations, Buffer, Document, Feature, Provenance, Strand, Topology};
+use seqforge_core::{Annotations, Buffer, Document, Feature, Primer, Provenance, Strand, Topology};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -42,7 +42,7 @@ impl Drop for TempOut {
 
 fn shell(doc: Document) -> (Buffer, Annotations) {
     let buf = Buffer::new(doc.name, doc.source_path, doc.sequence, doc.topology);
-    (buf, Annotations::new(doc.features))
+    (buf, Annotations::from_parts(doc.features, doc.primers))
 }
 
 fn assert_features_eq(a: &[Feature], b: &[Feature]) {
@@ -133,4 +133,126 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
     );
     assert_eq!(reloaded.qualifiers.get("pseudo"), Some(&None));
     assert_eq!(reloaded.strand, Strand::Reverse);
+}
+
+// ── Primer round-trip (Phase 0.3: primer_bind ↔ Primer) ─────────────────────────
+
+fn assert_primers_eq(a: &[Primer], b: &[Primer]) {
+    assert_eq!(a.len(), b.len(), "primer count differs");
+    for (x, y) in a.iter().zip(b) {
+        assert_eq!(x.binding, y.binding, "binding");
+        assert_eq!(x.strand, y.strand, "strand");
+        assert_eq!(x.sequence, y.sequence, "sequence");
+        assert_eq!(x.name, y.name, "name");
+        assert_eq!(x.qualifiers, y.qualifiers, "qualifiers");
+    }
+}
+
+#[test]
+fn puc19_primer_binds_load_as_primers_not_features() {
+    let doc = load(&fixture("pUC19.gbk")).expect("load pUC19");
+    assert!(
+        !doc.primers.is_empty(),
+        "pUC19's primer_bind records should become primers"
+    );
+    // The diversion is total: no feature keeps the primer_bind kind.
+    assert!(
+        doc.features.iter().all(|f| f.raw_kind != "primer_bind"),
+        "primer_bind must not remain a Feature"
+    );
+    // Each primer carries a footprint and a directional strand.
+    for p in &doc.primers {
+        assert!(p.binding.is_some(), "loaded primer should be attached");
+        assert!(matches!(p.strand, Strand::Forward | Strand::Reverse));
+        assert!(
+            !p.sequence.is_empty(),
+            "best-effort oligo should be derived"
+        );
+    }
+}
+
+#[test]
+fn roundtrip_puc19_preserves_primers() {
+    let doc1 = load(&fixture("pUC19.gbk")).expect("load pUC19");
+    let (buf, ann) = shell(doc1);
+    let out = TempOut::new("pUC19", "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+
+    let doc2 = load(out.path()).expect("reload gb");
+    assert_eq!(buf.text, doc2.sequence, "sequence changed on round-trip");
+    assert_primers_eq(&ann.primers().cloned().collect::<Vec<_>>(), &doc2.primers);
+    // Primers are emitted from `primers` only — no primer_bind leaked into features.
+    assert!(doc2.features.iter().all(|f| f.raw_kind != "primer_bind"));
+}
+
+#[test]
+fn authored_primer_with_five_prime_tail_round_trips_losslessly() {
+    // The 5' tail ("GGGGG") has no template counterpart, so it survives only via
+    // the /seqforge_primer note — the reason a primer can't be a Feature.
+    let buf = Buffer::new(
+        "tail_test".into(),
+        None,
+        b"AAAACGTACGTAAAA".to_vec(),
+        Topology::Linear,
+    );
+    let mut ann = Annotations::new(vec![]);
+    ann.add_primer(Primer {
+        id: Default::default(),
+        name: "tailed_fwd".into(),
+        sequence: "GGGGGCGTACGT".into(), // tail + footprint
+        binding: Some(4..10),
+        strand: Strand::Forward,
+        qualifiers: std::collections::BTreeMap::new(),
+    });
+
+    let out = TempOut::new("tail", "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+    let doc2 = load(out.path()).expect("reload gb");
+
+    assert_eq!(doc2.primers.len(), 1);
+    let p = &doc2.primers[0];
+    assert_eq!(p.sequence, "GGGGGCGTACGT", "5' tail must survive verbatim");
+    assert_eq!(p.binding, Some(4..10));
+    assert_eq!(p.strand, Strand::Forward);
+    assert_eq!(p.name, "tailed_fwd");
+}
+
+#[test]
+fn detached_primer_is_skipped_on_write() {
+    // A detached primer (binding = None) has no primer_bind location to write; it
+    // is skipped rather than crashing. Attached primers still round-trip.
+    let buf = Buffer::new(
+        "det".into(),
+        None,
+        b"ACGTACGTACGT".to_vec(),
+        Topology::Linear,
+    );
+    let mut ann = Annotations::new(vec![]);
+    ann.add_primer(Primer {
+        id: Default::default(),
+        name: "floating".into(),
+        sequence: "TTTTTT".into(),
+        binding: None,
+        strand: Strand::Forward,
+        qualifiers: std::collections::BTreeMap::new(),
+    });
+    ann.add_primer(Primer {
+        id: Default::default(),
+        name: "attached".into(),
+        sequence: "ACGT".into(),
+        binding: Some(0..4),
+        strand: Strand::Forward,
+        qualifiers: std::collections::BTreeMap::new(),
+    });
+
+    let out = TempOut::new("detached", "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+    let doc2 = load(out.path()).expect("reload gb");
+
+    assert_eq!(
+        doc2.primers.len(),
+        1,
+        "only the attached primer is written back"
+    );
+    assert_eq!(doc2.primers[0].name, "attached");
 }

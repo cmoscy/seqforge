@@ -19,6 +19,7 @@ pub fn run_info(path: &Path) -> anyhow::Result<()> {
         "length": doc.len(),
         "topology": format!("{:?}", doc.topology).to_lowercase(),
         "features": doc.features.len(),
+        "primers": doc.primers.len(),
         "path": path,
     });
     println!("{}", serde_json::to_string_pretty(&info)?);
