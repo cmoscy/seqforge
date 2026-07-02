@@ -77,10 +77,13 @@ Translation (global frame lanes) · Features (bars + per-CDS AA sub-row).
 
 Each phase independently shippable; `build`/`test`/`clippy`/`fmt` green before the next.
 
-- [ ] **T0 — Docs (this doc + ROADMAP row + architecture note).** No code.
-- [ ] **T1 — Geometry + `Hit` unification (no trait).** One place for coordinate/block
-  helpers (reuse `screen_to_seq`, `y_to_block`, `annot_bar_rect`); collapse the five hit
-  vecs into a single `Vec<(Rect, Hit)>` + one priority resolver. Behaviour identical.
+- [x] **T0 — Docs (this doc + ROADMAP row + architecture note).** *(Done, `8e7db77`.)*
+- [x] **T1 — Geometry + `Hit` unification (no trait).** *(Done, `294755d`.)* Collapsed the
+  five parallel hit vecs (`annot`/`search`/`cut`/`orf`/`aa`) in `viewer.rs::show()` into a
+  single `Vec<(Rect, Hit)>` + a `find_hit(hits, pos, extract)` resolver queried by variant
+  in priority order (feature → search → cut → codon → seqpos). `Hit::Feature` still carries
+  the within-frame positional index (→ `FeatureId` at click time; a later phase may carry
+  the id directly). Behaviour identical; test `find_hit_resolves_by_variant_then_order`.
 - [ ] **T2 — `Track` trait + `TrackStack`.** Split `viewer.rs` → `viewer/` submodules.
   Migrate position-owned tracks: Ruler, CutSites (labels + staples), Translation (frame
   lanes; reuse `build_translation_cache` + the codon-aligned painter). Sequence +
