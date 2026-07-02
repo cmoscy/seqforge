@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CutSite, Feature, FeatureId, SearchHit, Selection, Topology};
+use crate::{CutSite, Feature, FeatureId, Primer, PrimerId, SearchHit, Selection, Topology};
 
 // ── Id newtypes ──────────────────────────────────────────────────────────────
 //
@@ -159,6 +159,19 @@ pub struct Annotations {
     /// on load (`new` reassigns every feature), so GenBank/FASTA stay positional.
     #[serde(skip)]
     next_id: u64,
+    /// Authored primers on this buffer (ROADMAP decision 14). Same id-only
+    /// discipline as `features` — the backing `Vec` is `pub(crate)` and the
+    /// public surface is id-addressed (`add_primer` / `primer` / `primer_mut` /
+    /// `remove_primer` / `rename_primer` / ordered `primers`). Empty by default;
+    /// GenBank `primer_bind` round-trip populates it (Phase 0.3). Within `core`,
+    /// the primer-specific shift handler (`mutations::shift_primers`) does bulk
+    /// positional work over the `Vec`.
+    #[serde(default)]
+    pub(crate) primers: Vec<Primer>,
+    /// Monotonic id source for primers, session-scoped and **separate** from
+    /// `next_id` — `PrimerId` is a distinct newtype from `FeatureId`.
+    #[serde(skip)]
+    next_primer_id: u64,
 }
 
 impl Annotations {
@@ -169,6 +182,7 @@ impl Annotations {
         let mut ann = Self {
             features: Vec::with_capacity(features.len()),
             next_id: 0,
+            ..Default::default()
         };
         for mut f in features {
             f.id = ann.mint();
@@ -246,6 +260,72 @@ impl Annotations {
             None => false,
         }
     }
+
+    // ── Primers (id-only API, mirroring features; ROADMAP decision 14) ──────────
+
+    /// Mint the next session-scoped [`PrimerId`]. Separate counter from features;
+    /// ids start at 1, so `PrimerId(0)` (the `#[serde(skip)]` default) is always
+    /// an unminted placeholder.
+    fn mint_primer(&mut self) -> PrimerId {
+        self.next_primer_id += 1;
+        PrimerId(self.next_primer_id)
+    }
+
+    pub fn primers_len(&self) -> usize {
+        self.primers.len()
+    }
+
+    pub fn primers_is_empty(&self) -> bool {
+        self.primers.is_empty()
+    }
+
+    /// Ordered iteration over primers (definition order). As with [`Self::iter`],
+    /// callers may `enumerate()` for within-frame work but must never store the
+    /// index — use the [`PrimerId`].
+    pub fn primers(&self) -> impl Iterator<Item = &Primer> {
+        self.primers.iter()
+    }
+
+    /// Look up a primer by id (linear scan). `None` if it was removed.
+    pub fn primer(&self, id: PrimerId) -> Option<&Primer> {
+        self.primers.iter().find(|p| p.id == id)
+    }
+
+    /// Mutable lookup by id (linear scan).
+    pub fn primer_mut(&mut self, id: PrimerId) -> Option<&mut Primer> {
+        self.primers.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Add a primer, minting and assigning its id (any incoming `primer.id` is
+    /// overwritten). Returns the new id.
+    pub fn add_primer(&mut self, mut primer: Primer) -> PrimerId {
+        let id = self.mint_primer();
+        primer.id = id;
+        self.primers.push(primer);
+        id
+    }
+
+    /// Remove the primer with `id`. Returns `true` if one was removed.
+    pub fn remove_primer(&mut self, id: PrimerId) -> bool {
+        match self.primers.iter().position(|p| p.id == id) {
+            Some(pos) => {
+                self.primers.remove(pos);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Rename the primer with `id`. Returns `true` if one was found.
+    pub fn rename_primer(&mut self, id: PrimerId, name: String) -> bool {
+        match self.primer_mut(id) {
+            Some(p) => {
+                p.name = name;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 // ── ViewKind ─────────────────────────────────────────────────────────────────
@@ -292,6 +372,9 @@ pub struct View {
     /// Was a positional `usize` — which dangled after any edit that shifted or
     /// removed features. An id is resolved to a position fresh each frame.
     pub selected_feature: Option<FeatureId>,
+    /// The currently selected primer, by stable id (ROADMAP decision 12/14).
+    /// Mirrors `selected_feature`; resolved to a position fresh each frame.
+    pub selected_primer: Option<PrimerId>,
     /// Last persisted scroll offset, restored on tab switch / app restart.
     pub scroll_pos: Option<f32>,
     /// One-shot scroll request, consumed by the viewer each frame.
@@ -317,6 +400,7 @@ impl View {
             kind,
             selection: None,
             selected_feature: None,
+            selected_primer: None,
             scroll_pos: None,
             scroll_to: None,
             search_hits: Vec::new(),
@@ -331,6 +415,7 @@ impl View {
     pub fn clear_selection(&mut self) {
         self.selection = None;
         self.selected_feature = None;
+        self.selected_primer = None;
     }
 
     /// Drop all derived results. Called when the underlying buffer changes
@@ -438,5 +523,77 @@ mod tests {
         // Operating on a stale id is a no-op, not a panic.
         assert!(!ann.rename(id, "ghost".into()));
         assert!(!ann.remove(id));
+    }
+
+    // ── Primer id-API (mirrors features; decision 14) ───────────────────────────
+
+    fn primer(name: &str) -> Primer {
+        Primer {
+            id: Default::default(),
+            name: name.into(),
+            sequence: "ACGTACGT".into(),
+            binding: Some(0..8),
+            strand: crate::Strand::Forward,
+            qualifiers: Default::default(),
+        }
+    }
+
+    #[test]
+    fn annotations_default_has_no_primers() {
+        let ann = Annotations::default();
+        assert!(ann.primers_is_empty());
+        assert_eq!(ann.primers_len(), 0);
+    }
+
+    #[test]
+    fn primer_id_api_add_get_remove_rename() {
+        let mut ann = Annotations::new(vec![]);
+        let id = ann.add_primer(primer("fwd"));
+        assert_eq!(ann.primer(id).unwrap().name, "fwd");
+        assert_eq!(ann.primers_len(), 1);
+
+        // Mutable access through the id.
+        ann.primer_mut(id).unwrap().binding = None;
+        assert!(ann.primer(id).unwrap().binding.is_none());
+
+        // Ids are never reused: removing then adding mints a fresh id.
+        assert!(ann.remove_primer(id));
+        assert!(ann.primer(id).is_none());
+        let id2 = ann.add_primer(primer("rev"));
+        assert_ne!(id, id2);
+
+        assert!(ann.rename_primer(id2, "renamed".into()));
+        assert_eq!(ann.primer(id2).unwrap().name, "renamed");
+        // Operating on a stale id is a no-op, not a panic.
+        assert!(!ann.rename_primer(id, "ghost".into()));
+        assert!(!ann.remove_primer(id));
+    }
+
+    #[test]
+    fn primer_ids_are_separate_from_feature_ids() {
+        // Distinct counters: a fresh Annotations mints PrimerId(1) even after
+        // features exist, so the two id spaces never collide by construction.
+        let mut ann = Annotations::new(vec![feat("f1"), feat("f2")]);
+        let pid = ann.add_primer(primer("p"));
+        assert_eq!(pid, PrimerId(1));
+        assert_eq!(ann.iter().next().unwrap().id, FeatureId(1));
+    }
+
+    #[test]
+    fn primers_iterate_in_insertion_order() {
+        let mut ann = Annotations::new(vec![]);
+        ann.add_primer(primer("a"));
+        ann.add_primer(primer("b"));
+        ann.add_primer(primer("c"));
+        let names: Vec<_> = ann.primers().map(|p| p.name.clone()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn view_clear_selection_drops_primer_too() {
+        let mut v = View::new(ViewId(1), BufferId(1), ViewKind::TextView);
+        v.selected_primer = Some(PrimerId(1));
+        v.clear_selection();
+        assert!(v.selected_primer.is_none());
     }
 }

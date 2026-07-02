@@ -537,6 +537,7 @@ pub fn dispatch<B: BioOps>(
             view.scroll_to = Some(idx);
             view.selection = Some(Selection::cursor(idx));
             view.selected_feature = None;
+            view.selected_primer = None;
             Ok(ViewerResponse::Navigated { position })
         }
 

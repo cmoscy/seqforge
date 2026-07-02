@@ -108,6 +108,34 @@ impl std::str::FromStr for FeatureId {
     }
 }
 
+/// Session-scoped stable handle for a [`Primer`].
+///
+/// A distinct newtype from [`FeatureId`] — primers and features are separate
+/// collections with separate id counters — but the id-at-rest rule is identical
+/// (ROADMAP decision 12/14): minted by [`crate::Annotations`], **never
+/// persisted** (`Primer.id` is `#[serde(skip)]`), re-minted on load. GenBank
+/// (`primer_bind`) and FASTA therefore stay positional; ids live only for the
+/// life of the process.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
+pub struct PrimerId(pub u64);
+
+impl std::fmt::Display for PrimerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Parse a bare numeric id (`"42"`), for clap's `--id` flag and JSON-number
+/// socket clients.
+impl std::str::FromStr for PrimerId {
+    type Err = std::num::ParseIntError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>().map(PrimerId)
+    }
+}
+
 /// Lineage of a feature across edits / cloning operations. Round-trips
 /// through GenBank as a single JSON-valued `/seqforge_provenance` qualifier
 /// so it survives save/reload without committing to any cloning shape now.
@@ -133,6 +161,42 @@ pub struct Feature {
     /// `None` value encodes a flag-style qualifier (`/pseudo`, `/partial`).
     pub qualifiers: BTreeMap<String, Option<String>>,
     pub provenance: Option<Provenance>,
+}
+
+/// An **authored oligo attached relationally** to the template (ROADMAP
+/// decision 14; full contract in `plans/primers.md`). Unlike a [`Feature`] — a
+/// labelled sub-range — a primer is an independent reagent: its `sequence` may
+/// include a 5' tail with **no** template counterpart, so it cannot be modelled
+/// as a positional annotation. Authored (persisted) here; its annealed/tail/
+/// mismatch decomposition, Tm/GC/QC, and attachment state are **derived**
+/// (decision 8 governs template *projections*, not authored annotations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Primer {
+    /// Session-scoped handle. Never persisted (`#[serde(skip)]`); re-minted
+    /// by [`crate::Annotations`] on load. See [`PrimerId`].
+    #[serde(skip)]
+    pub id: PrimerId,
+    pub name: String,
+    /// Full oligo 5'→3', tail included. AUTHORED — the intrinsic identity of
+    /// the reagent; may contain bases that appear nowhere in the template (a 5'
+    /// tail). A reverse primer's bases are the revcomp of the top strand at
+    /// `binding`.
+    pub sequence: String,
+    /// Last-known annealing footprint on the top strand, AUTHORED relational
+    /// state (like a `Feature.range`) — but the load-bearing anchor is the **3'
+    /// terminus** (where priming/extension begins), NOT the range length. Rides
+    /// a primer-specific shift handler that tracks edits and **never drops** the
+    /// primer: an edit destroying the 3' anchor sets `binding = None`
+    /// (`Detached`), it does not delete the reagent. `None` = a detached/floating
+    /// oligo. Matches a GenBank `primer_bind` location when present.
+    pub binding: Option<Range<usize>>,
+    /// Extension direction. `Forward` extends toward higher coordinates (3'
+    /// anchor at `binding.end`); `Reverse` toward lower (3' anchor at
+    /// `binding.start`).
+    pub strand: Strand,
+    /// Preserve extra GenBank notes; `None` value encodes a flag-style
+    /// qualifier. Mirrors [`Feature::qualifiers`].
+    pub qualifiers: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

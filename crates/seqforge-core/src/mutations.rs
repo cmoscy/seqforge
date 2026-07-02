@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 
-use crate::{Annotations, Buffer};
+use crate::{Annotations, Buffer, Strand};
 
 /// Replace `buf.text[range]` with `new_bytes`, shift features per the §2
 /// policy, bump `version`, and mark the buffer dirty.
@@ -46,6 +46,7 @@ pub fn apply_splice(
     buf.text.splice(range, new_bytes.iter().copied());
 
     shift_features(ann, start, removed, inserted);
+    shift_primers(ann, start, removed, inserted);
 
     buf.version += 1;
     buf.dirty = true;
@@ -126,10 +127,73 @@ fn shift_features(ann: &mut Annotations, start: usize, removed: usize, inserted:
     });
 }
 
+/// Apply the **primer**-specific shift policy for a splice (ROADMAP decision 14;
+/// consistency note #1 in `plans/primers.md`).
+///
+/// Shares the offset math with [`shift_features`] but with one load-bearing
+/// difference: a primer is a *reagent*, not a sub-range, so it is **never
+/// dropped**. When an edit destroys the primer's **3' terminus** — the anchor
+/// where priming/extension begins — the primer *detaches* (`binding = None`, the
+/// `Detached` state) but the reagent survives. The 3' terminus is `binding.end`
+/// for a `Forward` primer and `binding.start` for a `Reverse` one; an insertion
+/// (empty removed region) can never destroy it.
+fn shift_primers(ann: &mut Annotations, start: usize, removed: usize, inserted: usize) {
+    let end = start + removed; // end of the removed region
+    let delta = inserted as isize - removed as isize;
+
+    for p in &mut ann.primers {
+        let (bs, be) = match &p.binding {
+            Some(r) => (r.start, r.end),
+            None => continue, // already detached — nothing to track
+        };
+
+        // Fully left of the edit — untouched.
+        if be <= start {
+            continue;
+        }
+
+        // Fully right of the removed region — shift both ends by delta.
+        if bs >= end {
+            p.binding = Some((bs as isize + delta) as usize..(be as isize + delta) as usize);
+            continue;
+        }
+
+        // From here the footprint overlaps the removed region `[start, end)`.
+        // Detach if the 3' anchor base was removed; the removed indices are
+        // `[start, end)`.
+        let anchor_destroyed = match p.strand {
+            // 3' base at index be-1; removed iff be-1 ∈ [start, end).
+            Strand::Forward => start < be && be <= end,
+            // 3' base at index bs; removed iff bs ∈ [start, end).
+            Strand::Reverse => start <= bs && bs < end,
+            // A directionless primer is unusual; treat any overlap with the
+            // removed region conservatively as a detach (either terminus may be
+            // load-bearing).
+            Strand::Both | Strand::None => true,
+        };
+        if anchor_destroyed {
+            p.binding = None; // Detached — but the primer is kept.
+            continue;
+        }
+
+        // Anchor survived: clamp the overlap to the edit point, shifting whatever
+        // lies at/after `end` by delta (mirrors the `shift_features` straddle).
+        let new_start = bs.min(start);
+        let new_end = if be > end {
+            (be as isize + delta) as usize
+        } else {
+            start
+        };
+        // The surviving-anchor cases never collapse (the anchor lies outside the
+        // removed region), but guard defensively: a collapse detaches, never drops.
+        p.binding = (new_end > new_start).then_some(new_start..new_end);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Feature, Strand, Topology};
+    use crate::{Feature, Primer, Strand, Topology};
     use std::collections::BTreeMap;
 
     fn buf(len: usize) -> Buffer {
@@ -150,6 +214,29 @@ mod tests {
 
     fn ann(features: Vec<Feature>) -> Annotations {
         Annotations::new(features)
+    }
+
+    fn primer(binding: Option<Range<usize>>, strand: Strand) -> Primer {
+        Primer {
+            id: Default::default(),
+            name: "p".into(),
+            sequence: "ACGT".into(),
+            binding,
+            strand,
+            qualifiers: BTreeMap::new(),
+        }
+    }
+
+    /// One-primer annotations for shift tests.
+    fn ann_primer(binding: Option<Range<usize>>, strand: Strand) -> Annotations {
+        let mut a = Annotations::new(vec![]);
+        a.add_primer(primer(binding, strand));
+        a
+    }
+
+    /// The (only) primer's current binding.
+    fn binding0(a: &Annotations) -> Option<Range<usize>> {
+        a.primers().next().unwrap().binding.clone()
     }
 
     // ── version / dirty ───────────────────────────────────────────────────────
@@ -282,5 +369,119 @@ mod tests {
         let mut a = ann(vec![feat(6, 9)]);
         apply_replace(&mut b, &mut a, 2, 5, b"C");
         assert_eq!(a.features[0].range, 4..7);
+    }
+
+    // ── primer shift policy (decision 14 / consistency #1) ──────────────────────
+    //
+    // Load-bearing difference from features: a primer is NEVER dropped. An edit
+    // destroying its 3' anchor detaches it (binding = None); everything else
+    // tracks position. 3' anchor = binding.end for Forward, binding.start for
+    // Reverse.
+
+    #[test]
+    fn primer_insert_left_shifts_right() {
+        // Forward [4,8); insert 2 at pos 1 → fully right of edit → [6,10).
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(4..8), Strand::Forward);
+        apply_insert(&mut b, &mut a, 1, b"CC");
+        assert_eq!(binding0(&a), Some(6..10));
+    }
+
+    #[test]
+    fn primer_delete_right_untouched() {
+        // Forward [2,5); delete [7,9) → left of edit → untouched.
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(2..5), Strand::Forward);
+        apply_delete(&mut b, &mut a, 7, 9);
+        assert_eq!(binding0(&a), Some(2..5));
+    }
+
+    #[test]
+    fn primer_forward_delete_of_three_prime_anchor_detaches_but_keeps() {
+        // Forward [4,8); 3' anchor at index 7. delete [7,9) removes it → detach.
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(4..8), Strand::Forward);
+        apply_delete(&mut b, &mut a, 7, 9);
+        assert_eq!(binding0(&a), None, "3' anchor destroyed → Detached");
+        assert_eq!(a.primers_len(), 1, "the reagent is never dropped");
+    }
+
+    #[test]
+    fn primer_forward_delete_of_five_prime_keeps_anchor_attached() {
+        // Forward [4,8); 3' anchor at index 7. delete [2,6) cuts the 5' side but
+        // spares the anchor → stays attached, footprint clamped/shifted to [2,4)
+        // (the surviving anchor base, was idx 7, is now idx 3 ∈ [2,4)).
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(4..8), Strand::Forward);
+        apply_delete(&mut b, &mut a, 2, 6);
+        assert_eq!(binding0(&a), Some(2..4));
+    }
+
+    #[test]
+    fn primer_reverse_delete_of_three_prime_anchor_detaches() {
+        // Reverse [4,8); 3' anchor at index 4 (start). delete [4,6) removes it.
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(4..8), Strand::Reverse);
+        apply_delete(&mut b, &mut a, 4, 6);
+        assert_eq!(binding0(&a), None);
+        assert_eq!(a.primers_len(), 1);
+    }
+
+    #[test]
+    fn primer_reverse_delete_of_high_end_keeps_anchor_attached() {
+        // Reverse [4,8); 3' anchor at index 4. delete [6,8) trims the far (5') end
+        // but spares the anchor → stays attached, [4,6).
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(4..8), Strand::Reverse);
+        apply_delete(&mut b, &mut a, 6, 8);
+        assert_eq!(binding0(&a), Some(4..6));
+    }
+
+    #[test]
+    fn primer_delete_fully_inside_detaches_either_strand() {
+        // Footprint entirely within the removed region → both termini gone.
+        for strand in [Strand::Forward, Strand::Reverse] {
+            let mut b = buf(12);
+            let mut a = ann_primer(Some(4..8), strand);
+            apply_delete(&mut b, &mut a, 2, 10);
+            assert_eq!(binding0(&a), None, "{strand:?}");
+            assert_eq!(a.primers_len(), 1, "{strand:?}");
+        }
+    }
+
+    #[test]
+    fn primer_insertion_never_detaches() {
+        // An insertion (empty removed region) can't destroy an anchor, whatever
+        // the strand or position — the primer stays attached.
+        for strand in [Strand::Forward, Strand::Reverse] {
+            for pos in [0, 4, 6, 8, 10] {
+                let mut b = buf(10);
+                let mut a = ann_primer(Some(4..8), strand);
+                apply_insert(&mut b, &mut a, pos, b"CC");
+                assert!(
+                    binding0(&a).is_some(),
+                    "insert at {pos} on {strand:?} must not detach"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn primer_already_detached_stays_detached() {
+        // binding = None is left untouched by any edit.
+        let mut b = buf(10);
+        let mut a = ann_primer(None, Strand::Forward);
+        apply_delete(&mut b, &mut a, 2, 6);
+        assert_eq!(binding0(&a), None);
+        assert_eq!(a.primers_len(), 1);
+    }
+
+    #[test]
+    fn primer_replace_shifts_fully_right_footprint() {
+        // Forward [6,9); replace [2,4) (len 2) with 5 bases → delta +3 → [9,12).
+        let mut b = buf(10);
+        let mut a = ann_primer(Some(6..9), Strand::Forward);
+        apply_replace(&mut b, &mut a, 2, 4, b"CCCCC");
+        assert_eq!(binding0(&a), Some(9..12));
     }
 }

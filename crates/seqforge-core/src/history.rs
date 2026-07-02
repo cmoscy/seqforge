@@ -67,7 +67,8 @@ impl HistoryEntry {
 /// Rough heap estimate for an `Annotations` clone — enough for budgeting, not
 /// exact.
 fn annotations_size(ann: &Annotations) -> usize {
-    ann.features
+    let features: usize = ann
+        .features
         .iter()
         .map(|f| {
             let quals: usize = f
@@ -77,7 +78,23 @@ fn annotations_size(ann: &Annotations) -> usize {
                 .sum();
             64 + f.label.len() + f.raw_kind.len() + quals
         })
-        .sum()
+        .sum();
+    // Primers ride the same `Annotations` snapshot on undo (decision 14);
+    // count them too so the budget estimate doesn't undercount buffers with
+    // many primers. Benign if it drifts — this is an estimate, not exact.
+    let primers: usize = ann
+        .primers
+        .iter()
+        .map(|p| {
+            let quals: usize = p
+                .qualifiers
+                .iter()
+                .map(|(k, v)| k.len() + v.as_ref().map_or(0, String::len))
+                .sum();
+            64 + p.name.len() + p.sequence.len() + quals
+        })
+        .sum();
+    features + primers
 }
 
 /// Per-buffer undo/redo stacks. Shared across all views into a buffer.

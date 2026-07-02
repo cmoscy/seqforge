@@ -3,9 +3,10 @@
 > **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
 > sourcing, and consistency-with-the-implemented-model all worked out (see
 > "Decisions locked" and "Consistency with the implemented model" below). Phase
-> 0.1 (vendor seqfold → `seqforge-thermo` + `seqforge tm`) is **done**; next
-> concrete step is Phase 0.2 (`core`: `Primer` + `PrimerId` + `Annotations.primers`).
-> Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
+> 0.1 (thermo + `seqforge tm`), 0.5 (live selection Tm/%GC readout), and 0.2
+> (`core`: `Primer` + `PrimerId` + `Annotations.primers` + shift handler) are
+> **done**; next concrete step is Phase 0.3 (GenBank `primer_bind` ↔ `Primer`
+> round-trip). Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -306,15 +307,21 @@ Each item cites the code it must stay consistent with.
       *(seqfold v0.10.1; `pyo3` dropped, `rayon`→serial, `smallvec`→`Vec`; pure,
       zero-dep, `publish = false`. `bio` re-exports the thin `tm`/`gc` surface.)*
 - [x] 0.1 `seqforge tm <oligo>` CLI (pure, no doc) — first shippable slice.
-- [ ] 0.2 `core`: `Primer` + `PrimerId` + `Annotations.primers` id-API (serde,
+- [x] 0.2 `core`: `Primer` + `PrimerId` + `Annotations.primers` id-API (serde,
       empty default); **primer-specific binding-shift handler** (never drops;
       `Detached` on anchor loss); `View.selected_primer`.
+      *(`mutations::shift_primers` detaches on 3'-anchor loss — `binding.end` for
+      Forward, `binding.start` for Reverse — else clamps like the feature
+      straddle; history byte-budget counts primers; `GoTo`/`clear_selection`
+      clear `selected_primer`.)*
 - [ ] 0.3 `bio`: GenBank `primer_bind` ↔ `Primer` round-trip (lossless via
       `/seqforge_primer` note); route `primer_bind` → `primers` (parser + writer).
 - [ ] 0.4 `app`: `PrimerTrack` — directional arrow track (annealed on-grid, tail
       lift-off, `Hit::Primer(id)`, read-only). `seqforge info` reports primer count.
-- [ ] 0.5 **Live selection Tm/%GC/length status readout** (no primer object) —
-      ships/validates thermo early; shared by the dialog QC panel.
+- [x] 0.5 **Live selection Tm/%GC/length status readout** (no primer object) —
+      ships/validates thermo early; shared by the dialog QC panel. *(status bar:
+      `Tm … °C · … % GC`; NN Tm capped to oligo lengths ≤ 120 bp via the pure
+      `selection_qc` helper. Pulled forward ahead of 0.2/0.3.)*
 
 ### Phase 1 — Read-side interaction (no buffer mutation)
 - [ ] 1.1 `bio` annealing: seed-and-extend binding-site find (own `PrimerBinding`
