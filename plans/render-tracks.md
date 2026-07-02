@@ -1,6 +1,6 @@
 # SeqForge Render-Track Plan — sequence-viewer rendering abstraction
 
-> **Status: design of record; T0–T4 landed (core refactor complete), T5 optional.** Canonical cross-track
+> **Status: ✅ complete — T0–T4 landed; refactor closed (minimap reuse dropped).** Canonical cross-track
 > status lives in [`../ROADMAP.md`](../ROADMAP.md). This plan owns the design +
 > phase checkboxes for turning `viewer.rs`'s monolithic render into a block-aware
 > **Track** abstraction. It changes **rendering/interaction only** — the domain
@@ -129,8 +129,11 @@ Each phase independently shippable; `build`/`test`/`clippy`/`fmt` green before t
   *(`build_block_layouts` is kept as the compute fn but is no longer a per-frame monolith —
   it runs on cache miss only. Full per-block virtualization isn't possible: the prefix-sum
   offsets need every block's height for the scrollbar.)*
-- [ ] **T5 — (optional) minimap.** Evaluate reuse of track geometry; likely stays
-  separate (different projection). Note-only unless trivial.
+**Refactor complete at T4.** (A once-considered "T5 — minimap track reuse" was dropped:
+the minimap is a different projection — a circular plasmid ring / linear proportional bar,
+not block-wrapped tracks — and already has its own `(BufferId, version)`-keyed geometry
+cache. The only shared code is the `greedy_stack` helper it already calls; there is nothing
+useful to reuse. Future primers/thermo view surfaces are where the trait pays off.)
 
 ## Verification
 
