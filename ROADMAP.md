@@ -18,10 +18,24 @@ architecture contracts live under [`docs/`](docs/).
 
 | Milestone | Theme | State |
 |---|---|---|
-| **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (tag/verify outstanding) |
+| **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (no tag — see Tagging policy) |
 | **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ⏳ next |
 | **(parallel)** | Restriction cloning depth (digest → ligation → Golden Gate) | 🟡 Tier 1 done |
 | **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 📋 not started |
+
+### Tagging policy (pre-1.0)
+
+`0.x` **is** the pre-release space (semver: below `1.0.0` the API may break between
+minor versions), so a version tag here is a *milestone bookmark*, not a release
+claim. We only tag when the tag has a consumer:
+
+- **No retroactive `v0.1.0` tag.** Nothing external pins it, so a backdated tag
+  buys nothing. v0.1 is simply "done."
+- **Tag `v0.2.0` at Phase 16** — once the editor milestone is done *and* verified —
+  as a durable "editor-complete" reference (bisect anchor / known-good state).
+- The durable habit is **CHANGELOG discipline at milestone boundaries**, not the
+  tag itself. Real version discipline starts when `seqforge-restriction` is
+  extracted to crates.io (Restriction Tier 4).
 
 ---
 
@@ -31,7 +45,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 
 | Track | Plan | Status | Next concrete step |
 |---|---|---|---|
-| **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 (9 tag/verify left) | `v0.1.0` tag |
+| **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 | (complete — no retroactive tag, see Tagging policy) |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–14 done incl. 14e (feature Edit dialog + in-viewer translation/ORF view, decision 13); GUI walk pending | Phase 15 — dirty/save UX |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |

@@ -716,7 +716,28 @@ cancels a pending stage. 64 `seqforge-app` tests + clippy + fmt green.
 - [x] **ORF engine (`seqforge-bio`).** `find_orfs(seq, min_aa, met_to_stop, include_reverse) -> Vec<Orf>` (forward-coord range, strand, frame, aa length); pure + tested (Met→stop default; reverse-strand coords mapped to forward). `seqforge orfs <file> --min-aa --stop-to-stop --forward-only` local CLI command.
 - [x] **Translation band (viewer).** Per-view `TranslationDisplay { frames: [bool; 6], show_cds, show_orfs }` (transient). Block layout grows a **translation band between the bottom strand and the annotation bars**; one **codon-aligned AA lane renderer** memoized on `(version, display)` (`SequenceView.translation_cache`) serves **global frame lanes** and a merged **CDS lane** (each CDS in its `/codon_start` frame). AA centered on its codon's middle column; reverse-frame AAs map back to forward columns. Suppressed while staging. `View → Translation` submenu toggles frames / CDS / Show ORFs.
 - [x] **ORF emphasis + promote.** With *Show ORFs*, frame lanes colour stops (red) and starts (green) and wash the Met→stop runs. Right-click an ORF run → **Annotate as CDS feature** (reuses `AddFeature`) — the only place an ORF becomes a feature.
-- [~] Colours: stop/start/ORF-wash currently fixed RGB in `viewer.rs` (red/green/faint-green); promoting them into theme entries (mirroring `BaseColors`/`StrandColors`) is a small follow-up.
+#### 14e polish — presentation follow-ups *(in progress)*
+
+Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the functional
+14e work (both were deferred; neither changes the mutation/derivation paths):
+
+- [ ] **ORF colours → theme.** stop/start/ORF-wash are currently fixed RGB in
+  `viewer.rs` (red/green/faint-green). Promote into a `TranslationColors` theme
+  struct mirroring `BaseColors`/`StrandColors` (`#[serde(default)]`, `HexColor`
+  fields), added as `Theme.translation`; read via `cfg.theme.translation.*`.
+  *(Was the `[~]` follow-up above.)*
+- [ ] **Feature-CDS lane attaches to its feature.** Today all AA lanes (global
+  frame + feature-CDS) pool into one **band** between the bottom strand and the
+  annotation bars. Global frame lanes are DNA-derived and correctly hug the strand;
+  a feature-CDS lane is *feature*-derived and should sit with **its own feature
+  bar**. Relocate feature-CDS lanes out of the pooled band into per-feature stacked
+  rows (an extra AA sub-row directly beneath each translated CDS's bar in
+  `build_block_layouts`' greedy-stack pass); global frame lanes stay in the band.
+  **Rationale — proximity-to-source:** each derived track hugs the thing it's
+  derived from; this disambiguates which protein belongs to which feature on
+  feature-dense plasmids (the SnapGene idiom). Keep the `(version, display)`
+  memoization fingerprint intact; `cds_glyphs` reverse-strand mapping is reused
+  unchanged.
 
 **Done when:** ✅ (code; 202 workspace tests + clippy + fmt green) Toggle any of the 6 frames and see AA lanes under the sequence; a CDS shows its protein in-canvas; ORFs highlight and one can be annotated; double-click a feature and change type + range + strand (undoable); `seqforge orfs`/`update-feature` work from the CLI. *Interactive GUI walk (band layout / menu / double-click / right-click promote) pending manual confirmation.*
 
@@ -726,9 +747,16 @@ cancels a pending stage. 64 `seqforge-app` tests + clippy + fmt green.
 
 **Goal:** Editor feels safe.
 
+> **Scope:** taken in **one full pass** — core safety (dirty title, close/quit
+> confirm, menu `Cmd+S`) **plus** the external-change guard and Revert below. A
+> menu-level **`File → Quit  ⌘Q`** is added here too (today the File menu only
+> offers `Close ⌘W` for the active view); it routes through the same dirty-quit
+> intercept, never a direct exit.
+
 - [ ] Title bar `*name` when the active buffer is dirty.
-- [ ] `Overlay::DirtyCloseConfirm { view_id }` modal (`Save / Discard / Cancel`); wired to `AppCommand::CloseTab` and `on_close_event`.
+- [ ] `Overlay::DirtyCloseConfirm { view_id }` modal (`Save / Discard / Cancel`); wired to `AppCommand::CloseTab` and the window-close intercept (modern egui: `viewport().close_requested()` + `ViewportCommand::CancelClose`, replacing the old `on_close_event`).
 - [ ] `Cmd/Ctrl+S` accelerator registered at the menu level (fires regardless of focus).
+- [ ] `File → Quit  ⌘Q` — requests window close via `ViewportCommand::Close`, flowing through the same dirty-quit intercept (no direct `process::exit`; one quit path).
 - [ ] Toast on save success/failure (egui-notify, pull forward from Phase 8 polish if not already landed).
 - [ ] **Reset to file** (`File → Revert`): reloads from disk, discarding buffer + annotations + history and picking up external changes. Distinct from undo-all (which walks the in-session stack). Confirm dialog; enabled only when `source_path` is `Some`; routes through the single path (Open-onto-self).
 - [ ] **External-change guard:** store a content hash of the file as loaded (in memory on the buffer — no format involvement). On save, re-read disk and compare; if changed → GUI modal `Overwrite / Reload / Cancel`. For socket/CLI `Save`, return a structured **conflict** error unless `--force` (non-interactive override, so automation isn't blocked by a prompt). Doesn't impede the normal CLI/agent path — that mutates the in-memory buffer through the app, not the file on disk; the guard only fires on a genuine *external* change.
