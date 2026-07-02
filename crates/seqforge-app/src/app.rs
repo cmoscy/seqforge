@@ -30,6 +30,35 @@ pub(crate) const MAX_RECENT: usize = 10;
 /// rebuilt fresh each launch.
 const SESSION_KEY: &str = "seqforge_session_v1";
 
+/// Upper bound (bp) for showing a melting temperature on a selection. The
+/// nearest-neighbour Tm is a two-state *oligo* model (SantaLucia NN); beyond
+/// typical oligo lengths — long primers with 5' tails top out around here — the
+/// number stops being physically meaningful, so we show %GC alone. It also keeps
+/// the per-frame status-bar compute bounded on large selections.
+const MAX_SELECTION_TM_BP: usize = 120;
+
+/// QC for a selected nucleotide region, for the status-bar readout (Phase 0.5):
+/// `(%GC, Some(Tm °C))`. %GC is meaningful at any length; the nearest-neighbour
+/// Tm is shown only for oligo-length selections (`2..=MAX_SELECTION_TM_BP`),
+/// otherwise `None`. Returns `None` for an empty or non-UTF-8 region.
+///
+/// Reaches the vendored seqfold engine through `seqforge-bio`'s thin `tm`/`gc`
+/// surface (`bio → thermo`); the same computation backs the future primer
+/// dialog's QC panel. Pure — unit-tested below.
+fn selection_qc(region: &[u8]) -> Option<(f64, Option<f64>)> {
+    if region.is_empty() {
+        return None;
+    }
+    let region = std::str::from_utf8(region).ok()?;
+    let gc = seqforge_bio::gc(region);
+    let tm = if (2..=MAX_SELECTION_TM_BP).contains(&region.len()) {
+        seqforge_bio::tm(region).ok()
+    } else {
+        None
+    };
+    Some((gc, tm))
+}
+
 // ── AppBio ────────────────────────────────────────────────────────────────────
 
 struct AppBio;
@@ -1361,15 +1390,26 @@ impl eframe::App for SeqForgeApp {
                         );
                         Some((f.label.clone(), protein))
                     });
+                    // Tm/%GC of the selected region (Phase 0.5), derived — decision
+                    // 8. Feeds the top strand 5'→3' to the NN engine.
+                    let sel_qc = v.selection.filter(|s| !s.is_cursor()).and_then(|s| {
+                        let (a, b) = s.ordered();
+                        let end = b.min(buf.text.len());
+                        if a >= end {
+                            return None;
+                        }
+                        selection_qc(&buf.text[a..end])
+                    });
                     Some((
                         v.id,
                         buf.len(),
                         format!("{:?}", buf.topology),
                         v.selection,
                         cds,
+                        sel_qc,
                     ))
                 });
-                if let Some((view_id, seq_len, topology, selection, cds)) = info {
+                if let Some((view_id, seq_len, topology, selection, cds, sel_qc)) = info {
                     ui.label(format!("{seq_len} bp  ·  {topology}"));
                     if let Some(sel) = selection {
                         if sel.is_cursor() {
@@ -1378,6 +1418,15 @@ impl eframe::App for SeqForgeApp {
                             let (s, e) = sel.ordered();
                             ui.label(format!("sel {s}–{e}  ({} bp)", e - s));
                         }
+                    }
+                    // Live Tm/%GC of the selected region (Phase 0.5). Weak, like
+                    // the CDS protein below — derived, at-a-glance read-out.
+                    if let Some((gc, tm)) = sel_qc {
+                        let text = match tm {
+                            Some(tm) => format!("Tm {tm:.1} °C  ·  {gc:.1}% GC"),
+                            None => format!("{gc:.1}% GC"),
+                        };
+                        ui.label(egui::RichText::new(text).weak());
                     }
                     // Read-only CDS protein for the selected feature.
                     if let Some((label, protein)) = &cds {
@@ -1543,5 +1592,50 @@ impl eframe::App for SeqForgeApp {
 
         // ── Toast notifications ───────────────────────────────────────────────
         self.state.toasts.show(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SELECTION_TM_BP, selection_qc};
+
+    #[test]
+    fn selection_qc_reports_gc_and_tm_for_an_oligo() {
+        // GGGACCGCCT: seqfold's Owczarzy reference oligo (Tm ≈ 51.9 ± 7).
+        let (gc, tm) = selection_qc(b"GGGACCGCCT").unwrap();
+        assert_eq!(gc, 80.0);
+        let tm = tm.expect("oligo-length selection should carry a Tm");
+        assert!((tm - 51.9).abs() <= 7.0, "tm {tm} off reference");
+    }
+
+    #[test]
+    fn selection_qc_gc_only_below_two_bp() {
+        // A single base: %GC is defined, Tm is not (NN needs a pair).
+        let (gc, tm) = selection_qc(b"G").unwrap();
+        assert_eq!(gc, 100.0);
+        assert!(tm.is_none());
+    }
+
+    #[test]
+    fn selection_qc_drops_tm_past_the_oligo_cap() {
+        // A selection longer than the oligo cap keeps %GC but hides the
+        // (meaningless) Tm.
+        let long: Vec<u8> = b"AT"
+            .iter()
+            .copied()
+            .cycle()
+            .take(MAX_SELECTION_TM_BP + 2)
+            .collect();
+        let (gc, tm) = selection_qc(&long).unwrap();
+        assert_eq!(gc, 0.0);
+        assert!(
+            tm.is_none(),
+            "Tm should be suppressed past {MAX_SELECTION_TM_BP} bp"
+        );
+    }
+
+    #[test]
+    fn selection_qc_none_for_empty() {
+        assert!(selection_qc(b"").is_none());
     }
 }
