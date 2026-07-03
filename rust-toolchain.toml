@@ -1,0 +1,6 @@
+# Pinned so `cargo fmt` / `clippy` output is deterministic across dev machines
+# and CI (previously `@stable` floated, drifting formatting as stable advanced).
+# Bump this channel deliberately, then run `cargo fmt --all` in the same commit.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

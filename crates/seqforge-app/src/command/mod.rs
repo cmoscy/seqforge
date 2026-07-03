@@ -311,8 +311,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
-        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile
-        | OpenConfigDir => true,
+        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile | OpenConfigDir => {
+            true
+        }
     }
 }
 

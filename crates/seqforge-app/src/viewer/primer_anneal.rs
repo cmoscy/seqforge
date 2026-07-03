@@ -1,9 +1,7 @@
 //! Memoized primer attachment-state (Phase 1.1). Rebuilt on `buffer.version`
 //! change — not per frame — so the seed-and-extend find pass stays change-scoped.
 
-use seqforge_bio::{
-    AnnealSettings, PrimerAttachment, classify_attachment,
-};
+use seqforge_bio::{AnnealSettings, PrimerAttachment, classify_attachment};
 
 /// Per-buffer primer attachment classification, aligned positionally with
 /// `Annotations::primers()`.

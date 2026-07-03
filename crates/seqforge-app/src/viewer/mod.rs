@@ -9,10 +9,10 @@
 //! This is a rendering/interaction refactor only — the domain model is untouched
 //! (decisions 8/12/13).
 
+mod primer_anneal;
 mod track;
 mod tracks;
 mod translation;
-mod primer_anneal;
 
 use std::time::Duration;
 
@@ -24,12 +24,12 @@ use seqforge_core::{
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 
+use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
 use track::{
     BlockCtx, FeatureContext, Hit, LayoutCache, LayoutKey, Style, TrackStack, build_block_layouts,
     find_hit, open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
 };
 use translation::{OrfPromote, TranslationCache, build_translation_cache, codon_extend};
-use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
 
 // Re-exports consumed elsewhere in the crate.
 pub(crate) use track::greedy_stack;

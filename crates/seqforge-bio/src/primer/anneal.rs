@@ -143,11 +143,8 @@ pub fn classify_attachment(
         };
     };
 
-    let k = settings
-        .min_three_prime_match
-        .min(primer.sequence.len());
-    let stored_decomp =
-        decompose_primer(&primer.sequence, &binding, primer.strand, template);
+    let k = settings.min_three_prime_match.min(primer.sequence.len());
+    let stored_decomp = decompose_primer(&primer.sequence, &binding, primer.strand, template);
     let stored_ok = three_prime_matches(&stored_decomp, k)
         && stored_decomp.mismatches <= settings.max_mismatches;
 
@@ -222,7 +219,12 @@ fn find_exact_matches(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
 }
 
 /// Map a search position in the (possibly extended) haystack to a reported range.
-fn report_range(start: usize, oligo_len: usize, template_len: usize, circular: bool) -> Range<usize> {
+fn report_range(
+    start: usize,
+    oligo_len: usize,
+    template_len: usize,
+    circular: bool,
+) -> Range<usize> {
     if circular {
         let start = start % template_len;
         start..start + oligo_len
@@ -379,7 +381,10 @@ mod tests {
         let circ = b"AATTCNNNNNNNNNNG"; // len 16
         let sites = find_primer_binding_sites("GAATTC", circ, true, settings(4, 0));
         let wrap = sites.iter().find(|s| s.range.start == 15);
-        assert!(wrap.is_some(), "should find wrap-around site; got: {sites:?}");
+        assert!(
+            wrap.is_some(),
+            "should find wrap-around site; got: {sites:?}"
+        );
     }
 
     #[test]

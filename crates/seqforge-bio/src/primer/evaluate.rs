@@ -37,7 +37,10 @@ pub fn anneal_tm(
     strand: Strand,
     template: &[u8],
 ) -> Result<f64, TmError> {
-    let oligo: String = oligo.bytes().map(|b| b.to_ascii_uppercase() as char).collect();
+    let oligo: String = oligo
+        .bytes()
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect();
     let start = binding.start;
     let end = binding.end.min(template.len());
     if oligo.len() < 2 || start >= end {
@@ -144,10 +147,7 @@ mod tests {
     #[test]
     fn forward_anneal_tm_matches_perfect_duplex() {
         let at = anneal_tm("GCGTAC", &(2..8), Strand::Forward, T).unwrap();
-        let comp: String = complement(b"GCGTAC")
-            .iter()
-            .map(|&b| b as char)
-            .collect();
+        let comp: String = complement(b"GCGTAC").iter().map(|&b| b as char).collect();
         let duplex = duplex_tm("GCGTAC", &comp).unwrap();
         assert!(
             (at - duplex).abs() < 0.5,
@@ -158,7 +158,10 @@ mod tests {
     #[test]
     fn reverse_anneal_tm_succeeds_for_revcomp_oligo() {
         let at = anneal_tm("GTACGC", &(2..8), Strand::Reverse, T).unwrap();
-        assert!(at > 0.0, "reverse perfect match should yield sensible Tm; got {at}");
+        assert!(
+            at > 0.0,
+            "reverse perfect match should yield sensible Tm; got {at}"
+        );
     }
 
     #[test]

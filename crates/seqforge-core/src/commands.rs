@@ -794,7 +794,12 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect()
         }
-        fn primer_infos(&self, _seq: &[u8], primers: &[&Primer], _circular: bool) -> Vec<PrimerInfo> {
+        fn primer_infos(
+            &self,
+            _seq: &[u8],
+            primers: &[&Primer],
+            _circular: bool,
+        ) -> Vec<PrimerInfo> {
             // Stub: echo one canned projection per primer so the dispatch
             // plumbing (annotations.primers() → response) is testable without
             // pulling in the real thermo/anneal computation (which lives in bio).

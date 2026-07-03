@@ -174,27 +174,27 @@ fn paint_band(
         if ctx.primer_display.bases {
             if let Some(decomp) = decomp {
                 for ab in &decomp.annealed {
-                if ab.column < block_start || ab.column >= block_end {
-                    continue;
-                }
-                let cx = geom.seq_x0 + (ab.column - block_start) as f32 * char_width;
-                let color = if ab.matches {
-                    style.text_color
-                } else {
-                    let cell = Rect::from_min_size(
-                        Pos2::new(cx, body.min.y),
-                        Vec2::new(char_width, body.height()),
+                    if ab.column < block_start || ab.column >= block_end {
+                        continue;
+                    }
+                    let cx = geom.seq_x0 + (ab.column - block_start) as f32 * char_width;
+                    let color = if ab.matches {
+                        style.text_color
+                    } else {
+                        let cell = Rect::from_min_size(
+                            Pos2::new(cx, body.min.y),
+                            Vec2::new(char_width, body.height()),
+                        );
+                        painter.rect_filled(cell, 0.0, style.primer_mismatch.gamma_multiply(0.55));
+                        style.primer_mismatch
+                    };
+                    painter.text(
+                        Pos2::new(cx + char_width * 0.5, mid_y),
+                        Align2::CENTER_CENTER,
+                        (ab.base as char).to_string(),
+                        style.font_id.clone(),
+                        color,
                     );
-                    painter.rect_filled(cell, 0.0, style.primer_mismatch.gamma_multiply(0.55));
-                    style.primer_mismatch
-                };
-                painter.text(
-                    Pos2::new(cx + char_width * 0.5, mid_y),
-                    Align2::CENTER_CENTER,
-                    (ab.base as char).to_string(),
-                    style.font_id.clone(),
-                    color,
-                );
                 }
             }
         }
@@ -225,15 +225,7 @@ fn paint_band(
 
         // Attachment-state badges (Phase 1.1): drifted "moved" cue + off-target count.
         if let Some(att) = ctx.primer_states.get(primer_idx) {
-            paint_state_badges(
-                painter,
-                body,
-                mid_y,
-                reverse,
-                char_width,
-                style,
-                att,
-            );
+            paint_state_badges(painter, body, mid_y, reverse, char_width, style, att);
         }
 
         // 5' tail: oligo bases with no template column peel off the grid as
@@ -311,7 +303,11 @@ fn paint_state_badges(
             style.small_font.clone(),
             badge_color,
         );
-        badge_x += if reverse { -char_width * 2.8 } else { char_width * 2.8 };
+        badge_x += if reverse {
+            -char_width * 2.8
+        } else {
+            char_width * 2.8
+        };
     }
 
     let n = att.off_target_sites.len();

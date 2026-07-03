@@ -70,9 +70,7 @@ pub fn duplex_tm(seq1: &str, seq2: &str) -> Result<f64, TmError> {
 /// in the decomposition or the MFE is not favorable (ΔG ≥ 0).
 pub fn hairpin_dg(oligo: &str, temp_c: f64) -> Result<f64, FoldError> {
     let structs = core::fold::fold(oligo, temp_c)?;
-    let has_hairpin = structs
-        .iter()
-        .any(|s| s.desc.starts_with("HAIRPIN"));
+    let has_hairpin = structs.iter().any(|s| s.desc.starts_with("HAIRPIN"));
     if !has_hairpin {
         return Ok(0.0);
     }
@@ -90,7 +88,10 @@ pub fn hairpin_dg(oligo: &str, temp_c: f64) -> Result<f64, FoldError> {
 /// seqfold has no bimolecular dimer mode; hetero-dimer QC is Phase 3.1. More
 /// negative = more self-dimer-prone.
 pub fn self_dimer_dg(oligo: &str, temp_c: f64) -> Result<f64, FoldError> {
-    let upper: String = oligo.bytes().map(|b| b.to_ascii_uppercase() as char).collect();
+    let upper: String = oligo
+        .bytes()
+        .map(|b| b.to_ascii_uppercase() as char)
+        .collect();
     if upper.is_empty() {
         return Ok(0.0);
     }
