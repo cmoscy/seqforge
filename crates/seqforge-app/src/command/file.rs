@@ -389,6 +389,14 @@ mod phase15_tests {
         fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
             vec![]
         }
+        fn primer_infos(
+            &self,
+            _: &[u8],
+            _: &[&seqforge_core::Primer],
+            _: bool,
+        ) -> Vec<seqforge_core::PrimerInfo> {
+            vec![]
+        }
     }
 
     fn temp_fasta(seq: &str) -> PathBuf {

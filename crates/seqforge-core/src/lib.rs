@@ -17,8 +17,8 @@ pub mod model;
 pub mod mutations;
 
 pub use commands::{
-    BioOps, DispatchError, EnzymeOp, FileCommand, Selection, ViewerRequest, ViewerResponse,
-    dispatch, dispatch_file,
+    BioOps, DispatchError, EnzymeOp, FileCommand, PrimerInfo, PrimerState, Selection,
+    ViewerRequest, ViewerResponse, dispatch, dispatch_file,
 };
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Primer, PrimerId, Provenance, SearchHit,

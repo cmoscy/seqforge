@@ -21,7 +21,7 @@ pub use enzyme_query::{
 pub use primer::{
     AnnealSettings, AnnealedBase, AttachmentState, PrimerAttachment, PrimerBinding,
     PrimerDecomposition, PrimerQc, PrimerQcPlusAnneal, anneal_tm, classify_attachment,
-    decompose_primer, find_primer_binding_sites, primer_qc, primer_qc_with_anneal,
+    decompose_primer, find_primer_binding_sites, primer_infos, primer_qc, primer_qc_with_anneal,
 };
 pub use search::{find_cut_sites, find_iupac_matches};
 pub use seqforge_thermo::{

@@ -32,7 +32,7 @@ pub use anneal::{
     find_primer_binding_sites,
 };
 pub use evaluate::{
-    PrimerQc, PrimerQcPlusAnneal, anneal_tm, primer_qc, primer_qc_with_anneal,
+    PrimerQc, PrimerQcPlusAnneal, anneal_tm, primer_infos, primer_qc, primer_qc_with_anneal,
 };
 
 /// One template column covered by a primer's annealed footprint.

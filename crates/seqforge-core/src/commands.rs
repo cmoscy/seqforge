@@ -1,10 +1,14 @@
+use std::ops::Range;
 use std::path::PathBuf;
 
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Annotations, Buffer, CutSite, Document, FeatureId, SearchHit, Strand, View, ViewId};
+use crate::{
+    Annotations, Buffer, CutSite, Document, FeatureId, Primer, PrimerId, SearchHit, Strand, View,
+    ViewId,
+};
 
 // ── Selection model ───────────────────────────────────────────────────────────
 
@@ -267,6 +271,14 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// List the primers on the active buffer with derived attachment state + QC
+    /// (Tm/GC/self-structure ΔG). Ids are session-scoped. Backs the Inspector
+    /// Primers tab and the CLI `primers list` via one shared projection.
+    ListPrimers {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Remove the feature with the given id (from `list-features`).
     RemoveFeature {
         #[arg(long)]
@@ -368,6 +380,7 @@ impl ViewerRequest {
             ViewerRequest::Paste { view, .. } => *view,
             ViewerRequest::AddFeature { view, .. } => *view,
             ViewerRequest::ListFeatures { view, .. } => *view,
+            ViewerRequest::ListPrimers { view, .. } => *view,
             ViewerRequest::RemoveFeature { view, .. } => *view,
             ViewerRequest::RenameFeature { view, .. } => *view,
             ViewerRequest::UpdateFeature { view, .. } => *view,
@@ -403,6 +416,9 @@ pub enum ViewerResponse {
     FeatureAdded { id: FeatureId, len: usize },
     /// `ListFeatures` — every feature on the buffer, in definition order.
     Features { features: Vec<FeatureInfo> },
+    /// `ListPrimers` — every primer on the buffer (definition order) with its
+    /// derived attachment state + QC.
+    Primers { primers: Vec<PrimerInfo> },
 }
 
 /// A feature summary for `ListFeatures` — a by-value projection so CLI/agent
@@ -417,6 +433,57 @@ pub struct FeatureInfo {
     pub start: usize,
     pub end: usize,
     pub strand: Strand,
+}
+
+/// Derived attachment state of a primer against the current template — the
+/// serialized projection vocabulary shared by the Inspector pane and the CLI.
+/// Mirrors `seqforge_bio::AttachmentState` (bio's internal computed type); the
+/// boundary map lives in `seqforge_bio::primer_infos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimerState {
+    /// Derived footprint matches the stored binding; clean anneal.
+    Confirmed,
+    /// Still anchored within tolerance but moved / has mismatches.
+    Drifted,
+    /// No viable binding (3' anchor lost or below stringency) — floating oligo.
+    Detached,
+}
+
+/// A primer summary for `ListPrimers` — a by-value projection (mirrors
+/// [`FeatureInfo`]) so the Inspector pane and CLI/agent share one shape and
+/// cannot drift. Assembled in `seqforge_bio` (which owns the thermo + anneal
+/// code) and returned through [`BioOps::primer_infos`].
+///
+/// QC fields are `Option` because folding/Tm can fail on a degenerate oligo
+/// (surfaces as JSON `null`, like `seqforge tm`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimerInfo {
+    pub id: PrimerId,
+    pub name: String,
+    /// 0-based half-open annealing footprint on the top strand; `None` for a
+    /// detached/floating oligo. Display layers convert to 1-based.
+    pub binding: Option<Range<usize>>,
+    pub strand: Strand,
+    /// Oligo length in bp (full oligo, 5' tail included).
+    pub len: usize,
+    /// Monomer nearest-neighbour Tm (°C); `None` if the oligo is too short.
+    pub tm: Option<f64>,
+    /// GC content (percentage, `0.0..=100.0`).
+    pub gc: f64,
+    /// Self-hairpin ΔG (kcal/mol) at the default fold temp; `None` on fold error.
+    pub hairpin_dg: Option<f64>,
+    /// Self-dimer ΔG (kcal/mol); `None` on fold error.
+    pub self_dimer_dg: Option<f64>,
+    /// primer:template annealing Tm (°C) at `binding`; `None` when detached or
+    /// on error.
+    pub anneal_tm: Option<f64>,
+    /// Derived attachment state.
+    pub state: PrimerState,
+    /// Mismatch count within the stored-binding footprint (0 = clean anneal).
+    pub mismatches: usize,
+    /// Count of additional (off-target) binding sites — orthogonal to `state`.
+    pub off_targets: usize,
 }
 
 // ── BioOps trait ─────────────────────────────────────────────────────────────
@@ -443,6 +510,12 @@ pub trait BioOps {
     /// this trait method is the seqforge-core seam so the dispatcher can call
     /// it without depending on seqforge-bio.
     fn resolve_enzyme_names(&self, seq: &[u8], query: &str, circular: bool) -> Vec<String>;
+    /// Build the `ListPrimers` projection: for each authored primer, its derived
+    /// attachment state + QC (Tm/GC/self-structure ΔG/anneal Tm) against the
+    /// current template. This is the seqforge-core seam for the pane/CLI parity
+    /// shape — the assembly (classify + qc) lives in `seqforge_bio` (which owns
+    /// the thermo + anneal code), mirroring `find_cut_sites -> Vec<CutSite>`.
+    fn primer_infos(&self, seq: &[u8], primers: &[&Primer], circular: bool) -> Vec<PrimerInfo>;
 }
 
 /// Union `add` into `base`, preserving order and skipping case-insensitive
@@ -587,6 +660,16 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::Features { features })
         }
 
+        // Read-op: derived primer projection (attachment state + QC), routed
+        // through BioOps so core stays independent of seqforge-bio (mirrors
+        // Enzymes → find_cut_sites). Shared shape with the CLI `primers list`.
+        ViewerRequest::ListPrimers { view: _ } => {
+            let circular = buffer.is_circular();
+            let primers: Vec<&Primer> = annotations.primers().collect();
+            let infos = bio.primer_infos(&buffer.text, &primers, circular);
+            Ok(ViewerResponse::Primers { primers: infos })
+        }
+
         ViewerRequest::Enzymes { query, op, view: _ } => {
             let circular = buffer.is_circular();
             // active_enzymes is the source of truth; the op mutates it and
@@ -707,6 +790,29 @@ mod tests {
                 .split(|c: char| c.is_whitespace() || c == ',')
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
+                .collect()
+        }
+        fn primer_infos(&self, _seq: &[u8], primers: &[&Primer], _circular: bool) -> Vec<PrimerInfo> {
+            // Stub: echo one canned projection per primer so the dispatch
+            // plumbing (annotations.primers() → response) is testable without
+            // pulling in the real thermo/anneal computation (which lives in bio).
+            primers
+                .iter()
+                .map(|p| PrimerInfo {
+                    id: p.id,
+                    name: p.name.clone(),
+                    binding: p.binding.clone(),
+                    strand: p.strand,
+                    len: p.sequence.len(),
+                    tm: None,
+                    gc: 0.0,
+                    hairpin_dg: None,
+                    self_dimer_dg: None,
+                    anneal_tm: None,
+                    state: PrimerState::Detached,
+                    mismatches: 0,
+                    off_targets: 0,
+                })
                 .collect()
         }
     }
@@ -1022,6 +1128,38 @@ mod tests {
                 assert_eq!((features[0].start, features[0].end), (1, 4));
             }
             other => panic!("expected Features, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_list_primers_returns_projection() {
+        let (mut view, buf, _) = fixture();
+        let mut ann = Annotations::default();
+        let minted = ann.add_primer(Primer {
+            id: Default::default(),
+            name: "p1".into(),
+            sequence: "ATGC".into(),
+            binding: Some(0..4),
+            strand: crate::Strand::Forward,
+            qualifiers: Default::default(),
+        });
+        let resp = dispatch(
+            &mut view,
+            &buf,
+            &mut ann,
+            &FakeBio::new(),
+            ViewerRequest::ListPrimers { view: None },
+        )
+        .unwrap();
+        match resp {
+            ViewerResponse::Primers { primers } => {
+                assert_eq!(primers.len(), 1);
+                assert_eq!(primers[0].id, minted);
+                assert_eq!(primers[0].name, "p1");
+                assert_eq!(primers[0].binding, Some(0..4));
+                assert_eq!(primers[0].len, 4);
+            }
+            other => panic!("expected Primers, got {other:?}"),
         }
     }
 

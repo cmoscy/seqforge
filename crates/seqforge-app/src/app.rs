@@ -86,6 +86,15 @@ impl BioOps for AppBio {
         let parsed = seqforge_bio::parse_enzyme_query(query);
         seqforge_bio::resolve_query_names(&parsed, seq, circular)
     }
+
+    fn primer_infos(
+        &self,
+        seq: &[u8],
+        primers: &[&seqforge_core::Primer],
+        circular: bool,
+    ) -> Vec<seqforge_core::PrimerInfo> {
+        seqforge_bio::primer_infos(seq, primers, circular)
+    }
 }
 
 // ── AppState ──────────────────────────────────────────────────────────────────

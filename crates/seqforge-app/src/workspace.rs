@@ -619,6 +619,14 @@ mod tests {
             fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
                 vec![]
             }
+            fn primer_infos(
+                &self,
+                _: &[u8],
+                _: &[&seqforge_core::Primer],
+                _: bool,
+            ) -> Vec<seqforge_core::PrimerInfo> {
+                vec![]
+            }
         }
 
         let got = ws.buffers.open_path(&path, &ExplodingBio).unwrap();

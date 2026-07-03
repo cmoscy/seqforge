@@ -3,11 +3,12 @@
 
 use std::ops::Range;
 
-use seqforge_core::{Primer, Strand};
+use seqforge_core::{Primer, PrimerInfo, PrimerState, Strand};
 use seqforge_thermo::{
     DEFAULT_FOLD_TEMP_C, FoldError, TmError, duplex_tm, gc, hairpin_dg, self_dimer_dg, tm,
 };
 
+use super::{AnnealSettings, AttachmentState, classify_attachment, decompose_primer};
 use crate::dna::{complement, reverse_complement};
 
 /// Monomer and self-structure QC for a primer oligo.
@@ -85,6 +86,53 @@ pub fn primer_qc_with_anneal(primer: &Primer, template: &[u8]) -> PrimerQcPlusAn
     PrimerQcPlusAnneal { qc, anneal_tm }
 }
 
+/// Build the [`PrimerInfo`] projection (attachment state + QC) for each primer
+/// against `template`. The `seqforge_core::BioOps::primer_infos` seam — the one
+/// shape the Inspector pane and CLI `primers list` share (decision 10).
+pub fn primer_infos(template: &[u8], primers: &[&Primer], circular: bool) -> Vec<PrimerInfo> {
+    let settings = AnnealSettings::default();
+    primers
+        .iter()
+        .map(|p| primer_info(p, template, circular, settings))
+        .collect()
+}
+
+fn primer_info(
+    primer: &Primer,
+    template: &[u8],
+    circular: bool,
+    settings: AnnealSettings,
+) -> PrimerInfo {
+    let attachment = classify_attachment(primer, template, circular, settings);
+    let state = match attachment.state {
+        AttachmentState::Confirmed => PrimerState::Confirmed,
+        AttachmentState::Drifted => PrimerState::Drifted,
+        AttachmentState::Detached => PrimerState::Detached,
+    };
+    // Mismatches within the *stored* footprint (0 when detached).
+    let mismatches = primer
+        .binding
+        .as_ref()
+        .map(|b| decompose_primer(&primer.sequence, b, primer.strand, template).mismatches)
+        .unwrap_or(0);
+    let qc = primer_qc_with_anneal(primer, template);
+    PrimerInfo {
+        id: primer.id,
+        name: primer.name.clone(),
+        binding: primer.binding.clone(),
+        strand: primer.strand,
+        len: primer.sequence.len(),
+        tm: qc.qc.tm.ok(),
+        gc: qc.qc.gc,
+        hairpin_dg: qc.qc.hairpin_dg.ok(),
+        self_dimer_dg: qc.qc.self_dimer_dg.ok(),
+        anneal_tm: qc.anneal_tm.and_then(Result::ok),
+        state,
+        mismatches,
+        off_targets: attachment.off_target_sites.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +194,46 @@ mod tests {
         let out = primer_qc_with_anneal(&primer, T);
         assert!(out.anneal_tm.is_some());
         assert!(out.anneal_tm.unwrap().is_ok());
+    }
+
+    #[test]
+    fn primer_infos_projects_confirmed_and_detached() {
+        use seqforge_core::PrimerState;
+
+        // Confirmed: oligo == top[2..8], clean forward anneal.
+        let confirmed = Primer {
+            id: PrimerId(1),
+            name: "fwd".into(),
+            sequence: "GCGTAC".into(),
+            binding: Some(2..8),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+        // Detached: no binding (floating oligo).
+        let detached = Primer {
+            id: PrimerId(2),
+            name: "float".into(),
+            sequence: "GCGTAC".into(),
+            binding: None,
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+        let refs = [&confirmed, &detached];
+        let infos = primer_infos(T, &refs, false);
+
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].id, PrimerId(1));
+        assert_eq!(infos[0].state, PrimerState::Confirmed);
+        assert_eq!(infos[0].binding, Some(2..8));
+        assert_eq!(infos[0].len, 6);
+        assert_eq!(infos[0].mismatches, 0);
+        assert!(infos[0].tm.is_some());
+        assert!(infos[0].anneal_tm.is_some());
+
+        assert_eq!(infos[1].state, PrimerState::Detached);
+        assert_eq!(infos[1].binding, None);
+        // No binding → no annealing Tm, but monomer QC still computes.
+        assert!(infos[1].anneal_tm.is_none());
+        assert!(infos[1].tm.is_some());
     }
 }
