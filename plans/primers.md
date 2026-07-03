@@ -239,15 +239,101 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
 - **Future internal bulge** (deferred) reuses the identical lift-off vocabulary,
   anchored internally — paint layer needs no rethink.
 
+## Panels / Inspector — surfacing (Phase 1.3, track decision 10 below)
+
+**Surface grammar (holds for every UI element in this app):**
+- **Transient bars = verbs (commands).** Find, GoTo, **Enzymes-query**, future
+  `primers find`. Keyboard-invoked, one input → mutate view state, dismiss. Input
+  only; the *result* lives on the map. Zero permanent layout cost. Rendered inline
+  atop the active view (existing `overlay::show_inline_bar`).
+- **Dock panes = nouns (collections).** Files, Terminal, and the new **Inspector**.
+  A persistent list you cross-reference against the map continuously. Opt-in /
+  toggleable.
+- **Modals (`egui::Window`) = blocking decisions.** Forms, confirmations. Never
+  for a list you cross-reference.
+
+Enzymes keep their **bar** (the verb — sets `active_enzymes`); the resulting cut
+sites become a **noun** (a list to browse + jump to) in the Inspector. The two are
+complementary — the bar feeds the pane — not either/or.
+
+**The Inspector = one dockable, tabbable pane with sub-tabs: Primers · Cut sites ·
+Features.** Each sub-tab is a noun-collection with the same *click-row → reveal on
+map* behaviour. Build **Primers first** (this track); **Cut sites** is a cheap
+follow-on (it reads the existing `view.cut_sites` — no new backend); **Features**
+later.
+
+**Default layout** (extend `rebuild_default_dock`): Files **left**, sequence
+view(s) **center**, Inspector **right** (`split_right`, new `layout.inspector_fraction`),
+Terminal **bottom**. Role-zoned like an IDE; matches Benchling's right inspector.
+egui_dock still lets the operator re-tab/float it (e.g. tab it with Terminal).
+
+### Keeping focus / layout / persistence solid (the "solid pane" checklist)
+
+The Inspector is a **singleton non-view pane — mirror `Tab::FileBrowser` /
+`Tab::Terminal` exactly**; do not invent a new mechanism. Invariants to preserve:
+
+1. **Singleton reading the *active view*** (holds **no `ViewId`**, like the status
+   bar) → sidesteps the orphan-id bug class (`docs/architecture.md` Workspace/
+   Layout/Persistence boundary). No active view → an empty state.
+2. **Commands-only.** Every click (reveal, toggle) pushes an `AppCommand` onto
+   `pending_commands` — like the browser's file-click — never mutates state
+   directly. Preserves the single-applier contract (`command::apply`).
+3. **Focus stack.** Add one `FocusScope::Inspector` + a `"Pane:Inspector"`
+   `context_tag`; **grab no keys initially** (mouse-driven) so keymap resolution
+   is unperturbed. Row-nav keybindings, if ever wanted, land later *additively*
+   under that tag (`docs/focus-refactor.md`).
+4. **Layout back-compat.** New `Tab` variant must serialize; a persisted
+   `LayoutSnapshot` from before the Inspector must still load (fall back to the
+   default split). This is the one real regression risk → an explicit round-trip
+   test, plus: default-dock-builds-with-Inspector and focus-scope-resolves tests
+   (mirror the Browser/Terminal coverage).
+
+### Primers tab — content (aligns with SnapGene expandable rows / Benchling panel)
+
+Essentials as **columns** (scannable); everything else in an **expand / on-select
+detail** (keeps it clean — do not inline everything):
+
+| Column | Notes |
+|---|---|
+| Name | |
+| Strand | fwd/rev arrow glyph |
+| Binding | `start–end` (1-based) + len; *Unattached* for detached |
+| Len | oligo bp |
+| Tm | °C, right-aligned (the 0.5 `selection_qc` computation) |
+| %GC | right-aligned |
+| State | Confirmed / **Drifted** (amber dot) / Detached (grey) — from decomposition |
+
+- **Detail (expand / on-select), not columns:** full oligo 5'→3' with the tail
+  marked, mismatch count/positions, and (with 1.2) hairpin / self-dimer ΔG + a
+  warning icon.
+- **Sort by binding position by default** (list mirrors the map top→bottom).
+- **Floating oligos in a separate "Unattached" section** at the bottom (Benchling
+  idiom) — QC but no map location.
+- **Interactions:** click row → `scroll_to` + select footprint (attached);
+  panel-only for floating. **Header toggles:** show/hide primers on map, and
+  **arrows-vs-bases** (Benchling "Primer bases" — toggles the 1.1 base render).
+  `Check specificity` / `Add primer` come later (1.1 find / 2.1).
+- **Clean-look rules:** ≤ ~6 columns; compact cues over text (strand arrow, amber
+  Drifted dot, grey/italic Detached, warning icon) instead of extra columns;
+  right-align numerics.
+
+### One projection under it (agent/GUI parity)
+
+Back the pane with a **`ListPrimers` dispatch → `PrimerInfo { id, name, binding,
+strand, len, tm, gc, state, mismatches }`** — the *same* shape the Phase 1.4 CLI
+`primers list` returns, so the pane and the agent can't drift (mirrors the existing
+`ListFeatures → FeatureInfo`). The Cut-sites tab is likewise a view over the data
+`Enzymes` dispatch already returns (`ViewerResponse::CutSites`).
+
 ## Editing UX (staged dialog — sibling of the feature Edit dialog)
 
 - **Same rails:** `AddPrimer` / `UpdatePrimer` / `RemovePrimer` `ViewerRequest`s,
-  **staged** (arm → preview → commit on `Enter`, decision 10), through the single
-  applier + history. Siblings of the feature ops — no new mechanism.
+  **staged** (arm → preview → commit on `Enter`, ROADMAP decision 10), through the
+  single applier + history. Siblings of the feature ops — no new mechanism.
 - **Detach-on-destroy uses the existing staging, no new modal.** A staged edit
   that would destroy a primer's 3' anchor surfaces **"detaches primer X"** in the
-  realized preview; the existing **commit-on-Enter is the confirmation** (decision
-  10). CLI/agent edits have no preview loop → they detach and **report it in
+  realized preview; the existing **commit-on-Enter is the confirmation** (ROADMAP
+  decision 10). CLI/agent edits have no preview loop → they detach and **report it in
   structured output** ("primer X detached"). Neither path silently corrupts; the
   primer object always survives (binding → `None`), never deleted.
 - **Dialog field set** (differs from a feature's): name, **full oligo sequence**,
@@ -352,9 +438,14 @@ Each item cites the code it must stay consistent with.
       Confirmed/Drifted/Detached state classification (re-anneal to detect a
       *moved* binding / off-targets) — feeds 1.3's panel + 1.4's `primers find`.)*
 - [ ] 1.2 `thermo`: self-hairpin ΔG, self-dimer ΔG (seqfold `fold`/`dg`).
-- [ ] 1.3 Primer panel: list (name/binding/Tm/GC/strand + QC + state, incl.
-      floating oligos), jump-to-binding, toggle visibility, "check specificity".
-- [ ] 1.4 CLI: `seqforge primers list`, `seqforge primers find <oligo>`.
+- [ ] 1.3 **Inspector** pane (right-docked, tabbable; **Primers** tab first) —
+      list (name/binding/Tm/GC/strand + QC + state, incl. floating oligos),
+      jump-to-binding, show/hide + arrows-vs-bases toggles, "check specificity".
+      Backed by `ListPrimers → PrimerInfo` (shared with 1.4). Full surface spec +
+      the "solid pane" checklist: **"Panels / Inspector — surfacing"** above
+      (track decision 10). Cut-sites tab is a cheap follow-on (`view.cut_sites`).
+- [ ] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3),
+      `seqforge primers find <oligo>`.
 
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; staged
@@ -421,6 +512,18 @@ Each item cites the code it must stay consistent with.
    or land earlier. Rationale: matches SnapGene/Benchling (auto-name + rename),
    keeps create-from-selection one-click, and guarantees no two primers share a
    synthetic name. Never reject creation for a missing name.
+10. **UI surface grammar: verbs → bars, noun-collections → the Inspector pane,
+    blocking decisions → modals.** The primer/cut-site/feature lists live as
+    sub-tabs of **one right-docked, tabbable Inspector pane** (build Primers
+    first; Cut sites reuses `view.cut_sites`; Features later) — a singleton that
+    follows the active view, holds no `ViewId`, and mutates only via
+    `pending_commands` (mirrors `Tab::FileBrowser`/`Tab::Terminal`, preserving the
+    focus/single-applier/orphan-id invariants). Enzymes keep their query **bar**
+    (verb) *and* gain a Cut-sites Inspector tab (noun); the bar feeds the pane.
+    Panes are backed by a `List*` projection shared with the CLI (`PrimerInfo` ↔
+    `primers list`) so GUI and agent can't drift. Full shape: "Panels / Inspector"
+    above. Rationale: matches SnapGene tabs / Benchling inspector; keeps the
+    sequence map central; reuses proven pane machinery instead of a new surface.
 
 ## Resolved (previously open) questions
 
