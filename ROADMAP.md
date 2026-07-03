@@ -50,7 +50,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0–1.2 + 1.3a/1.3b complete (QC thermo, `PrimerInfo` projection, Inspector pane machinery) | Phase 1.3c — interactive Primers table (`InspectorCollection` trait) |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0–1.2 + 1.3a/1.3b + 1.3c core complete (Inspector: 3 tabs, `InspectorCollection` trait, select/reveal + double-click→modal) | Finish 1.3c (map-toggles) → Phase 1.4 CLI |
 
 ---
 

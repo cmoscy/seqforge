@@ -505,13 +505,15 @@ Each item cites the code it must stay consistent with.
       `layout.inspector_fraction`), version-keyed `InspectorState` cache, Primers
       tab as a **read-only** list, `View → Inspector` show/hide toggle. Layout
       back-compat + default-dock + focus-scope tested.
-- [ ] 1.3c **Interactive Primers table** — the first `InspectorCollection`
-      instance: columns + select→reveal (`View.selected_primer`) +
-      double-click/Enter → `on_activate` (edit-modal launcher; `None` for primers
-      until 2.1). Header toggles (show/hide on map, arrows-vs-bases). Then
-      **generalize to the trait** + add Cut-sites (read-only, `view.cut_sites`)
-      and Features (activation → the existing feature modal). Full spec: **"Panels
-      / Inspector"** above (decision 10).
+- [~] 1.3c **Interactive tabs + generalization** — DONE: `InspectorCollection`
+      trait + shared table renderer; three tabs (Primers, Cut sites read-only,
+      Features); single-click → select/reveal (`RevealPrimer`/`RevealFeature`/
+      `RevealRange`), **double-click → edit modal** (`OpenFeatureForm` wired;
+      primers await 2.1's modal), on-select detail; map↔panel selection sync
+      (`SelectPrimer`). **Remaining:** header **map-toggles** (show/hide primers
+      on map, arrows-vs-bases — `View`-display flags like translation lanes) and
+      optional Enter-key activation. Full spec: **"Panels / Inspector"** (decision
+      10).
 - [ ] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3),
       `seqforge primers find <oligo>`.
 
