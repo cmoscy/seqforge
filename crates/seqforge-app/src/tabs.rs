@@ -40,7 +40,8 @@ pub struct TabViewer<'a> {
     pub focus: &'a mut FocusState,
     pub minimap: &'a mut MiniMap,
     /// The Inspector pane's memoized state (refreshed before the dock renders).
-    pub inspector: &'a InspectorState,
+    /// `&mut` because the pane owns transient UI state (the active sub-tab).
+    pub inspector: &'a mut InspectorState,
     /// In-memory clipboard bytes (`AppState.clipboard`), passed to the sequence
     /// viewer so a staged Paste can preview the clipboard contents.
     pub clipboard: Option<&'a [u8]>,

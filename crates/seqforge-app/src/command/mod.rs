@@ -131,10 +131,18 @@ pub enum AppCommand {
     // ── Selection ────────────────────────────────────────────────────
     SetSelection(Option<Selection>),
     SelectFeature(Option<FeatureId>),
+    /// Set `View.selected_primer` (panel highlight) without moving the map — the
+    /// map-click counterpart of `SelectFeature`. `Some` clears `selected_feature`.
+    SelectPrimer(Option<seqforge_core::PrimerId>),
     /// Select a primer by id (Inspector row-click): sets `View.selected_primer`,
     /// and — when attached — selects + reveals its binding footprint.
     RevealPrimer {
         id: seqforge_core::PrimerId,
+    },
+    /// Select a feature by id (Inspector row-click): sets `View.selected_feature`
+    /// and selects + reveals its range.
+    RevealFeature {
+        id: FeatureId,
     },
 
     // ── Feature editing (Phase 14) ───────────────────────────────────
@@ -283,7 +291,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
                 && state.workspace.active_view().is_some()
         }
-        SetSelection(_) | SelectFeature(_) => true,
+        SetSelection(_) | SelectFeature(_) | SelectPrimer(_) => true,
         // New Feature (create form from the menu) needs a range selection;
         // an edit form is opened with a concrete feature so it's always valid.
         OpenFeatureForm { id, .. } => id.is_some() || has_range_selection(state),
@@ -293,7 +301,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
-        RevealRange { .. } | RevealPrimer { .. } => state.workspace.active_view().is_some(),
+        RevealRange { .. } | RevealPrimer { .. } | RevealFeature { .. } => {
+            state.workspace.active_view().is_some()
+        }
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
@@ -525,7 +535,9 @@ pub fn apply<B: BioOps>(
         // ── Selection ───────────────────────────────────────────────
         SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),
         SelectFeature(new_feat) => nav::apply_select_feature(state, new_feat),
+        SelectPrimer(new_primer) => nav::apply_select_primer(state, new_primer),
         RevealPrimer { id } => nav::apply_reveal_primer(state, id),
+        RevealFeature { id } => nav::apply_reveal_feature(state, id),
 
         // ── Feature editing (Phase 14) ──────────────────────────────
         OpenFeatureForm {

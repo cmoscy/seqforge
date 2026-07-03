@@ -1019,10 +1019,11 @@ impl SequenceView {
                         {
                             // Clicking a primer selects its annealed footprint —
                             // reusing the selection machinery (lights the status-bar
-                            // Tm/%GC readout). Panel selection by id lands in 1.3.
+                            // Tm/%GC readout) — and drives the Inspector highlight
+                            // by id (map↔panel selection sync).
                             let b = primer.binding.clone().expect("filtered Some");
                             push_sel(cmds, Some(Selection::range(b.start, b.end)));
-                            push_feat(cmds, None);
+                            cmds.push((AppCommand::SelectPrimer(Some(primer.id)), None));
                         } else if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
                                 .by_position(feat_idx)

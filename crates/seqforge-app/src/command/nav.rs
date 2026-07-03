@@ -197,6 +197,22 @@ pub(super) fn apply_select_feature(
     Ok(None)
 }
 
+/// Set `selected_primer` (panel highlight) without moving the map — the
+/// map-click counterpart of [`apply_select_feature`]. Selecting a primer clears
+/// the feature selection (mutually exclusive).
+pub(super) fn apply_select_primer(
+    state: &mut AppState,
+    new_primer: Option<PrimerId>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selected_primer = new_primer;
+        if new_primer.is_some() {
+            view.selected_feature = None;
+        }
+    }
+    Ok(None)
+}
+
 /// Select a primer by id (Inspector row-click). Sets `selected_primer`, clears
 /// `selected_feature` (mutually exclusive panel selection), and — when the
 /// primer is attached — selects + reveals its footprint (lighting the status-bar
@@ -219,6 +235,31 @@ pub(super) fn apply_reveal_primer(
         if let Some(b) = &binding {
             view.selection = Some(Selection::range(b.start, b.end));
             view.scroll_to = Some(b.start);
+        }
+    }
+    emit_selection_diff(state, before);
+    Ok(None)
+}
+
+/// Select a feature by id (Inspector row-click): sets `selected_feature`, clears
+/// `selected_primer`, and selects + reveals its range. Mirror of
+/// [`apply_reveal_primer`].
+pub(super) fn apply_reveal_feature(
+    state: &mut AppState,
+    id: FeatureId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let before = active_selection(state);
+    let range = state
+        .workspace
+        .with_active_buffer(|_v, _b, ann| ann.get(id).map(|f| f.range.clone()))
+        .ok()
+        .flatten();
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selected_feature = Some(id);
+        view.selected_primer = None;
+        if let Some(r) = &range {
+            view.selection = Some(Selection::range(r.start, r.end));
+            view.scroll_to = Some(r.start);
         }
     }
     emit_selection_diff(state, before);
@@ -370,5 +411,53 @@ mod tests {
         let v = state.workspace.active_view().unwrap();
         assert_eq!(v.selected_primer, Some(id));
         assert_eq!(v.scroll_to, None, "detached primer must not move the map");
+    }
+
+    #[test]
+    fn select_primer_highlights_without_moving_map() {
+        let (mut state, id) = open_with_primer(Some(2..8), "selp");
+        state.workspace.active_view_mut().unwrap().selected_feature = Some(FeatureId(9));
+
+        apply_select_primer(&mut state, Some(id)).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.selected_feature, None, "selecting a primer clears feature");
+        assert_eq!(v.scroll_to, None, "select (vs reveal) must not scroll");
+    }
+
+    #[test]
+    fn reveal_feature_selects_range_and_clears_primer() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("sf_nav_{}_feat.fasta", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">t\nATGCGTACCA").unwrap();
+        let mut state = AppState::default();
+        let vid = state.workspace.open_path(&path, &TestBio).unwrap();
+        state.workspace.focus_view(vid);
+        let fid = state
+            .workspace
+            .with_active_buffer_mut(|_v, _b, ann| {
+                ann.add(seqforge_core::Feature {
+                    id: FeatureId::default(),
+                    range: 1..5,
+                    raw_kind: "CDS".into(),
+                    label: "gene".into(),
+                    strand: Strand::Forward,
+                    qualifiers: Default::default(),
+                    provenance: None,
+                })
+            })
+            .unwrap();
+        state.workspace.active_view_mut().unwrap().selected_primer = Some(PrimerId(7));
+        let _ = std::fs::remove_file(&path);
+
+        apply_reveal_feature(&mut state, fid).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_feature, Some(fid));
+        assert_eq!(v.selected_primer, None, "selecting a feature clears primer");
+        assert_eq!(v.selection, Some(Selection::range(1, 5)));
+        assert_eq!(v.scroll_to, Some(1));
     }
 }
