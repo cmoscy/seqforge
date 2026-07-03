@@ -163,6 +163,9 @@ pub struct UiColors {
     /// Ruler tick label colour (a single base colour, the viewer applies
     /// its own gamma-multiply for the dim look).
     pub ruler_text: HexColor,
+    /// Amber accent for a primer's mismatched annealed columns (the visual
+    /// counterpart of the `Drifted` state; Phase 1.1).
+    pub mismatch: HexColor,
 }
 
 impl Default for UiColors {
@@ -174,6 +177,7 @@ impl Default for UiColors {
             label_text: HexColor(Color32::WHITE),
             label_text_alt: HexColor(Color32::from_rgb(20, 20, 20)),
             ruler_text: HexColor(Color32::from_rgb(160, 160, 160)),
+            mismatch: HexColor(Color32::from_rgb(235, 155, 40)),
         }
     }
 }

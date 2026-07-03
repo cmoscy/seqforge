@@ -50,7 +50,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0 complete (thermo + `seqforge tm`; live Tm/GC; `Primer` model + shift handler; `primer_bind` round-trip; `PrimerTrack` arrows) | Phase 1.1 — `bio` annealing (seed-and-extend + decomposition + state) |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0 complete; 1.1 in progress (decomposition + base-level render w/ mismatch marks landed) | Finish 1.1 — seed-and-extend find + Confirmed/Drifted/Detached state |
 
 ---
 

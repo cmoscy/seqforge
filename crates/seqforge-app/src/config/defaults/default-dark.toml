@@ -12,6 +12,7 @@ cut_site       = "#9CA8B8"
 label_text     = "#FFFFFF"   # used on dark feature swatches
 label_text_alt = "#141414"   # used on light feature swatches (auto-picked via WCAG)
 ruler_text     = "#A0A0A0"
+mismatch       = "#EB9B28"   # amber accent for a primer's mismatched bases
 
 [features]
 gene       = "#6495ED"

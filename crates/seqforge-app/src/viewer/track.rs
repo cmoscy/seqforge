@@ -512,6 +512,8 @@ pub(crate) struct Style {
     pub aa_stop: Color32,
     pub aa_start: Color32,
     pub orf_wash: Color32,
+    /// Amber accent for a primer's mismatched annealed bases.
+    pub primer_mismatch: Color32,
 }
 
 // ── Track trait + per-block context/geometry ───────────────────────────────────
@@ -527,6 +529,10 @@ pub(crate) struct BlockCtx<'a> {
     pub seq: &'a [u8],
     pub seq_len: usize,
     pub render_ann: &'a Annotations,
+    /// Per-primer template decomposition (annealed bases + mismatches + 5'
+    /// tail), aligned positionally with `render_ann.primers()`. Recomputed each
+    /// frame against the render sequence (cheap — a handful of primers × footprint).
+    pub primer_decomps: &'a [seqforge_bio::PrimerDecomposition],
     /// Cut sites (empty while staging — derived overlays are suppressed then).
     pub cut_sites: &'a [CutSite],
     pub search_hits: &'a [SearchHit],
@@ -605,16 +611,19 @@ impl TrackStack {
             sequence::SequenceTrack,
             translation::TranslationTrack,
         };
-        // Layout order (top→bottom): forward primers sit above the top strand,
-        // reverse primers below the bottom strand — straddling the Sequence
-        // track (decision 14 render; SnapGene/Benchling idiom).
+        // Layout order (top→bottom): forward primers above the top strand,
+        // reverse primers below the bottom strand — straddling the Sequence track
+        // (decision 14 render; SnapGene/Benchling idiom). Below the strand the
+        // codon-aligned Translation band hugs the bases (innermost), then reverse
+        // primers, then Features outermost — distance from the bases tracks how
+        // base-level each lane is.
         let tracks: Vec<Box<dyn Track>> = vec![
             Box::new(CutSitesTrack),      // 0
             Box::new(RulerTrack),         // 1
             Box::new(PrimerForwardTrack), // 2
             Box::new(SequenceTrack),      // 3 (== SEQUENCE_TRACK)
-            Box::new(PrimerReverseTrack), // 4
-            Box::new(TranslationTrack),   // 5
+            Box::new(TranslationTrack),   // 4 — codon band hugs the bases
+            Box::new(PrimerReverseTrack), // 5
             Box::new(FeaturesTrack),      // 6
         ];
         // Paint every track in layout order, then the cut-site staples last so
@@ -1033,6 +1042,7 @@ mod tests {
             aa_stop: c,
             aa_start: c,
             orf_wash: c,
+            primer_mismatch: c,
         }
     }
 
@@ -1070,6 +1080,7 @@ mod tests {
             seq: b"ACGTACGTACGTACGTACGT",
             seq_len: 20,
             render_ann: &ann,
+            primer_decomps: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1136,6 +1147,7 @@ mod tests {
             seq: &[b'A'; 20],
             seq_len: 20,
             render_ann: ann,
+            primer_decomps: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1237,6 +1249,7 @@ mod tests {
             seq: &[b'A'; 40],
             seq_len: 40,
             render_ann: &ann,
+            primer_decomps: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1257,8 +1270,8 @@ mod tests {
             Box::new(RulerTrack),
             Box::new(PrimerForwardTrack),
             Box::new(SequenceTrack),
-            Box::new(PrimerReverseTrack),
             Box::new(TranslationTrack),
+            Box::new(PrimerReverseTrack),
             Box::new(FeaturesTrack),
         ];
         let sum: f32 = tracks.iter().map(|t| t.block_height(&ctx)).sum::<f32>() + style.block_gap;

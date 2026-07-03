@@ -1,6 +1,6 @@
 /// IUPAC complement table (ASCII byte → complement byte, uppercase output).
 /// Handles A/T/G/C plus all IUPAC ambiguity codes.
-fn complement_byte(b: u8) -> u8 {
+pub(crate) fn complement_byte(b: u8) -> u8 {
     match b.to_ascii_uppercase() {
         b'A' => b'T',
         b'T' => b'A',

@@ -753,9 +753,9 @@ impl SequenceView {
             annot_row_h,
             cut_label_row_h,
             aa_row_h,
-            // Primer arrows reuse the feature-row height (arrow body + tail
-            // lift-off); a dedicated setting can split it later if needed.
-            primer_row_h: annot_row_h,
+            // Primer arrows show the oligo's bases (match/mismatch), so the row
+            // must fit a monospace glyph — size it to the sequence row height.
+            primer_row_h: char_height,
             block_gap,
             line_width,
             label_overflow,
@@ -772,6 +772,7 @@ impl SequenceView {
             aa_stop: cfg.theme.translation.stop.0,
             aa_start: cfg.theme.translation.start.0,
             orf_wash: cfg.theme.translation.orf_wash.0,
+            primer_mismatch: cfg.theme.ui.mismatch.0,
         };
 
         // Per-block layout: each block sizes itself to the items it contains
@@ -851,6 +852,19 @@ impl SequenceView {
         let selection = view.selection;
         let selected_feature = view.selected_feature;
 
+        // Per-primer decomposition against the render sequence — annealed bases,
+        // mismatches, and the 5' tail the Primer tracks draw (Phase 1.1). Aligned
+        // positionally with `render_ann.primers()`. Recomputed per frame: a
+        // handful of primers × short footprint, far cheaper than the layout it
+        // rides alongside (a detached primer yields an empty decomposition).
+        let primer_decomps: Vec<seqforge_bio::PrimerDecomposition> = render_ann
+            .primers()
+            .map(|p| match &p.binding {
+                Some(b) => seqforge_bio::decompose_primer(&p.sequence, b, p.strand, seq),
+                None => seqforge_bio::PrimerDecomposition::default(),
+            })
+            .collect();
+
         let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(offset) = scroll_offset {
             scroll_area = scroll_area.vertical_scroll_offset(offset);
@@ -874,6 +888,7 @@ impl SequenceView {
                 seq,
                 seq_len,
                 render_ann,
+                primer_decomps: &primer_decomps,
                 cut_sites,
                 search_hits: &view.search_hits,
                 trans_cache: trans_cache.as_ref(),

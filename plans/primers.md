@@ -3,13 +3,14 @@
 > **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
 > sourcing, and consistency-with-the-implemented-model all worked out (see
 > "Decisions locked" and "Consistency with the implemented model" below). Phase
-> **Phase 0 (foundation) is complete** — 0.1 (thermo + `seqforge tm`), 0.5 (live
-> selection Tm/%GC readout), 0.2 (`core` `Primer` model + shift handler), 0.3
-> (GenBank `primer_bind` ↔ `Primer` round-trip), and 0.4 (`PrimerTrack`
-> directional-arrow render) are all done. Next concrete step is Phase 1.1 (`bio`
-> annealing: seed-and-extend + 3'-anchored decomposition + attachment-state),
-> which unlocks the track's mismatch marks and the 1.3 panel. Canonical
-> cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
+> **Phase 0 complete; Phase 1.1 in progress.** 0.1–0.5 done (thermo + `seqforge
+> tm`; live Tm/%GC readout; `Primer` model + shift handler; `primer_bind`
+> round-trip; `PrimerTrack` arrows). Phase 1.1's **decomposition + base-level
+> render** landed (`decompose_primer`: annealed/mismatch/tail, strand-correct;
+> the track draws the oligo's bases with amber mismatch cells + tail letters;
+> translation reordered to hug the sequence). **Remaining in 1.1**: the
+> seed-and-extend find pass + Confirmed/Drifted/Detached state classification.
+> Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -340,8 +341,16 @@ Each item cites the code it must stay consistent with.
       `selection_qc` helper. Pulled forward ahead of 0.2/0.3.)*
 
 ### Phase 1 — Read-side interaction (no buffer mutation)
-- [ ] 1.1 `bio` annealing: seed-and-extend binding-site find (own `PrimerBinding`
+- [~] 1.1 `bio` annealing: seed-and-extend binding-site find (own `PrimerBinding`
       type, reuse `scroll_to`). Decomposition (3'-anchored) + attachment-state pass.
+      *(**Decomposition done + rendered**: `decompose_primer` → per-column
+      annealed bases / mismatches / 5' tail, strand-correct (the orientation
+      footgun is unit-tested); the PrimerTrack now draws the oligo's bases with
+      amber mismatch cells + lifted tail letters. Layout reordered so the codon
+      band hugs the sequence (translation innermost, then reverse primers, then
+      features). **Remaining**: the standalone seed-and-extend find pass +
+      Confirmed/Drifted/Detached state classification (re-anneal to detect a
+      *moved* binding / off-targets) — feeds 1.3's panel + 1.4's `primers find`.)*
 - [ ] 1.2 `thermo`: self-hairpin ΔG, self-dimer ΔG (seqfold `fold`/`dg`).
 - [ ] 1.3 Primer panel: list (name/binding/Tm/GC/strand + QC + state, incl.
       floating oligos), jump-to-binding, toggle visibility, "check specificity".
