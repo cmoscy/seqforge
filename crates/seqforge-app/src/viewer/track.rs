@@ -533,6 +533,9 @@ pub(crate) struct BlockCtx<'a> {
     /// tail), aligned positionally with `render_ann.primers()`. Recomputed each
     /// frame against the render sequence (cheap — a handful of primers × footprint).
     pub primer_decomps: &'a [seqforge_bio::PrimerDecomposition],
+    /// Per-primer attachment state (Confirmed / Drifted / Detached + off-targets),
+    /// aligned positionally with `render_ann.primers()`. Memoized on buffer version.
+    pub primer_states: &'a [seqforge_bio::PrimerAttachment],
     /// Cut sites (empty while staging — derived overlays are suppressed then).
     pub cut_sites: &'a [CutSite],
     pub search_hits: &'a [SearchHit],
@@ -1081,6 +1084,7 @@ mod tests {
             seq_len: 20,
             render_ann: &ann,
             primer_decomps: &[],
+            primer_states: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1148,6 +1152,7 @@ mod tests {
             seq_len: 20,
             render_ann: ann,
             primer_decomps: &[],
+            primer_states: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1250,6 +1255,7 @@ mod tests {
             seq_len: 40,
             render_ann: &ann,
             primer_decomps: &[],
+            primer_states: &[],
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,

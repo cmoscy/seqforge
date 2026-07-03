@@ -1,22 +1,25 @@
 //! Primer tracks — directional arrows for authored primers (Phase 0.4 render +
-//! Phase 1.1 decomposition; `plans/primers.md` "Rendering"). Two position-owned
-//! bands straddle the sequence: **forward** primers above the top strand,
-//! **reverse** below the bottom strand (the SnapGene/Benchling idiom). Each arrow
-//! is an outlined body column-aligned to the annealed footprint, arrowhead at the
-//! **3' end**, showing the oligo's **bases** per column — matches in the base
-//! palette, **mismatches** on an amber cell (the `Drifted` cue). The 5' tail
-//! (oligo bases beyond the footprint) peels **off** the grid as lifted letters,
-//! long tails capped with a `+N` stub.
+//! Phase 1.1 decomposition + attachment-state; `plans/primers.md` "Rendering").
+//! Two position-owned bands straddle the sequence: **forward** primers above the
+//! top strand, **reverse** below the bottom strand (the SnapGene/Benchling idiom).
+//! Each arrow is an outlined body column-aligned to the annealed footprint,
+//! arrowhead at the **3' end**, showing the oligo's **bases** per column — matches
+//! in the base palette, **mismatches** on an amber cell (the `Drifted` cue). The
+//! 5' tail (oligo bases beyond the footprint) peels **off** the grid as lifted
+//! letters, long tails capped with a `+N` stub. A **moved** badge marks
+//! [`AttachmentState::Drifted`] primers; an **×N** badge counts off-target sites.
 //!
 //! The per-primer alignment (annealed / mismatch / tail, strand-correct) comes
 //! from `seqforge_bio::decompose_primer`, carried in `BlockCtx::primer_decomps`.
-//! A detached primer (`binding = None`) draws nowhere — panel-only (Phase 1.3);
-//! full re-anneal drift detection (binding *moved*) is still Phase 1.1's find pass.
+//! Attachment state + off-targets come from `BlockCtx::primer_states` (memoized
+//! find + classify). A detached primer (`binding = None`) draws nowhere — panel-
+//! only (Phase 1.3).
 //!
 //! Paint and hit-test share one geometry (`primer_body_rect`) — the co-location
 //! invariant the Track abstraction exists to guarantee.
 
 use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, Vec2};
+use seqforge_bio::AttachmentState;
 
 use crate::viewer::track::{BlockCtx, BlockGeom, Hit, Track, primer_body_rect};
 
@@ -196,6 +199,19 @@ fn paint_band(
             );
         }
 
+        // Attachment-state badges (Phase 1.1): drifted "moved" cue + off-target count.
+        if let Some(att) = ctx.primer_states.get(primer_idx) {
+            paint_state_badges(
+                painter,
+                body,
+                mid_y,
+                reverse,
+                char_width,
+                style,
+                att,
+            );
+        }
+
         // 5' tail: oligo bases with no template column peel off the grid as
         // lifted letters (away from the strand), lighter. Drawn only in the block
         // holding the 5' end. Long tails are capped with a "+N" stub.
@@ -243,6 +259,46 @@ fn paint_band(
                 );
             }
         }
+    }
+}
+
+/// Amber drift badge + off-target count past the 3' arrowhead.
+fn paint_state_badges(
+    painter: &Painter,
+    body: Rect,
+    mid_y: f32,
+    reverse: bool,
+    char_width: f32,
+    style: &crate::viewer::track::Style,
+    att: &seqforge_bio::PrimerAttachment,
+) {
+    let badge_color = style.primer_mismatch;
+    let mut badge_x = if reverse {
+        body.min.x - char_width * 1.2
+    } else {
+        body.max.x + char_width * 0.4
+    };
+
+    if att.state == AttachmentState::Drifted {
+        painter.text(
+            Pos2::new(badge_x, mid_y),
+            Align2::CENTER_CENTER,
+            "moved",
+            style.small_font.clone(),
+            badge_color,
+        );
+        badge_x += if reverse { -char_width * 2.8 } else { char_width * 2.8 };
+    }
+
+    let n = att.off_target_sites.len();
+    if n > 0 {
+        painter.text(
+            Pos2::new(badge_x, mid_y),
+            Align2::CENTER_CENTER,
+            format!("×{n}"),
+            style.small_font.clone(),
+            badge_color.gamma_multiply(0.85),
+        );
     }
 }
 

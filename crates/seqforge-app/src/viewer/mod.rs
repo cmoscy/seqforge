@@ -12,6 +12,7 @@
 mod track;
 mod tracks;
 mod translation;
+mod primer_anneal;
 
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use track::{
     find_hit, open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
 };
 use translation::{OrfPromote, TranslationCache, build_translation_cache, codon_extend};
+use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
 
 // Re-exports consumed elsewhere in the crate.
 pub(crate) use track::greedy_stack;
@@ -517,6 +519,9 @@ pub struct SequenceView {
     /// Memoized translation lanes, rebuilt only when `(buffer.version, translation)`
     /// changes — never per frame. `None` when no lanes are shown.
     translation_cache: Option<TranslationCache>,
+    /// Memoized primer attachment-state (find + classify), rebuilt only when
+    /// `buffer.version` changes. `None` while staging (derived overlays suppressed).
+    primer_anneal_cache: Option<PrimerAnnealCache>,
     /// Memoized per-block layout (T4 perf), rebuilt only when its fingerprint
     /// (`buffer.version`, wrap width, layout dims, cut-site set, translation
     /// display) changes — not per frame. Bypassed while staging (the preview
@@ -540,6 +545,7 @@ impl SequenceView {
         // A different document invalidates the memoized layout (its fingerprint
         // is version-keyed to the old buffer).
         self.layout_cache = None;
+        self.primer_anneal_cache = None;
     }
 
     // ── Stage a destructive edit from outside the canvas (Edit menu) ──────
@@ -743,6 +749,30 @@ impl SequenceView {
         let frame_band_rows = trans_cache.as_ref().map_or(0, |c| c.frame_band_rows());
         let trans_band_h = frame_band_rows as f32 * aa_row_h;
 
+        // ── Primer attachment-state (memoized on version) ─────────────────
+        // Suppressed while staging (like cut sites / search / translation).
+        let mut primer_anneal_cache = self.primer_anneal_cache.take();
+        if !staging {
+            let stale = primer_anneal_cache
+                .as_ref()
+                .is_none_or(|c| c.version != buffer.version);
+            if stale {
+                let primer_refs: Vec<_> = render_ann.primers().collect();
+                primer_anneal_cache = Some(build_primer_anneal_cache(
+                    seq,
+                    &primer_refs,
+                    buffer.is_circular(),
+                    buffer.version,
+                ));
+            }
+        } else {
+            primer_anneal_cache = None;
+        }
+        let primer_states: &[seqforge_bio::PrimerAttachment] = primer_anneal_cache
+            .as_ref()
+            .map(|c| c.attachments.as_slice())
+            .unwrap_or(&[]);
+
         // Shared per-frame render style (sizing + fonts + colours).
         let style = Style {
             char_width,
@@ -889,6 +919,7 @@ impl SequenceView {
                 seq_len,
                 render_ann,
                 primer_decomps: &primer_decomps,
+                primer_states,
                 cut_sites,
                 search_hits: &view.search_hits,
                 trans_cache: trans_cache.as_ref(),
@@ -1222,6 +1253,7 @@ impl SequenceView {
         // ends or cancels (an actual commit bumps `version`, invalidating it).
         self.preview = preview;
         self.translation_cache = trans_cache;
+        self.primer_anneal_cache = primer_anneal_cache;
         self.layout_cache = layout_cache;
     }
 }

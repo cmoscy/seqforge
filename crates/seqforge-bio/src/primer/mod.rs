@@ -18,11 +18,18 @@
 //! shrink it independently of the fixed oligo — decision 14): the annealed run
 //! is anchored at the 3' terminus and is `min(oligo_len, footprint)` long.
 
+mod anneal;
+
 use std::ops::Range;
 
 use seqforge_core::Strand;
 
 use crate::dna::complement_byte;
+
+pub use anneal::{
+    AnnealSettings, AttachmentState, PrimerAttachment, PrimerBinding, classify_attachment,
+    find_primer_binding_sites,
+};
 
 /// One template column covered by a primer's annealed footprint.
 #[derive(Debug, Clone, PartialEq, Eq)]

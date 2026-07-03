@@ -18,7 +18,10 @@ pub use dna::{complement, reverse_complement};
 pub use enzyme_query::{
     EnzymePreset, EnzymeQuery, parse_enzyme_query, resolve_query, resolve_query_names,
 };
-pub use primer::{AnnealedBase, PrimerDecomposition, decompose_primer};
+pub use primer::{
+    AnnealSettings, AnnealedBase, AttachmentState, PrimerAttachment, PrimerBinding,
+    PrimerDecomposition, classify_attachment, decompose_primer, find_primer_binding_sites,
+};
 pub use search::{find_cut_sites, find_iupac_matches};
 pub use seqforge_thermo::{TmError, gc, tm};
 pub use translate::{Orf, find_orfs, translate};
