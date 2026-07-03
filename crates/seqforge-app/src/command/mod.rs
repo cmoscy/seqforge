@@ -125,6 +125,8 @@ pub enum AppCommand {
         direction: SplitDirection,
     },
     ResetLayout,
+    /// Show the Inspector pane if hidden; hide it if already docked.
+    ToggleInspector,
 
     // ── Selection ────────────────────────────────────────────────────
     SetSelection(Option<Selection>),
@@ -289,8 +291,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         RevealRange { .. } => state.workspace.active_view().is_some(),
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
-        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | InstallCli | ReloadConfig
-        | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile | OpenConfigDir => true,
+        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
+        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile
+        | OpenConfigDir => true,
     }
 }
 
@@ -512,6 +515,7 @@ pub fn apply<B: BioOps>(
         FocusPaneByIndex(n) => layout::apply_focus_pane_by_index(state, n),
         SplitPane { direction } => layout::apply_split_pane(state, direction),
         ResetLayout => layout::apply_reset_layout(state),
+        ToggleInspector => layout::apply_toggle_inspector(state),
 
         // ── Selection ───────────────────────────────────────────────
         SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),

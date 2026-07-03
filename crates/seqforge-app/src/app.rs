@@ -1271,6 +1271,16 @@ impl eframe::App for SeqForgeApp {
                         });
                     });
                     ui.separator();
+                    let inspector_shown =
+                        self.state.dock_state.find_tab(&Tab::Inspector).is_some();
+                    if ui
+                        .selectable_label(inspector_shown, "Inspector")
+                        .clicked()
+                    {
+                        menu_cmds.push(AppCommand::ToggleInspector);
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Reset Layout").clicked() {
                         menu_cmds.push(AppCommand::ResetLayout);
                         ui.close_menu();
