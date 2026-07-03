@@ -102,9 +102,6 @@ fn paint_band(
         ctx.theme.strand.forward.0
     };
     let body_color = opaque(base);
-    // Faint wash inside the outlined body — enough to read as a shape without the
-    // heavy opaque bar; the annealed bases show on the adjacent sequence track.
-    let fill_color = base.gamma_multiply(0.4);
     let tail_color = base.gamma_multiply(0.6);
 
     for &(primer_idx, row) in rows {
@@ -127,10 +124,9 @@ fn paint_band(
             continue;
         };
 
-        // Body: outlined arrow aligned to the annealed footprint (SnapGene /
-        // Benchling idiom) — a faint fill + solid outline, not an opaque bar, so
-        // the primer's own bases (drawn below) read clearly against it.
-        painter.rect_filled(body, 2.0, fill_color);
+        // Body: an outline only (no fill) aligned to the annealed footprint
+        // (SnapGene / Benchling idiom) — the strand-coloured stroke + arrowhead
+        // carry identity; the primer's own bases fill the interior.
         painter.rect_stroke(
             body,
             2.0,
@@ -143,10 +139,12 @@ fn paint_band(
         let head_half = (body.height() * 0.55 + 2.0).min(style.primer_row_h * 0.5);
 
         // Annealed bases (Phase 1.1 decomposition): the oligo base at each
-        // template column, column-aligned to the sequence row it abuts. Matches
-        // read in the base palette; a **mismatch** gets an amber cell + amber
-        // glyph (the `Drifted` cue). Reverse orientation/tail were resolved in
-        // `decompose_primer`, so this loop is strand-agnostic.
+        // template column, column-aligned to the sequence row it abuts. Matched
+        // bases share **one** neutral colour so the primer reads as a distinct
+        // block (not the multi-colour base palette of the sequence below); a
+        // **mismatch** pops in the amber accent + cell (the `Drifted` cue).
+        // Reverse orientation/tail were resolved in `decompose_primer`, so this
+        // loop is strand-agnostic.
         let decomp = ctx.primer_decomps.get(primer_idx);
         if let Some(decomp) = decomp {
             for ab in &decomp.annealed {
@@ -155,7 +153,7 @@ fn paint_band(
                 }
                 let cx = geom.seq_x0 + (ab.column - block_start) as f32 * char_width;
                 let color = if ab.matches {
-                    ctx.theme.bases.for_base(ab.base)
+                    style.text_color
                 } else {
                     let cell = Rect::from_min_size(
                         Pos2::new(cx, body.min.y),
