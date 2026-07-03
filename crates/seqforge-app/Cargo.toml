@@ -15,6 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = "2"
 egui-file-dialog = "0.9"
+egui-phosphor = "0.9" # icon font (X / trash / … ); egui 0.31-compatible
 egui_term = "0.1.0"
 clap.workspace = true
 egui-notify = "0.19"

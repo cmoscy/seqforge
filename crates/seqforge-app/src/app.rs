@@ -328,6 +328,12 @@ pub struct SeqForgeApp {
 
 impl SeqForgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Merge the Phosphor icon font into egui's defaults so UI glyphs (remove
+        // ✕, delete trash, …) render — the bundled font lacks them (they tofu'd).
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         let mut state = AppState::default();
         let (config, cfg_warnings) = Config::load();
         state.config = config;

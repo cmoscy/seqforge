@@ -333,7 +333,10 @@ impl InspectorState {
                 submit_show = true;
             }
             if ui
-                .add_enabled(has_input, egui::Button::new("＋ Add"))
+                .add_enabled(
+                    has_input,
+                    egui::Button::new(format!("{} Add", egui_phosphor::regular::PLUS)),
+                )
                 .on_hover_text("Add these enzymes to the current set")
                 .clicked()
             {
@@ -432,11 +435,11 @@ impl InspectorState {
                     if !r.recognition.is_empty() {
                         ui.label(egui::RichText::new(&r.recognition).monospace().small());
                     }
-                    // Remove control pinned to the right edge — a close-style ✕
-                    // (the "remove from view" affordance), not a leading checkbox.
+                    // Shared remove control, pinned right. Enzymes use the ✕ icon:
+                    // this drops the enzyme from the displayed set (reversible via
+                    // re-query), not a destructive delete — hence ✕, not trash.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button("✕")
+                        if remove_button(ui, egui_phosphor::regular::X)
                             .on_hover_text(format!("Remove {} from view", r.name))
                             .clicked()
                         {
@@ -493,12 +496,20 @@ impl InspectorState {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in &feats {
                 let is_sel = selected == Some(f.id);
-                let resp = row_shell(ui, &feature_display_row(f, is_sel));
-                if resp.double_clicked() {
+                let row = feature_display_row(f, is_sel);
+                let hit = row_shell(ui, &row);
+                if hit.remove_clicked {
+                    if let Some(spec) = row.on_remove {
+                        pending.push((spec.cmd, None));
+                    }
+                    *editing = None; // the row is going away
+                    continue;
+                }
+                if hit.resp.double_clicked() {
                     *editing = Some(FeatureDraft::from_row(f));
                     // Ensure the map selection follows the row being edited.
                     pending.push((AppCommand::RevealFeature { id: f.id }, None));
-                } else if resp.clicked() {
+                } else if hit.resp.clicked() {
                     // Selecting a different row cancels an in-flight edit.
                     if editing.as_ref().is_some_and(|d| d.id != f.id) {
                         *editing = None;
@@ -578,8 +589,27 @@ struct Row {
     on_select: AppCommand,
     /// Double-click → edit modal (`None` = read-only noun).
     on_activate: Option<AppCommand>,
+    /// Right-edge remove/close control. `None` = the row is not removable.
+    /// Shared affordance across tabs (decision 15 base layer).
+    on_remove: Option<RemoveSpec>,
     /// Shown under the row while selected.
     detail: Vec<DetailLine>,
+}
+
+/// A row's remove control: the command it posts, the Phosphor icon that conveys
+/// its intent (`X` = reversible "remove from view"; `TRASH` = destructive
+/// "delete"), and hover text.
+struct RemoveSpec {
+    cmd: AppCommand,
+    icon: &'static str,
+    hover: String,
+}
+
+/// What a row interaction resolved to this frame.
+struct RowHit {
+    resp: egui::Response,
+    /// The right-edge remove control was clicked (takes priority over select).
+    remove_clicked: bool,
 }
 
 fn render_collection(
@@ -600,17 +630,45 @@ fn render_collection(
     });
 }
 
-/// Draw a row's compact shell (fill + glyph + dot + name + right cells) and
-/// return its click-sensed response. Shared by the generic renderer and the
-/// editable Features tab so their rows look identical.
-fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
+/// Shared right-edge remove/close control, rendered from the Phosphor icon font
+/// (the bundled egui font lacks ✕/trash glyphs — they tofu). One glyph, one
+/// placement, one logic across Inspector tabs. `icon` conveys intent (`X` =
+/// reversible remove-from-view; `TRASH` = destructive delete). Red-tinted on
+/// hover. Returns its response so callers add hover text / read `clicked()`.
+fn remove_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    let color = if hovered {
+        egui::Color32::from_rgb(0xE0, 0x60, 0x60)
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(14.0),
+        color,
+    );
+    resp
+}
+
+/// Draw a row's compact shell (fill + glyph + dot + name + right cells + optional
+/// remove control) and report the interaction. Shared by the generic renderer and
+/// the editable Features tab so their rows look and behave identically.
+fn row_shell(ui: &mut egui::Ui, row: &Row) -> RowHit {
     let fill = if row.selected {
         ui.visuals().selection.bg_fill
     } else {
         egui::Color32::TRANSPARENT
     };
 
-    egui::Frame::new()
+    let mut remove_clicked = false;
+    let resp = egui::Frame::new()
         .fill(fill)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
@@ -628,6 +686,16 @@ fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
                     ui.label(&row.name);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Remove control pinned to the far right edge (if removable).
+                    if let Some(spec) = &row.on_remove {
+                        if remove_button(ui, spec.icon)
+                            .on_hover_text(spec.hover.clone())
+                            .clicked()
+                        {
+                            remove_clicked = true;
+                        }
+                        ui.add_space(4.0);
+                    }
                     for cell in row.right.iter().rev() {
                         ui.weak(cell);
                         ui.add_space(8.0);
@@ -636,18 +704,29 @@ fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
             });
         })
         .response
-        .interact(egui::Sense::click())
+        .interact(egui::Sense::click());
+    RowHit {
+        resp,
+        remove_clicked,
+    }
 }
 
 fn render_row(ui: &mut egui::Ui, row: Row, pending: &mut Vec<PendingCommand>) {
-    let resp = row_shell(ui, &row);
+    let hit = row_shell(ui, &row);
 
+    // Remove takes priority over select (it sits inside the row's click rect).
+    if hit.remove_clicked {
+        if let Some(spec) = row.on_remove {
+            pending.push((spec.cmd, None));
+        }
+        return;
+    }
     // Double-click activates (edit modal); a plain click selects/reveals.
-    if resp.double_clicked() {
+    if hit.resp.double_clicked() {
         if let Some(cmd) = row.on_activate {
             pending.push((cmd, None));
         }
-    } else if resp.clicked() {
+    } else if hit.resp.clicked() {
         pending.push((row.on_select, None));
     }
 
@@ -756,6 +835,8 @@ impl InspectorCollection for PrimersCollection<'_> {
                     right,
                     on_select: AppCommand::RevealPrimer { id: p.id },
                     on_activate: None, // primer edit modal = Phase 2.1
+                    // RemovePrimer (delete-with-undo, trash icon) lands with 2.1.
+                    on_remove: None,
                     detail,
                 }
             })
@@ -781,10 +862,20 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
             format!("{}–{}", f.range.start + 1, f.range.end),
             f.kind.clone(),
         ],
-        // Unused by the Features tab (it drives select/edit off the raw row), but
-        // kept coherent for any shared-renderer path.
         on_select: AppCommand::RevealFeature { id: f.id },
         on_activate: None,
+        // Delete-with-undo (trash icon = destructive; reversible via history).
+        on_remove: Some(RemoveSpec {
+            cmd: AppCommand::Viewer(ViewerRequest::RemoveFeature {
+                id: f.id,
+                view: None,
+            }),
+            icon: egui_phosphor::regular::TRASH,
+            hover: format!(
+                "Delete feature {}",
+                if unnamed { "(unnamed)" } else { &f.label }
+            ),
+        }),
         detail: vec![],
     }
 }
