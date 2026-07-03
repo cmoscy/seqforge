@@ -30,24 +30,43 @@ pub(crate) struct PrimerReverseTrack;
 
 impl Track for PrimerForwardTrack {
     fn block_height(&self, ctx: &BlockCtx) -> f32 {
+        // Hidden (Inspector toggle) → collapse the band so the stack closes up.
+        if !ctx.primer_display.show {
+            return 0.0;
+        }
         ctx.layout.primer_fwd_band_h
     }
     fn paint(&self, ctx: &BlockCtx, geom: &BlockGeom, painter: &Painter) {
+        if !ctx.primer_display.show {
+            return;
+        }
         paint_band(ctx, geom, painter, &ctx.layout.primer_fwd_rows, false);
     }
     fn hit_rects(&self, ctx: &BlockCtx, geom: &BlockGeom, hits: &mut Vec<(Rect, Hit)>) {
+        if !ctx.primer_display.show {
+            return;
+        }
         hit_band(ctx, geom, &ctx.layout.primer_fwd_rows, hits);
     }
 }
 
 impl Track for PrimerReverseTrack {
     fn block_height(&self, ctx: &BlockCtx) -> f32 {
+        if !ctx.primer_display.show {
+            return 0.0;
+        }
         ctx.layout.primer_rev_band_h
     }
     fn paint(&self, ctx: &BlockCtx, geom: &BlockGeom, painter: &Painter) {
+        if !ctx.primer_display.show {
+            return;
+        }
         paint_band(ctx, geom, painter, &ctx.layout.primer_rev_rows, true);
     }
     fn hit_rects(&self, ctx: &BlockCtx, geom: &BlockGeom, hits: &mut Vec<(Rect, Hit)>) {
+        if !ctx.primer_display.show {
+            return;
+        }
         hit_band(ctx, geom, &ctx.layout.primer_rev_rows, hits);
     }
 }
@@ -149,8 +168,12 @@ fn paint_band(
         // Reverse orientation/tail were resolved in `decompose_primer`, so this
         // loop is strand-agnostic.
         let decomp = ctx.primer_decomps.get(primer_idx);
-        if let Some(decomp) = decomp {
-            for ab in &decomp.annealed {
+        // Arrows-vs-bases (Inspector toggle): in arrow mode we draw only the
+        // outline + arrowhead + badges; the per-base letters and tail ribbon are
+        // suppressed.
+        if ctx.primer_display.bases {
+            if let Some(decomp) = decomp {
+                for ab in &decomp.annealed {
                 if ab.column < block_start || ab.column >= block_end {
                     continue;
                 }
@@ -172,6 +195,7 @@ fn paint_band(
                     style.font_id.clone(),
                     color,
                 );
+                }
             }
         }
 
@@ -221,7 +245,7 @@ fn paint_band(
         } else {
             binding.start >= block_start
         };
-        if !tail.is_empty() && five_prime_in_block {
+        if ctx.primer_display.bases && !tail.is_empty() && five_prime_in_block {
             let cap = 8usize;
             let shown = tail.len().min(cap);
             let lift = style.primer_row_h * 0.5 * if reverse { 1.0 } else { -1.0 };

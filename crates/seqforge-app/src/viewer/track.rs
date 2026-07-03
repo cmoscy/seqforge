@@ -536,6 +536,8 @@ pub(crate) struct BlockCtx<'a> {
     /// Per-primer attachment state (Confirmed / Drifted / Detached + off-targets),
     /// aligned positionally with `render_ann.primers()`. Memoized on buffer version.
     pub primer_states: &'a [seqforge_bio::PrimerAttachment],
+    /// Which primer overlays to draw (show/hide + arrows-vs-bases).
+    pub primer_display: super::PrimerDisplay,
     /// Cut sites (empty while staging — derived overlays are suppressed then).
     pub cut_sites: &'a [CutSite],
     pub search_hits: &'a [SearchHit],
@@ -1085,6 +1087,7 @@ mod tests {
             render_ann: &ann,
             primer_decomps: &[],
             primer_states: &[],
+            primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1153,6 +1156,7 @@ mod tests {
             render_ann: ann,
             primer_decomps: &[],
             primer_states: &[],
+            primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,
@@ -1256,6 +1260,7 @@ mod tests {
             render_ann: &ann,
             primer_decomps: &[],
             primer_states: &[],
+            primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
             search_hits: &[],
             trans_cache: None,

@@ -20,6 +20,7 @@ use std::ops::Range;
 use seqforge_core::{CutSite, FeatureId, PrimerId, PrimerInfo, PrimerState, Strand, ViewId};
 
 use crate::command::{AppCommand, PendingCommand};
+use crate::viewer::PrimerDisplay;
 use crate::workspace::Workspace;
 
 /// Which noun-collection the pane is showing.
@@ -60,6 +61,9 @@ pub struct InspectorState {
     cut_sites: Vec<CutSite>,
     selected_primer: Option<PrimerId>,
     selected_feature: Option<FeatureId>,
+    /// The active view's primer map-overlay display (mirrored for the header
+    /// toggles; source of truth stays on the `SequenceView`).
+    primer_display: PrimerDisplay,
     has_view: bool,
 }
 
@@ -104,6 +108,11 @@ impl InspectorState {
         self.cut_sites = cut_sites;
         self.selected_primer = sel_p;
         self.selected_feature = sel_f;
+        self.primer_display = workspace
+            .seq_views
+            .get(&view_id)
+            .map(|sv| sv.primer_display)
+            .unwrap_or_default();
 
         let stale = self
             .primer_cache
@@ -154,6 +163,24 @@ impl InspectorState {
             self.tab_button(ui, InspectorTab::Features, "Features", self.features.len());
         });
         ui.separator();
+
+        // Primers-tab header toggles: show-on-map + arrows-vs-bases (drives the
+        // PrimerTrack via `SetPrimerDisplay`; the source of truth is the view).
+        if self.tab == InspectorTab::Primers {
+            let mut d = self.primer_display;
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                changed |= ui.checkbox(&mut d.show, "Show on map").changed();
+                changed |= ui
+                    .add_enabled_ui(d.show, |ui| ui.checkbox(&mut d.bases, "Bases").changed())
+                    .inner;
+            });
+            if changed {
+                pending.push((AppCommand::SetPrimerDisplay(d), None));
+            }
+            ui.separator();
+        }
 
         match self.tab {
             InspectorTab::Primers => render_collection(

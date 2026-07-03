@@ -490,6 +490,27 @@ fn handle_keyboard(
 
 // ── Widget state ──────────────────────────────────────────────────────────────
 
+/// Which primer overlays the map shows — the Inspector Primers-tab header
+/// toggles. Per-view transient display state, like [`TranslationDisplay`];
+/// toggled through `AppCommand::SetPrimerDisplay`. Not persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimerDisplay {
+    /// Draw the primer arrow tracks at all.
+    pub show: bool,
+    /// Show per-base letters inside the arrow (Benchling "Primer bases"); when
+    /// false the primer renders as an arrow outline + head only.
+    pub bases: bool,
+}
+
+impl Default for PrimerDisplay {
+    fn default() -> Self {
+        Self {
+            show: true,
+            bases: true,
+        }
+    }
+}
+
 /// Per-document state for the sequence viewer widget.
 #[derive(Debug, Default)]
 pub struct SequenceView {
@@ -516,6 +537,8 @@ pub struct SequenceView {
     /// Which in-canvas translation lanes are shown (View → Translation). Transient
     /// per-view state (like the active enzyme set), toggled through `AppCommand`.
     pub translation: TranslationDisplay,
+    /// Which primer overlays the map shows (Inspector Primers header toggles).
+    pub primer_display: PrimerDisplay,
     /// Memoized translation lanes, rebuilt only when `(buffer.version, translation)`
     /// changes — never per frame. `None` when no lanes are shown.
     translation_cache: Option<TranslationCache>,
@@ -879,6 +902,7 @@ impl SequenceView {
         let stack = TrackStack::new();
         let theme = &cfg.theme;
         let show_orfs = self.translation.show_orfs;
+        let primer_display = self.primer_display;
         let selection = view.selection;
         let selected_feature = view.selected_feature;
 
@@ -920,6 +944,7 @@ impl SequenceView {
                 render_ann,
                 primer_decomps: &primer_decomps,
                 primer_states,
+                primer_display,
                 cut_sites,
                 search_hits: &view.search_hits,
                 trans_cache: trans_cache.as_ref(),

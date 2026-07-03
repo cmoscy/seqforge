@@ -180,6 +180,9 @@ pub enum AppCommand {
     /// (View → Translation). Carries the full new state; the menu toggles a
     /// field and sends the whole struct.
     SetTranslationDisplay(crate::viewer::TranslationDisplay),
+    /// Set the active view's primer map-overlay display (Inspector Primers-tab
+    /// header toggles: show/hide on map, arrows-vs-bases).
+    SetPrimerDisplay(crate::viewer::PrimerDisplay),
     /// Toggle inline translation for a single feature (right-click → Show/Hide
     /// translation), anchored to that feature's start + strand.
     ToggleFeatureTranslation(FeatureId),
@@ -295,9 +298,10 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         // New Feature (create form from the menu) needs a range selection;
         // an edit form is opened with a concrete feature so it's always valid.
         OpenFeatureForm { id, .. } => id.is_some() || has_range_selection(state),
-        OpenTranslation { .. } | SetTranslationDisplay(_) | ToggleFeatureTranslation(_) => {
-            state.workspace.active_view().is_some()
-        }
+        OpenTranslation { .. }
+        | SetTranslationDisplay(_)
+        | ToggleFeatureTranslation(_)
+        | SetPrimerDisplay(_) => state.workspace.active_view().is_some(),
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
@@ -562,6 +566,14 @@ pub fn apply<B: BioOps>(
             if let Some(vid) = state.workspace.active_view {
                 if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
                     sv.translation = display;
+                }
+            }
+            Ok(None)
+        }
+        SetPrimerDisplay(display) => {
+            if let Some(vid) = state.workspace.active_view {
+                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
+                    sv.primer_display = display;
                 }
             }
             Ok(None)
