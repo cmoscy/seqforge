@@ -393,18 +393,6 @@ impl InspectorState {
                 let is_expanded = expanded.contains(&r.name);
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("Remove from set")
-                        .clicked()
-                    {
-                        pending.push((
-                            AppCommand::RemoveEnzyme {
-                                name: r.name.clone(),
-                            },
-                            None,
-                        ));
-                    }
                     // ▸/▾ for multi-site (expandable); spacer otherwise.
                     let prefix = match n {
                         0 | 1 => "   ",
@@ -444,6 +432,22 @@ impl InspectorState {
                     if !r.recognition.is_empty() {
                         ui.label(egui::RichText::new(&r.recognition).monospace().small());
                     }
+                    // Remove control pinned to the right edge — a close-style ✕
+                    // (the "remove from view" affordance), not a leading checkbox.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("✕")
+                            .on_hover_text(format!("Remove {} from view", r.name))
+                            .clicked()
+                        {
+                            pending.push((
+                                AppCommand::RemoveEnzyme {
+                                    name: r.name.clone(),
+                                },
+                                None,
+                            ));
+                        }
+                    });
                 });
                 // Per-site sub-rows for an expanded multi-site enzyme.
                 if n > 1 && is_expanded {
