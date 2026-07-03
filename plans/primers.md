@@ -1,6 +1,7 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: Phases 0–1.2 + 1.3a/1.3b landed; design settled for the rest.**
+> **Status: Phase 1 complete (0.1–1.4 landed); Phase 1.5 (Inspector as unified
+> viewer/detail/editor) specced next; Phase 2+ design settled.**
 > Architecture, sourcing, and consistency-with-the-implemented-model all worked
 > out (see "Decisions locked" and "Consistency with the implemented model"
 > below). **Done:** 0.1–0.5 (thermo + `seqforge tm`; live Tm/%GC readout;
@@ -18,8 +19,10 @@
 > double-click → edit modal (Features → `OpenFeatureForm`), map↔panel selection
 > sync, and the Primers header map-toggles (show/hide, arrows-vs-bases). **1.4** —
 > CLI `primers list` / `primers find` (same `primer_infos` projection). **Phase 1
-> complete; next: Phase 2** (creation/editing — staged primer dialog + `AddPrimer`
-> / `UpdatePrimer` / `RemovePrimer`). Canonical cross-track status:
+> complete; next: Phase 1.5** (Inspector as unified viewer/detail/inline-editor —
+> inline edit + enzyme query→pane + primer oligo-copy; ROADMAP decision 15), **then
+> Phase 2** (creation/editing — inline primer form + `AddPrimer` / `UpdatePrimer` /
+> `RemovePrimer`). Canonical cross-track status:
 > [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
@@ -251,20 +254,27 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
 
 ## Panels / Inspector — surfacing (Phase 1.3, track decision 10 below)
 
-**Surface grammar (holds for every UI element in this app):**
-- **Transient bars = verbs (commands).** Find, GoTo, **Enzymes-query**, future
-  `primers find`. Keyboard-invoked, one input → mutate view state, dismiss. Input
-  only; the *result* lives on the map. Zero permanent layout cost. Rendered inline
-  atop the active view (existing `overlay::show_inline_bar`).
-- **Dock panes = nouns (collections).** Files, Terminal, and the new **Inspector**.
-  A persistent list you cross-reference against the map continuously. Opt-in /
-  toggleable.
-- **Modals (`egui::Window`) = blocking decisions.** Forms, confirmations. Never
-  for a list you cross-reference.
+**Surface grammar (holds for every UI element in this app — refined by ROADMAP
+decision 15 / Phase 1.5):**
+- **Transient bars = one-shot view-mutation verbs.** Find, GoTo. Keyboard-invoked,
+  one input → mutate view state, dismiss; the *result* lives on the map, nothing to
+  return to. Zero permanent layout cost (existing `overlay::show_inline_bar`).
+- **The Inspector pane = persistent, inspectable, *editable* collections.** Files,
+  Terminal, and the **Inspector** (Primers · Cut sites · Features). The pane is a
+  **viewer + detail + inline-editor** (decision 15): browse the list, select for
+  detail, edit in place. A populate/filter **query lives in the pane header** where
+  a collection needs one (Enzymes). Opt-in / toggleable.
+- **Modals (`egui::Window`) = blocking decisions only.** Save / revert / overwrite
+  confirmations. **Not** entity editing (that is inline-in-pane) and never a list
+  you cross-reference.
 
-Enzymes keep their **bar** (the verb — sets `active_enzymes`); the resulting cut
-sites become a **noun** (a list to browse + jump to) in the Inspector. The two are
-complementary — the bar feeds the pane — not either/or.
+The deciding test (decision 15): does the operation manage **persistent state the
+user returns to and refines** (→ pane) or a **transient one-shot mutation they
+dismiss** (→ bar)? Enzymes *fail* the transient test — `active_enzymes` is a set
+the user builds, toggles, and adds to/removes from over a session — so the enzyme
+**query re-homes into the Cut-sites tab header** (⌘E re-targets to focus it) and the
+standalone enzyme **overlay is retired** (Phase 1.5b). Find/GoTo genuinely are
+one-shot → they stay bars.
 
 **The Inspector = one dockable, tabbable pane with sub-tabs: Primers · Cut sites ·
 Features.** Each sub-tab is a noun-collection with the same *click-row → reveal on
@@ -331,48 +341,59 @@ detail** (keeps it clean — do not inline everything):
   Drifted dot, grey/italic Detached, warning icon) instead of extra columns;
   right-align numerics.
 
-### Editing model — table is the *launcher*, modal is the *edit view*
+### Editing model — inline-in-pane (decision 15), one commit path
 
-Decision 10's surface grammar (forms → modals, collections → panes) is preserved
-**exactly** — the Inspector does **not** introduce inline editing. Instead:
+The Inspector edits **in place**, not via a center modal (this *supersedes* the
+earlier launcher→modal design; ROADMAP decision 15). The grammar's load-bearing
+invariant — *one `ViewerRequest` = one CLI verb = single applier + history* — is
+preserved **exactly**; only the *authoring surface* moves from a floating window
+into the pane. Historical note: 1.3c shipped the launcher→`OpenFeatureForm` modal;
+Phase 1.5a replaces it with the inline editor below.
 
-- The **table** is a browser + selector + **trigger**: a row's double-click / Enter
-  activates it.
-- Activation opens the **existing modal** for that noun (`OpenFeatureForm{id}`
-  today; `OpenPrimerForm{id}` at Phase 2.1), pre-filled with the row's data.
-- The **modal's Submit emits exactly one `ViewerRequest`** (`UpdateFeature`,
-  `AddPrimer`, …) — which *is* the CLI verb. One request shape, two front-ends
-  (GUI modal + CLI), single applier + history, no parallel mutation path and no
-  GUI/agent drift. This is why keeping modals **lowers** complexity: the pane holds
-  no draft state / edit-mode machinery, and grabs no text-editing focus — only a
-  lightweight activation gesture (the modal owns Enter=submit / Escape=cancel).
+- The **row is a viewer by default**: selecting it expands to a read-only field
+  view (evolves the existing on-select detail).
+- **Edit-on-initiation:** the first edit gesture on a field enters a capture mode —
+  the pane pushes a `Pane:Inspector:Editing` focus-capture context-tag (**Enter =
+  commit, Esc = cancel/revert**) and holds a small transient **draft**. Until then
+  the pane grabs no keys (the `docs/focus-refactor.md` "later, additively" hook).
+- **Commit emits exactly one `ViewerRequest`** (`UpdateFeature`, `UpdatePrimer`, …)
+  — the same request the CLI verb posts — through the single applier + history. No
+  parallel mutation path, no GUI/agent drift. The draft is transient (keyed to the
+  selected id in the active view, discarded on any selection/view change), so the
+  orphan-id protection (pane holds no `ViewId`) is untouched.
 
-Consequence: **cut-sites/enzymes are read-only** (derived; changed via the enzyme
-*bar*, not row edits) → their rows have no edit modal (activation just reveals).
-Editability is therefore **opt-in per collection**, not universal.
+Consequence: **cut-sites are read-only** (derived; managed via the pane's enzyme
+query, not row edits) → they opt out of `edit_fields`. Editability stays **opt-in
+per collection**. Because the *edit mechanism* (draft + focus tag) is shared while
+the *field schema* is per-noun, Features (Phase 1.5a) and Primers (Phase 2.1) reuse
+one implementation.
 
-### `InspectorCollection` trait — templatize display, *not* editing (the Track analog)
+### `InspectorCollection` trait — templatize the *mechanism*, not the schema (the Track analog)
 
-The three sub-tabs share one **generic table renderer** driven by a per-noun
-descriptor — the same move as the `Track` trait (`plans/render-tracks.md`): one
-mechanism, many implementations. Templatize **display + selection + activation
-dispatch**; do **not** templatize the edit forms (unlike paint, edit schemas
-diverge — features have qualifiers, primers have tail+QC — so each noun keeps its
-own modal, or none).
+The sub-tabs share one **generic renderer** driven by a per-noun descriptor — the
+`Track`-trait move (`plans/render-tracks.md`): one mechanism, many implementations.
+Decision 15 extends this from display to **editing + query**, but the split is
+deliberate: templatize the **interaction mechanism** (list + selection + the inline
+draft/edit-mode + the header query), **not** the field schemas (features have
+qualifiers, primers tail+QC — those diverge, so each noun supplies its own field
+descriptors and commit verb). Capabilities are **opt-in** — a read-only noun
+returns `None` and stays non-editable.
 
 ```rust
 trait InspectorCollection {
-    fn columns(&self) -> &[Column];
-    fn rows(&self, ctx) -> Vec<Row>;                 // from PrimerInfo / FeatureInfo / CutSite
-    fn on_select(&self, id) -> AppCommand;           // reveal + select footprint
-    fn on_activate(&self, id) -> Option<AppCommand>; // → Open*Form{id}; None = read-only
+    fn rows(&self) -> Vec<Row>;                              // from PrimerInfo / FeatureInfo / CutSite
+    fn on_select(&self, id) -> AppCommand;                   // reveal + select
+    // opt-in (decision 15 / Phase 1.5); None = capability absent:
+    fn edit_fields(&self, id) -> Option<Vec<Field>>;         // inline detail/editor schema
+    fn on_commit(&self, id, draft) -> Option<ViewerRequest>; // one CLI verb
+    fn query(&self) -> Option<QueryHeader>;                  // populate/filter (Enzymes)
 }
 ```
 
-Primers implement it first (1.3c) as the seed; Cut-sites (`view.cut_sites`,
-read-only) and Features (activation → the *existing* feature modal, an early
-payoff) follow. Adding a fourth noun later = one descriptor. Backed by the `List*`
-projections so the table can't drift from the CLI.
+Primers seeded the trait (1.3c, display-only); Phase 1.5 adds the edit + query
+capabilities (Features first as the proof, enzymes gain the query header), and
+Phase 2.1's primer form rides them. Adding a fifth noun later = one descriptor.
+Backed by the `List*` projections so the table can't drift from the CLI.
 
 ### One projection under it (agent/GUI parity)
 
@@ -508,23 +529,69 @@ Each item cites the code it must stay consistent with.
       `layout.inspector_fraction`), version-keyed `InspectorState` cache, Primers
       tab as a **read-only** list, `View → Inspector` show/hide toggle. Layout
       back-compat + default-dock + focus-scope tested.
-- [~] 1.3c **Interactive tabs + generalization** — DONE: `InspectorCollection`
+- [x] 1.3c **Interactive tabs + generalization** — `InspectorCollection`
       trait + shared table renderer; three tabs (Primers, Cut sites read-only,
       Features); single-click → select/reveal (`RevealPrimer`/`RevealFeature`/
       `RevealRange`), **double-click → edit modal** (`OpenFeatureForm` wired;
       primers await 2.1's modal), on-select detail; map↔panel selection sync
-      (`SelectPrimer`). **Remaining:** header **map-toggles** (show/hide primers
-      on map, arrows-vs-bases — `View`-display flags like translation lanes) and
-      optional Enter-key activation. Full spec: **"Panels / Inspector"** (decision
-      10).
+      (`SelectPrimer`); and the header **map-toggles** (`PrimerDisplay { show,
+      bases }` on `SequenceView` → `SetPrimerDisplay`; show/hide primers on map +
+      arrows-vs-bases). Enter-key row activation deferred as additive (pane grabs
+      no keys). Full spec: **"Panels / Inspector"** (decision 10).
 - [x] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3 via one
       `seqforge_bio::primer_infos`) + `seqforge primers find <oligo>`
       (`find_primer_binding_sites`). Load → project → JSON; ids minted via
       `Annotations::from_parts` (decision 9). Parity verified against pUC19.
 
+### Phase 1.5 — Inspector as unified viewer/detail/editor (pre-2.1, ROADMAP decision 15)
+
+Graduates the Inspector from read-only noun-lists into the **viewer + detail +
+inline-editor** surface of decision 15 (the Figma/Xcode/DevTools/Benchling
+Inspector-panel idiom). Lands the shared edit-mode + query-header mechanisms that
+Phase 2.1's primer form then rides — so that form is inline from day one, never a
+modal. Order within the block is flexible; **1.5c is independent** and can land
+first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
+
+- [x] 1.5a **Shared inline edit-mode (Features)** — the selected Features row
+      expands to a read-only viewer; an edit gesture (Edit button / double-click)
+      drops into an inline field editor backed by a pane-local `FeatureDraft`
+      (`inspector.rs`). Commit posts one `UpdateFeature` `ViewerRequest` (= the CLI
+      verb, `FeatureDraft::to_request`, unit-tested) through the single applier +
+      history; Enter/Save commits, Esc/Cancel reverts; the buffer never mutates
+      until commit. New `Pane:Inspector:Editing` context-tag suppresses single-key
+      user bindings while typing (keymap `ws_ok` gate), else the pane grabs no
+      keys. Draft reconciled each frame (dropped if its feature vanishes). **The
+      Inspector no longer opens the center `FeatureForm` modal to edit.** *Scope
+      note:* the modal is **retained for create-from-menu** ("New Feature"); the
+      inline **create** path + generalizing the draft to a trait method land with
+      the 2nd editable noun (primers, 2.1) — extract-on-second-use, not before.
+      Tests: commit-mapping + draft seed/validity + `Pane:Inspector:Editing`
+      resolution; full app suite (102) + workspace clippy green.
+- [x] 1.5b **Enzyme query-in-pane; retire the overlay** — the **Cut sites** tab now
+      carries the enzyme query **header** (input + Show/＋Add/Clear, Enter=Show) over
+      the grouped enzyme→sites list with per-enzyme ✕ remove + jump + expand
+      (`inspector.rs::show_cutsites`, reusing `enzyme_rows` + the existing
+      `SubmitEnzymes`/`AddEnzymes`/`RemoveEnzyme`/`RevealRange` commands — no new
+      backend). **⌘E re-targets** via `apply_open_enzymes` → `dock_inspector_if_absent`
+      (factored from `apply_toggle_inspector`) + `InspectorState::reveal_enzyme_query`
+      (Cut-sites tab + one-shot focus) + `FocusScope::Inspector`. **Deleted
+      `Overlay::EnzymeBar`, `render_enzyme_bar`, `enzyme_bar_mut`/`has_enzyme_bar`,
+      `TAG_ENZYME_BAR`**; `show_inline_bar` slimmed to Find/GoTo (param dropped).
+      Find/GoTo bars unaffected. Tests: `reveal_enzyme_query` + full suite (103) +
+      workspace clippy green.
+- [x] 1.5c **Primer object-copy correctness** — `apply_copy` is now object-aware:
+      when the copy range equals a **selected primer's** binding footprint, it
+      copies the authored `Primer.sequence` (full oligo 5'→3', tail incl.) instead
+      of the template slice (wrong strand for reverse primers; can't represent a 5'
+      tail). The `range == binding` gate leaves explicit off-footprint range copies
+      (CLI/agent) as literal slices, so parity holds; centralised in `apply_copy`
+      so both canvas ⌘C and the menu Copy benefit. Tests: oligo-vs-slice +
+      different-range parity + no-selection control (105 total green).
+
 ### Phase 2 — Creation / editing (uses the editor)
-- [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; staged
-      **primer dialog** (sibling of the feature dialog); create-from-selection;
+- [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
+      primer form** in the Inspector (rides 1.5a's edit-mode — *not* a modal);
+      create-from-selection;
       **optional name → `suggest_primer_name()` default** (decision 9);
       detach-on-destroy surfaced in the staged preview / reported by CLI.
 - [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
@@ -608,7 +675,27 @@ Each item cites the code it must stay consistent with.
     the CLI verb. This *preserves* the forms→modals grammar (does not bend it),
     keeps the pane keyless beyond an activation gesture, and lowers LoC (no
     inline-edit state machine). Read-only nouns (cut-sites) have no modal —
-    editability is opt-in per collection.
+    editability is opt-in per collection. **Editing model + enzyme placement here
+    are superseded by item 11 (ROADMAP decision 15)**; the pane/singleton/`List*`
+    invariants stand.
+11. **Inspector = unified viewer/detail/inline-editor** (ROADMAP decision 15;
+    refines item 10). The pane graduates from read-only lists to the
+    Figma/Xcode/DevTools/Benchling **Inspector-panel** idiom: browse → select-detail
+    → **edit inline in the pane**, *not* launcher→center-modal. Editing = a transient
+    pane draft + a `Pane:Inspector:Editing` focus-capture tag (Enter = commit → the
+    one `ViewerRequest`/CLI verb, Esc = cancel); the pane grabs no keys until an
+    edit or query begins. Persistent, inspectable, **editable** collections
+    (Enzymes · Primers · Features) are pane tabs; only transient one-shot
+    view-mutations (Find · GoTo) stay bars. The **enzyme overlay is retired** — its
+    query re-homes to the Cut-sites tab header, ⌘E re-targets to focus it. The shared
+    move is to templatize the edit **mechanism** (draft + focus tag + query header)
+    across nouns — *not* the field schemas (features have qualifiers, primers
+    tail+QC), each noun opting in (read-only nouns keep none). Preserves the single
+    commit path + orphan-id protection; only *conditionally* relaxes "pane grabs no
+    keys" (an additive focus tag the focus-refactor already anticipated). Rationale:
+    the dominant professional convention; removes the enzyme-bar special case; net
+    LoC cut. Lands as **Phase 1.5**, before Phase 2.1 (so the primer form is inline
+    from day one). Full shape: "Panels / Inspector" + "Editing model" above.
 
 ## Resolved (previously open) questions
 
