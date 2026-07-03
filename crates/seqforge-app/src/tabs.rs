@@ -7,6 +7,7 @@ use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 use crate::focus::{FocusScope, FocusState};
+use crate::inspector::InspectorState;
 use crate::minimap::MiniMap;
 use crate::overlay::{self, OverlayStack};
 use crate::terminal::TerminalPane;
@@ -26,6 +27,8 @@ pub enum Tab {
     Terminal,
     Welcome,
     View(ViewId),
+    /// The Inspector pane (right dock) — a singleton reading the active view.
+    Inspector,
 }
 
 pub struct TabViewer<'a> {
@@ -36,6 +39,8 @@ pub struct TabViewer<'a> {
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
     pub minimap: &'a mut MiniMap,
+    /// The Inspector pane's memoized state (refreshed before the dock renders).
+    pub inspector: &'a InspectorState,
     /// In-memory clipboard bytes (`AppState.clipboard`), passed to the sequence
     /// viewer so a staged Paste can preview the clipboard contents.
     pub clipboard: Option<&'a [u8]>,
@@ -51,6 +56,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::FileBrowser => "Files".into(),
             Tab::Terminal => "Terminal".into(),
             Tab::Welcome => "Welcome".into(),
+            Tab::Inspector => "Inspector".into(),
             Tab::View(vid) => {
                 let name = self.workspace.view(*vid).and_then(|v| {
                     let arc = self.workspace.buffers.get(v.buffer_id)?;
@@ -91,6 +97,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
             Tab::Terminal => FocusScope::Terminal,
             Tab::Welcome => FocusScope::View(ViewId(0)),
             Tab::View(vid) => FocusScope::View(*vid),
+            Tab::Inspector => FocusScope::Inspector,
         };
 
         match tab {
@@ -239,6 +246,9 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     });
                 }
             },
+            Tab::Inspector => {
+                self.inspector.show(ui);
+            }
         }
 
         // Leaf click → FocusScope. Welcome doesn't enqueue a focus

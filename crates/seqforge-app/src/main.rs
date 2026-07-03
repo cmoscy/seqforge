@@ -6,6 +6,7 @@ mod command;
 mod config;
 mod event;
 mod focus;
+mod inspector;
 mod keymap;
 mod minimap;
 mod overlay;

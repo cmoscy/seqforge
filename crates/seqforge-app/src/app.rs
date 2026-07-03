@@ -179,6 +179,10 @@ pub struct AppState {
     /// Set once a dirty-quit has been confirmed/cleared, so the OS close is
     /// allowed to proceed on the next `close_requested` without re-prompting.
     pub(crate) allow_close: bool,
+    /// Inspector pane state (memoized primer projection for the active view).
+    /// Refreshed once per frame before the dock renders. Singleton — holds no
+    /// `ViewId`; reads whatever view is active.
+    pub(crate) inspector: crate::inspector::InspectorState,
 }
 
 impl Default for AppState {
@@ -214,6 +218,7 @@ impl Default for AppState {
             quit_requested: false,
             last_title: None,
             allow_close: false,
+            inspector: crate::inspector::InspectorState::default(),
         }
     }
 }
@@ -300,10 +305,18 @@ pub(crate) fn rebuild_default_dock(dock: &mut DockState<Tab>, cfg: &Config) {
         cfg.settings.layout.file_browser_fraction,
         vec![Tab::FileBrowser],
     );
-    let [_viewer, _terminal] = surface.split_below(
+    let [viewer, _terminal] = surface.split_below(
         NodeIndex::root(),
         cfg.settings.layout.terminal_fraction,
         vec![Tab::Terminal],
+    );
+    // Inspector on the right of the central viewer area. `split_right`'s
+    // fraction is the *retained* (left/viewer) share, so pass the complement of
+    // the Inspector's own width fraction.
+    surface.split_right(
+        viewer,
+        1.0 - cfg.settings.layout.inspector_fraction,
+        vec![Tab::Inspector],
     );
 }
 
@@ -1512,8 +1525,13 @@ impl eframe::App for SeqForgeApp {
             minimap,
             config,
             clipboard,
+            inspector,
             ..
         } = &mut self.state;
+
+        // Refresh the Inspector's memoized primer projection before the dock
+        // reads it (version-keyed; a no-op when nothing changed).
+        inspector.refresh(workspace);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(0.0))
@@ -1530,6 +1548,7 @@ impl eframe::App for SeqForgeApp {
                             overlays,
                             focus,
                             minimap,
+                            inspector,
                             clipboard: clipboard.as_deref(),
                             config: config.clone(),
                         },
@@ -1606,7 +1625,23 @@ impl eframe::App for SeqForgeApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SELECTION_TM_BP, selection_qc};
+    use super::{MAX_SELECTION_TM_BP, rebuild_default_dock, selection_qc};
+    use crate::tabs::Tab;
+
+    #[test]
+    fn default_dock_includes_inspector() {
+        let cfg = crate::config::Config::default();
+        let mut dock = egui_dock::DockState::new(vec![Tab::Welcome]);
+        rebuild_default_dock(&mut dock, &cfg);
+        let tree = dock.main_surface();
+        let has_inspector = (0..tree.len()).any(|i| {
+            matches!(
+                &tree[egui_dock::NodeIndex(i)],
+                egui_dock::Node::Leaf { tabs, .. } if tabs.iter().any(|t| matches!(t, Tab::Inspector))
+            )
+        });
+        assert!(has_inspector, "fresh layout must dock an Inspector pane");
+    }
 
     #[test]
     fn selection_qc_reports_gc_and_tm_for_an_oligo() {

@@ -146,6 +146,9 @@ pub struct LayoutSettings {
     /// Height fraction given to the file browser within its tab (the
     /// minimap takes the remainder).
     pub minimap_browser_fraction: f32,
+    /// Width fraction given to the Inspector pane (right dock) in a fresh
+    /// layout; the central viewer takes the remainder.
+    pub inspector_fraction: f32,
 }
 
 impl Default for LayoutSettings {
@@ -154,6 +157,7 @@ impl Default for LayoutSettings {
             file_browser_fraction: 0.20,
             terminal_fraction: 0.70,
             minimap_browser_fraction: 0.62,
+            inspector_fraction: 0.22,
         }
     }
 }

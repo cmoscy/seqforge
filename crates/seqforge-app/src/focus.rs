@@ -34,6 +34,10 @@ pub enum FocusScope {
     #[default]
     Terminal,
     Browser,
+    /// The Inspector pane (right dock). A singleton non-view pane like
+    /// `Browser`/`Terminal`; grabs no keys initially (mouse-driven), so keymap
+    /// resolution is unperturbed — row-nav bindings can land later additively.
+    Inspector,
 }
 
 impl FocusScope {
@@ -43,6 +47,7 @@ impl FocusScope {
             FocusScope::View(_) => KeyContext::PANE_VIEWER,
             FocusScope::Terminal => KeyContext::PANE_TERMINAL,
             FocusScope::Browser => KeyContext::PANE_BROWSER,
+            FocusScope::Inspector => KeyContext::PANE_INSPECTOR,
         }
     }
 }
@@ -74,6 +79,7 @@ impl KeyContext {
     pub const PANE_VIEWER: &'static str = "Pane:Viewer";
     pub const PANE_TERMINAL: &'static str = "Pane:Terminal";
     pub const PANE_BROWSER: &'static str = "Pane:Browser";
+    pub const PANE_INSPECTOR: &'static str = "Pane:Inspector";
     pub const TEXT_INPUT: &'static str = "TextInput";
 
     pub fn new() -> Self {
@@ -187,5 +193,18 @@ impl FocusState {
 impl Default for FocusState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FocusScope, KeyContext};
+
+    #[test]
+    fn inspector_scope_resolves_to_its_pane_tag() {
+        assert_eq!(
+            FocusScope::Inspector.pane_tag(),
+            KeyContext::PANE_INSPECTOR
+        );
     }
 }

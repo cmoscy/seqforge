@@ -46,6 +46,7 @@ spine_feature_gap         = 3.0
 file_browser_fraction      = 0.20
 terminal_fraction          = 0.70
 minimap_browser_fraction   = 0.62
+inspector_fraction         = 0.22
 
 [terminal]
 # Empty = use $SHELL (or /bin/bash as a fallback)

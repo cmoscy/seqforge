@@ -104,6 +104,8 @@ pub enum LeafSnapshot {
     Browser,
     /// The terminal pane.
     Terminal,
+    /// The Inspector pane (right dock).
+    Inspector,
     /// A viewer leaf — zero or more files (by path) plus the index
     /// of the active tab. Empty `paths` round-trips to a single
     /// `Tab::Welcome` placeholder.
@@ -189,6 +191,7 @@ fn capture_leaf(tabs: &[Tab], active: egui_dock::TabIndex, workspace: &Workspace
         match tab {
             Tab::FileBrowser => return LeafSnapshot::Browser,
             Tab::Terminal => return LeafSnapshot::Terminal,
+            Tab::Inspector => return LeafSnapshot::Inspector,
             _ => {}
         }
     }
@@ -324,6 +327,7 @@ fn install_leaf(
     let tabs = match leaf {
         LeafSnapshot::Browser => vec![Tab::FileBrowser],
         LeafSnapshot::Terminal => vec![Tab::Terminal],
+        LeafSnapshot::Inspector => vec![Tab::Inspector],
         LeafSnapshot::Viewer { paths, active } => {
             if paths.is_empty() {
                 vec![Tab::Welcome]
@@ -343,5 +347,75 @@ fn install_leaf(
     {
         *existing = tabs;
         *active = egui_dock::TabIndex(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Collect every tab across the main surface's leaves.
+    fn collect_tabs(dock: &DockState<Tab>) -> Vec<Tab> {
+        let tree = dock.main_surface();
+        let mut out = Vec::new();
+        for i in 0..tree.len() {
+            if let Node::Leaf { tabs, .. } = &tree[NodeIndex(i)] {
+                out.extend(tabs.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// A snapshot written *before* the Inspector variant existed must still
+    /// deserialize and rebuild — the one real back-compat risk of adding a new
+    /// `Tab`/`LeafSnapshot` variant. The Inspector is simply absent (graceful
+    /// fallback until a ResetLayout); nothing panics.
+    #[test]
+    fn legacy_layout_without_inspector_loads() {
+        let legacy = LayoutSnapshot::HSplit {
+            ratio: 0.2,
+            a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Browser)),
+            b: Box::new(LayoutSnapshot::VSplit {
+                ratio: 0.7,
+                a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Viewer {
+                    paths: vec![],
+                    active: 0,
+                })),
+                b: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Terminal)),
+            }),
+        };
+        // Round-trip through JSON exactly as a persisted session would.
+        let json = serde_json::to_string(&legacy).unwrap();
+        let back: LayoutSnapshot = serde_json::from_str(&json).unwrap();
+        let (dock, _pending) = rebuild_dock(&back);
+        let tabs = collect_tabs(&dock);
+        assert!(tabs.contains(&Tab::FileBrowser));
+        assert!(tabs.contains(&Tab::Terminal));
+        assert!(
+            !tabs.iter().any(|t| matches!(t, Tab::Inspector)),
+            "legacy layout must not conjure an Inspector"
+        );
+    }
+
+    /// A snapshot that carries the Inspector round-trips and rebuilds it.
+    #[test]
+    fn layout_with_inspector_round_trips() {
+        let snap = LayoutSnapshot::HSplit {
+            ratio: 0.8,
+            a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Viewer {
+                paths: vec![],
+                active: 0,
+            })),
+            b: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Inspector)),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: LayoutSnapshot = serde_json::from_str(&json).unwrap();
+        let (dock, _pending) = rebuild_dock(&back);
+        assert!(
+            collect_tabs(&dock)
+                .iter()
+                .any(|t| matches!(t, Tab::Inspector)),
+            "a persisted Inspector leaf must rebuild"
+        );
     }
 }
