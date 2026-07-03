@@ -78,6 +78,12 @@ enum Cmd {
         forward_only: bool,
     },
 
+    /// Inspect primers in a sequence file (no GUI needed).
+    Primers {
+        #[command(subcommand)]
+        cmd: PrimersCmd,
+    },
+
     // ── Viewer / editor commands (forwarded as JSON-RPC to the running GUI) ───
     //
     // Flattened from `ViewerRequest`: each variant becomes a top-level
@@ -85,6 +91,18 @@ enum Cmd {
     // targeting; omitted, they operate on the active view (Stage 2.5d).
     #[command(flatten)]
     Viewer(ViewerRequest),
+}
+
+#[derive(clap::Subcommand)]
+enum PrimersCmd {
+    /// List primers with derived attachment state + QC (Tm/GC/ΔG).
+    List { input: PathBuf },
+    /// Find binding sites for an oligo on the sequence (seed-and-extend).
+    Find {
+        input: PathBuf,
+        /// The oligo sequence, 5'→3'.
+        oligo: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -100,6 +118,10 @@ fn main() -> anyhow::Result<()> {
             frame,
         } => seqforge_cli::run_translate(&input, start, end, &strand, frame),
         Cmd::Tm { oligo } => seqforge_cli::run_tm(&oligo),
+        Cmd::Primers { cmd } => match cmd {
+            PrimersCmd::List { input } => seqforge_cli::run_primers_list(&input),
+            PrimersCmd::Find { input, oligo } => seqforge_cli::run_primers_find(&input, &oligo),
+        },
         Cmd::Orfs {
             input,
             min_aa,

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use seqforge_core::{Strand, ViewerRequest};
+use seqforge_core::{Annotations, Strand, Topology, ViewerRequest};
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
@@ -119,6 +119,61 @@ pub fn run_tm(oligo: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// List the primers in a sequence file with derived attachment state + QC — the
+/// CLI face of the Inspector's `ListPrimers` projection (both go through the one
+/// `seqforge_bio::primer_infos`, so GUI and agent can't drift). No GUI needed.
+///
+/// Ids are session-scoped (minted here via `Annotations::from_parts`, exactly as
+/// on GUI load): stable within this invocation, not across runs.
+pub fn run_primers_list(path: &Path) -> anyhow::Result<()> {
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
+    let circular = matches!(doc.topology, Topology::Circular);
+    // Mint ids + default names exactly like a GUI load (decision 9).
+    let ann = Annotations::from_parts(doc.features, doc.primers);
+    let primers: Vec<&seqforge_core::Primer> = ann.primers().collect();
+    let infos = seqforge_bio::primer_infos(&doc.sequence, &primers, circular);
+    let out = serde_json::json!({
+        "kind": "primers_list",
+        "count": infos.len(),
+        "primers": infos,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Find binding sites for `oligo` on a sequence file (seed-and-extend, both
+/// strands, circular-aware). Ranges are 0-based half-open on the top strand,
+/// matching the `PrimerInfo.binding` projection. No GUI needed.
+pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
+    let circular = matches!(doc.topology, Topology::Circular);
+    let settings = seqforge_bio::AnnealSettings::default();
+    let sites = seqforge_bio::find_primer_binding_sites(oligo, &doc.sequence, circular, settings);
+    // `PrimerBinding` isn't `Serialize`; project each site to explicit JSON.
+    let sites_json: Vec<_> = sites
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "start": s.range.start,
+                "end": s.range.end,
+                "strand": s.strand,
+                "mismatches": s.mismatches,
+                "three_prime_match": s.three_prime_match,
+            })
+        })
+        .collect();
+    let out = serde_json::json!({
+        "kind": "primers_find",
+        "oligo": oligo.to_uppercase(),
+        "count": sites_json.len(),
+        "sites": sites_json,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 // ── Viewer command socket dispatch ────────────────────────────────────────────
 
 /// Send a `ViewerRequest` to a running SeqForge GUI via the Unix domain socket
@@ -211,5 +266,26 @@ mod tests {
         unsafe { std::env::remove_var("SEQFORGE_SOCKET") };
         let err = super::dispatch_viewer_cmd(ViewerRequest::Close).unwrap_err();
         assert!(err.to_string().contains("SEQFORGE_SOCKET"));
+    }
+}
+
+#[cfg(test)]
+mod primer_tests {
+    use std::path::PathBuf;
+
+    fn puc19() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../seqforge-bio/tests/fixtures/pUC19.gbk")
+    }
+
+    // Smoke tests: exercise load → project → serialize end-to-end (projection
+    // correctness is covered by seqforge-bio/-core unit tests).
+    #[test]
+    fn primers_list_runs_on_fixture() {
+        assert!(super::run_primers_list(&puc19()).is_ok());
+    }
+
+    #[test]
+    fn primers_find_runs_on_fixture() {
+        assert!(super::run_primers_find(&puc19(), "GGGAAACGCCTGGTATCTTT").is_ok());
     }
 }

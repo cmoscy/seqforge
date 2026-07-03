@@ -13,11 +13,14 @@
 > `primer_qc`/`anneal_tm` (bio). **1.3a** — shared `ListPrimers →
 > core::PrimerInfo`/`PrimerState` projection via `BioOps::primer_infos` (bio
 > assembles; mirrors `find_cut_sites`). **1.3b** — the right-docked **Inspector**
-> pane + Primers tab (read-only list, version-keyed `InspectorState` cache,
-> `View → Inspector` show/hide toggle; layout back-compat tested). **Next: 1.3c**
-> — the interactive Primers table (select/reveal + double-click/Enter → edit
-> modal), then generalize to the `InspectorCollection` trait (see "Panels /
-> Inspector"). Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
+> pane + Primers tab. **1.3c** — the `InspectorCollection` trait + shared table;
+> three tabs (Primers · Cut sites · Features); single-click select/reveal,
+> double-click → edit modal (Features → `OpenFeatureForm`), map↔panel selection
+> sync, and the Primers header map-toggles (show/hide, arrows-vs-bases). **1.4** —
+> CLI `primers list` / `primers find` (same `primer_infos` projection). **Phase 1
+> complete; next: Phase 2** (creation/editing — staged primer dialog + `AddPrimer`
+> / `UpdatePrimer` / `RemovePrimer`). Canonical cross-track status:
+> [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -514,8 +517,10 @@ Each item cites the code it must stay consistent with.
       on map, arrows-vs-bases — `View`-display flags like translation lanes) and
       optional Enter-key activation. Full spec: **"Panels / Inspector"** (decision
       10).
-- [ ] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3),
-      `seqforge primers find <oligo>`.
+- [x] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3 via one
+      `seqforge_bio::primer_infos`) + `seqforge primers find <oligo>`
+      (`find_primer_binding_sites`). Load → project → JSON; ids minted via
+      `Annotations::from_parts` (decision 9). Parity verified against pUC19.
 
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; staged
