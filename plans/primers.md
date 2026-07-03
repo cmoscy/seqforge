@@ -252,7 +252,12 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
   (pre-filled from the current selection, editable), strand, and a **live
   Tm/%GC/self-structure QC panel** (shares the Phase 0.5 computation).
 - **Create-from-selection is the primary path:** select region → "Add Primer" →
-  dialog pre-filled (binding = selection, oligo = `template[selection]`).
+  dialog pre-filled (binding = selection, oligo = `template[selection]`, **name =
+  the auto-generated default** — see decision 9, editable before commit).
+- **Naming is never a blocker** (decision 9): the name field is pre-filled with a
+  unique `Primer N` default from one shared `suggest_primer_name()`; the CLI
+  `--name` is optional and falls back to the same generator. Both call the single
+  `core` helper, so GUI/CLI/import share one naming story.
 - **Deferred "optimize/design"** button (auto-extend to a target Tm) is a disabled
   affordance pointing at Phase 2.2/3.
 
@@ -339,10 +344,12 @@ Each item cites the code it must stay consistent with.
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; staged
       **primer dialog** (sibling of the feature dialog); create-from-selection;
+      **optional name → `suggest_primer_name()` default** (decision 9);
       detach-on-destroy surfaced in the staged preview / reported by CLI.
 - [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
       (min Hamming), restriction-site tails (reuse `seqforge-restriction`).
-- [ ] 2.3 CLI: `seqforge primers add/update/remove …`, `seqforge oligo random …`.
+- [ ] 2.3 CLI: `seqforge primers add/update/remove …` (`--name` optional, shares
+      `suggest_primer_name()` — decision 9), `seqforge oligo random …`.
 
 ### Phase 3 — Cloning convergence (Tier 3 territory)
 - [ ] 3.1 PCR product simulation; primer-pair / amplicon logic; **hetero-dimer**
@@ -387,6 +394,18 @@ Each item cites the code it must stay consistent with.
 8. **Reuse mechanism, not lossy types:** one `Hit` enum, own `PrimerBinding` type
    (not `SearchHit`), primer-specific shift handler (not `shift_features`),
    `command/edit.rs` routing (like features).
+9. **Primer naming: optional-with-default, one shared generator.** `Primer.name`
+   is a required non-empty `String`, but *creation never requires the user to
+   supply one*: a single `core` helper `Annotations::suggest_primer_name()`
+   yields a unique `Primer N` (lowest N not colliding with existing primer
+   names). The GUI dialog pre-fills that default (editable before commit); the
+   CLI `--name` is optional and falls back to it; the GenBank import fallback
+   (currently the literal `"primer"`) is superseded by the same generator so
+   nameless imports become unique too. `rename_primer` (0.2) covers relabeling.
+   Lands with creation (Phase 2.1/2.3); the import-fallback swap can ride along
+   or land earlier. Rationale: matches SnapGene/Benchling (auto-name + rename),
+   keeps create-from-selection one-click, and guarantees no two primers share a
+   synthetic name. Never reject creation for a missing name.
 
 ## Resolved (previously open) questions
 
