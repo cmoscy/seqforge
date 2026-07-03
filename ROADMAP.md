@@ -21,7 +21,7 @@ architecture contracts live under [`docs/`](docs/).
 | **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (no tag — see Tagging policy) |
 | **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ⏳ next |
 | **(parallel)** | Restriction cloning depth (digest → ligation → Golden Gate) | 🟡 Tier 1 done |
-| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phase 0.1/0.5/0.2/0.3 done (thermo, live Tm/GC, `Primer` model, round-trip) |
+| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phase 0 complete (thermo, live Tm/GC, `Primer` model, round-trip, arrows) |
 
 ### Tagging policy (pre-1.0)
 
@@ -50,7 +50,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0.1/0.5/0.2/0.3 done (thermo + `seqforge tm`; live Tm/GC; `Primer` model + shift handler; `primer_bind` round-trip) | Phase 0.4 — `app`: `PrimerTrack` directional-arrow render |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0 complete (thermo + `seqforge tm`; live Tm/GC; `Primer` model + shift handler; `primer_bind` round-trip; `PrimerTrack` arrows) | Phase 1.1 — `bio` annealing (seed-and-extend + decomposition + state) |
 
 ---
 

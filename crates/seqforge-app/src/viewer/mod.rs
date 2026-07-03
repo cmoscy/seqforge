@@ -753,6 +753,9 @@ impl SequenceView {
             annot_row_h,
             cut_label_row_h,
             aa_row_h,
+            // Primer arrows reuse the feature-row height (arrow body + tail
+            // lift-off); a dedicated setting can split it later if needed.
+            primer_row_h: annot_row_h,
             block_gap,
             line_width,
             label_overflow,
@@ -964,7 +967,17 @@ impl SequenceView {
                         // Any fresh (non-extending) click clears the codon anchor;
                         // a residue click re-sets it in that branch below.
                         self.translation_anchor = None;
-                        if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
+                        if let Some(primer) = find_hit(&hits, pos, Hit::as_primer)
+                            .and_then(|id| render_ann.primer(id))
+                            .filter(|p| p.binding.is_some())
+                        {
+                            // Clicking a primer selects its annealed footprint —
+                            // reusing the selection machinery (lights the status-bar
+                            // Tm/%GC readout). Panel selection by id lands in 1.3.
+                            let b = primer.binding.clone().expect("filtered Some");
+                            push_sel(cmds, Some(Selection::range(b.start, b.end)));
+                            push_feat(cmds, None);
+                        } else if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
                                 .by_position(feat_idx)
                                 .expect("feat_idx from this frame's layout");

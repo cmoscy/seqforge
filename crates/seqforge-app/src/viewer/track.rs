@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, CutSite, Feature, FeatureId, FeatureKind, SearchHit, Selection, Strand,
+    Annotations, CutSite, Feature, FeatureId, FeatureKind, PrimerId, SearchHit, Selection, Strand,
 };
 
 use crate::command::AppCommand;
@@ -45,6 +45,9 @@ pub(crate) enum Hit {
     Orf(OrfPromote),
     /// Translation codon cell — the codon's forward nt range.
     Codon(std::ops::Range<usize>),
+    /// Primer arrow — carries the stable [`PrimerId`] directly (decision 12/14;
+    /// primers are greenfield, so no positional-index legacy to mirror).
+    Primer(PrimerId),
 }
 
 impl Hit {
@@ -79,6 +82,13 @@ impl Hit {
     pub fn as_codon(&self) -> Option<std::ops::Range<usize>> {
         if let Hit::Codon(c) = self {
             Some(c.clone())
+        } else {
+            None
+        }
+    }
+    pub fn as_primer(&self) -> Option<PrimerId> {
+        if let Hit::Primer(id) = self {
+            Some(*id)
         } else {
             None
         }
@@ -152,6 +162,15 @@ pub(crate) struct BlockLayout {
     /// `[block_start, block_end]`.
     pub cut_rows: Vec<(usize, usize)>,
     pub n_cut_rows: usize,
+    /// `(primer_idx, row_in_block)` for **forward** primers overlapping this
+    /// block (band above the top strand). `primer_idx` is a within-frame
+    /// positional index into `Annotations::primers()`.
+    pub primer_fwd_rows: Vec<(usize, usize)>,
+    /// Forward-primer band height (Σ rows × `primer_row_h`); 0 when none.
+    pub primer_fwd_band_h: f32,
+    /// As above for **reverse** primers (band below the bottom strand).
+    pub primer_rev_rows: Vec<(usize, usize)>,
+    pub primer_rev_band_h: f32,
     /// Total height including ruler + both strands + gap.
     pub height: f32,
 }
@@ -243,10 +262,23 @@ pub(crate) fn build_block_layouts(
         let (cut_local_rows, n_cut_rows) = greedy_stack(&cut_ranges);
         let cut_rows: Vec<(usize, usize)> = cut_idx_list.into_iter().zip(cut_local_rows).collect();
 
+        // Primers overlapping this block, stacked **per strand** into their own
+        // band: forward above the top strand, reverse below the bottom strand.
+        // A detached primer (`binding = None`) draws nowhere (panel-only), so it
+        // is skipped here. `primer_idx` is the positional index into `primers()`.
+        let (primer_fwd_rows, n_fwd_rows) =
+            stack_primers(annotations, block_start, block_end, Strand::Forward);
+        let (primer_rev_rows, n_rev_rows) =
+            stack_primers(annotations, block_start, block_end, Strand::Reverse);
+        let primer_fwd_band_h = n_fwd_rows as f32 * style.primer_row_h;
+        let primer_rev_band_h = n_rev_rows as f32 * style.primer_row_h;
+
         let cut_label_h = n_cut_rows as f32 * style.cut_label_row_h;
         let height = cut_label_h
             + style.ruler_h
+            + primer_fwd_band_h
             + style.strand_h * 2.0
+            + primer_rev_band_h
             + trans_band_h
             + feat_band_h
             + style.block_gap;
@@ -258,11 +290,44 @@ pub(crate) fn build_block_layouts(
             feat_band_h,
             cut_rows,
             n_cut_rows,
+            primer_fwd_rows,
+            primer_fwd_band_h,
+            primer_rev_rows,
+            primer_rev_band_h,
             height,
         });
     }
 
     (layouts, offsets)
+}
+
+/// Stack the primers of one band (forward or reverse) overlapping a block into
+/// non-overlapping rows. A primer joins the **reverse** band iff its strand is
+/// `Reverse`; every other strand (Forward / Both / None) joins the **forward**
+/// band. Detached primers (`binding = None`) draw nowhere and are skipped.
+/// Returns `(primer_idx → row, n_rows)`; `primer_idx` is the positional index
+/// into `Annotations::primers()`.
+fn stack_primers(
+    annotations: &Annotations,
+    block_start: usize,
+    block_end: usize,
+    band: Strand,
+) -> (Vec<(usize, usize)>, usize) {
+    let want_rev = matches!(band, Strand::Reverse);
+    let mut idx_list: Vec<usize> = Vec::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for (i, p) in annotations.primers().enumerate() {
+        let Some(b) = &p.binding else { continue };
+        if (p.strand == Strand::Reverse) != want_rev {
+            continue;
+        }
+        if b.start < block_end && b.end > block_start {
+            idx_list.push(i);
+            ranges.push((b.start.max(block_start), b.end.min(block_end)));
+        }
+    }
+    let (rows, n_rows) = greedy_stack(&ranges);
+    (idx_list.into_iter().zip(rows).collect(), n_rows)
 }
 
 // ── Layout memoization (T4 perf) ───────────────────────────────────────────────
@@ -318,6 +383,7 @@ fn dims_fingerprint(style: &Style) -> u64 {
         style.annot_row_h,
         style.cut_label_row_h,
         style.aa_row_h,
+        style.primer_row_h,
         style.block_gap,
     ] {
         v.to_bits().hash(&mut h);
@@ -386,6 +452,30 @@ pub(crate) fn annot_bar_rect(
     ))
 }
 
+/// On-grid body rect for a primer's annealed footprint, clipped to a block —
+/// the arrow's column-aligned body (arrowhead + 5' tail are painted *outside*
+/// this rect). `None` if the binding doesn't overlap the block. The Primer
+/// tracks paint **and** hit-test from this one rect (co-location invariant).
+pub(crate) fn primer_body_rect(
+    binding: &std::ops::Range<usize>,
+    block_start: usize,
+    block_end: usize,
+    row_y: f32,
+    seq_x0: f32,
+    char_width: f32,
+    row_h: f32,
+) -> Option<Rect> {
+    if binding.end <= block_start || binding.start >= block_end {
+        return None;
+    }
+    let col_s = binding.start.max(block_start) - block_start;
+    let col_e = binding.end.min(block_end) - block_start;
+    Some(Rect::from_min_size(
+        Pos2::new(seq_x0 + col_s as f32 * char_width, row_y + 1.0),
+        Vec2::new((col_e - col_s) as f32 * char_width, row_h - 2.0),
+    ))
+}
+
 // ── Shared render style ────────────────────────────────────────────────────────
 
 /// Resolved per-frame sizing, fonts, and colours shared by every track.
@@ -402,6 +492,8 @@ pub(crate) struct Style {
     pub annot_row_h: f32,
     pub cut_label_row_h: f32,
     pub aa_row_h: f32,
+    /// Height of one primer-arrow stack row (arrow body + tail lift-off).
+    pub primer_row_h: f32,
     pub block_gap: f32,
     pub line_width: usize,
     pub label_overflow: LabelOverflow,
@@ -487,8 +579,9 @@ pub(crate) trait Track {
 }
 
 /// Index of the Sequence track in the layout order — the strands, whose `y0`
-/// every connector track (cut-site staples) reaches down to.
-const SEQUENCE_TRACK: usize = 2;
+/// every connector track (cut-site staples, primer bands) reaches to. Must match
+/// the Sequence track's position in [`TrackStack::new`].
+const SEQUENCE_TRACK: usize = 3;
 
 /// The ordered set of tracks and the one block loop over them. Layout order
 /// (top→bottom) is CutLabels · Ruler · Sequence · Translation · Features; the
@@ -505,19 +598,28 @@ impl TrackStack {
     /// are migrated; Sequence + Features delegate to legacy core paint.
     pub fn new() -> Self {
         use super::tracks::{
-            cut_sites::CutSitesTrack, features::FeaturesTrack, ruler::RulerTrack,
-            sequence::SequenceTrack, translation::TranslationTrack,
+            cut_sites::CutSitesTrack,
+            features::FeaturesTrack,
+            primers::{PrimerForwardTrack, PrimerReverseTrack},
+            ruler::RulerTrack,
+            sequence::SequenceTrack,
+            translation::TranslationTrack,
         };
+        // Layout order (top→bottom): forward primers sit above the top strand,
+        // reverse primers below the bottom strand — straddling the Sequence
+        // track (decision 14 render; SnapGene/Benchling idiom).
         let tracks: Vec<Box<dyn Track>> = vec![
-            Box::new(CutSitesTrack), // 0
-            Box::new(RulerTrack),    // 1
-            Box::new(SequenceTrack), // 2 (== SEQUENCE_TRACK)
-            Box::new(TranslationTrack),
-            Box::new(FeaturesTrack),
+            Box::new(CutSitesTrack),      // 0
+            Box::new(RulerTrack),         // 1
+            Box::new(PrimerForwardTrack), // 2
+            Box::new(SequenceTrack),      // 3 (== SEQUENCE_TRACK)
+            Box::new(PrimerReverseTrack), // 4
+            Box::new(TranslationTrack),   // 5
+            Box::new(FeaturesTrack),      // 6
         ];
         // Paint every track in layout order, then the cut-site staples last so
         // they overlay the strands / translation band they descend through.
-        let paint_order = vec![1, 2, 3, 4, 0];
+        let paint_order = vec![1, 2, 3, 4, 5, 6, 0];
         Self {
             tracks,
             paint_order,
@@ -893,10 +995,14 @@ mod tests {
     use super::*;
     use crate::config::LabelOverflow;
     use crate::viewer::tracks::{
-        cut_sites::CutSitesTrack, features::FeaturesTrack, ruler::RulerTrack,
-        sequence::SequenceTrack, translation::TranslationTrack,
+        cut_sites::CutSitesTrack,
+        features::FeaturesTrack,
+        primers::{PrimerForwardTrack, PrimerReverseTrack},
+        ruler::RulerTrack,
+        sequence::SequenceTrack,
+        translation::TranslationTrack,
     };
-    use seqforge_core::{Annotations, Feature, Strand};
+    use seqforge_core::{Annotations, Feature, Primer, Strand};
 
     /// A plausible `Style` for geometry tests (exact colours/fonts irrelevant).
     fn test_style() -> Style {
@@ -910,6 +1016,7 @@ mod tests {
             annot_row_h: 14.0,
             cut_label_row_h: 13.0,
             aa_row_h: 14.0,
+            primer_row_h: 14.0,
             block_gap: 10.0,
             line_width: 20,
             label_overflow: LabelOverflow::Truncate,
@@ -954,9 +1061,7 @@ mod tests {
             feat_rows: vec![(0, 0)],
             feat_row_offsets: vec![0.0],
             feat_band_h: 14.0,
-            cut_rows: vec![],
-            n_cut_rows: 0,
-            height: 0.0,
+            ..Default::default()
         };
         let ctx = BlockCtx {
             block_idx: 0,
@@ -1007,6 +1112,115 @@ mod tests {
         assert!(matches!(hits[0].1, Hit::Feature(0)));
     }
 
+    fn primer(binding: std::ops::Range<usize>, strand: Strand) -> Primer {
+        Primer {
+            id: Default::default(),
+            name: "p".to_string(),
+            sequence: "ACGTAC".to_string(),
+            binding: Some(binding),
+            strand,
+            qualifiers: Default::default(),
+        }
+    }
+
+    fn primer_ctx<'a>(
+        ann: &'a Annotations,
+        layout: &'a BlockLayout,
+        style: &'a Style,
+        theme: &'a crate::config::Theme,
+    ) -> BlockCtx<'a> {
+        BlockCtx {
+            block_idx: 0,
+            block_start: 0,
+            block_end: 20,
+            seq: &[b'A'; 20],
+            seq_len: 20,
+            render_ann: ann,
+            cut_sites: &[],
+            search_hits: &[],
+            trans_cache: None,
+            show_orfs: false,
+            theme,
+            style,
+            staging: false,
+            added: None,
+            deleted: None,
+            selection: None,
+            selected_feature: None,
+            blink_on: false,
+            hovered_cut_site: None,
+            layout,
+        }
+    }
+
+    /// Co-location invariant for the forward Primer track: the emitted hit rect
+    /// equals an independent `primer_body_rect` of the same footprint, and the
+    /// hit carries the primer's id.
+    #[test]
+    fn primer_hit_rect_equals_painted_body_rect() {
+        let style = test_style();
+        let theme = crate::config::Theme::default();
+        let mut ann = Annotations::new(vec![]);
+        let pid = ann.add_primer(primer(2..8, Strand::Forward));
+        let (layouts, _off) = build_block_layouts(&ann, &[], 20, &style, 0.0, None);
+        let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
+        let geom = BlockGeom {
+            y0: 100.0,
+            seq_x0: 10.0,
+            rect_min_x: 0.0,
+            strand_top_y: 0.0,
+            strand_bot_y: 0.0,
+        };
+        let mut hits = Vec::new();
+        PrimerForwardTrack.hit_rects(&ctx, &geom, &mut hits);
+        assert_eq!(hits.len(), 1);
+        let expected = primer_body_rect(
+            &(2..8),
+            0,
+            20,
+            geom.y0,
+            geom.seq_x0,
+            style.char_width,
+            style.primer_row_h,
+        )
+        .unwrap();
+        assert_eq!(
+            hits[0].0, expected,
+            "hit rect must equal the painted body rect"
+        );
+        assert!(matches!(hits[0].1, Hit::Primer(id) if id == pid));
+    }
+
+    /// Forward primers land in the forward band and reverse in the reverse band;
+    /// a detached primer (`binding = None`) draws in neither.
+    #[test]
+    fn primer_bands_partition_by_strand_and_skip_detached() {
+        let style = test_style();
+        let theme = crate::config::Theme::default();
+        let mut ann = Annotations::new(vec![]);
+        ann.add_primer(primer(0..6, Strand::Forward));
+        ann.add_primer(primer(2..9, Strand::Reverse));
+        ann.add_primer(Primer {
+            binding: None,
+            ..primer(0..6, Strand::Forward)
+        });
+        let (layouts, _off) = build_block_layouts(&ann, &[], 20, &style, 0.0, None);
+        let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
+        let geom = BlockGeom {
+            y0: 0.0,
+            seq_x0: 0.0,
+            rect_min_x: 0.0,
+            strand_top_y: 0.0,
+            strand_bot_y: 0.0,
+        };
+        let mut fwd = Vec::new();
+        PrimerForwardTrack.hit_rects(&ctx, &geom, &mut fwd);
+        let mut rev = Vec::new();
+        PrimerReverseTrack.hit_rects(&ctx, &geom, &mut rev);
+        assert_eq!(fwd.len(), 1, "one attached forward primer");
+        assert_eq!(rev.len(), 1, "one reverse primer");
+    }
+
     /// `TrackStack` block height == Σ track `block_height` + `block_gap`, i.e.
     /// the per-track heights the stack lays out reproduce `build_block_layouts`.
     #[test]
@@ -1041,7 +1255,9 @@ mod tests {
         let tracks: Vec<Box<dyn Track>> = vec![
             Box::new(CutSitesTrack),
             Box::new(RulerTrack),
+            Box::new(PrimerForwardTrack),
             Box::new(SequenceTrack),
+            Box::new(PrimerReverseTrack),
             Box::new(TranslationTrack),
             Box::new(FeaturesTrack),
         ];

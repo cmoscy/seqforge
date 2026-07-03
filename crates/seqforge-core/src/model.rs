@@ -309,6 +309,14 @@ impl Annotations {
         self.primers.iter().find(|p| p.id == id)
     }
 
+    /// Read-only positional access for the immediate-mode renderer **only**
+    /// (mirrors [`Self::by_position`]). The position is a private within-frame
+    /// detail — resolve it fresh each frame and never persist it; carry the
+    /// [`PrimerId`] instead.
+    pub fn primer_by_position(&self, pos: usize) -> Option<&Primer> {
+        self.primers.get(pos)
+    }
+
     /// Mutable lookup by id (linear scan).
     pub fn primer_mut(&mut self, id: PrimerId) -> Option<&mut Primer> {
         self.primers.iter_mut().find(|p| p.id == id)

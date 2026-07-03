@@ -6,6 +6,7 @@
 
 pub(crate) mod cut_sites;
 pub(crate) mod features;
+pub(crate) mod primers;
 pub(crate) mod ruler;
 pub(crate) mod sequence;
 pub(crate) mod translation;

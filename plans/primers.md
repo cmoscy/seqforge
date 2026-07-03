@@ -3,11 +3,13 @@
 > **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
 > sourcing, and consistency-with-the-implemented-model all worked out (see
 > "Decisions locked" and "Consistency with the implemented model" below). Phase
-> 0.1 (thermo + `seqforge tm`), 0.5 (live selection Tm/%GC readout), 0.2
-> (`core` `Primer` model + shift handler), and 0.3 (GenBank `primer_bind` ↔
-> `Primer` round-trip) are **done**; next concrete step is Phase 0.4 (`app`:
-> `PrimerTrack` directional-arrow render). Canonical cross-track status:
-> [`../ROADMAP.md`](../ROADMAP.md).
+> **Phase 0 (foundation) is complete** — 0.1 (thermo + `seqforge tm`), 0.5 (live
+> selection Tm/%GC readout), 0.2 (`core` `Primer` model + shift handler), 0.3
+> (GenBank `primer_bind` ↔ `Primer` round-trip), and 0.4 (`PrimerTrack`
+> directional-arrow render) are all done. Next concrete step is Phase 1.1 (`bio`
+> annealing: seed-and-extend + 3'-anchored decomposition + attachment-state),
+> which unlocks the track's mismatch marks and the 1.3 panel. Canonical
+> cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -326,8 +328,12 @@ Each item cites the code it must stay consistent with.
       best-effort from the template on foreign import; writer emits from `primers`
       only + a `/label` fallback for authored names; `Document.primers` +
       `Annotations::from_parts`; `seqforge info` now reports the primer count.)*
-- [ ] 0.4 `app`: `PrimerTrack` — directional arrow track (annealed on-grid, tail
+- [x] 0.4 `app`: `PrimerTrack` — directional arrow track (annealed on-grid, tail
       lift-off, `Hit::Primer(id)`, read-only). `seqforge info` reports primer count.
+      *(two faithful bands straddling the sequence — forward above / reverse below,
+      arrowhead at 3', 5' tail peels off-grid; `stack_primers` per-strand stacking
+      into `BlockLayout`; click selects the footprint (lights the 0.5 readout);
+      co-location invariant asserted. Mismatch marks / drifted state → 1.1.)*
 - [x] 0.5 **Live selection Tm/%GC/length status readout** (no primer object) —
       ships/validates thermo early; shared by the dialog QC panel. *(status bar:
       `Tm … °C · … % GC`; NN Tm capped to oligo lengths ≤ 120 bp via the pure
