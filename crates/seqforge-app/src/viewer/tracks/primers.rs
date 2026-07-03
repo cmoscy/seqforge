@@ -99,7 +99,10 @@ fn paint_band(
         ctx.theme.strand.forward.0
     };
     let body_color = opaque(base);
-    let tail_color = base.gamma_multiply(0.5);
+    // Faint wash inside the outlined body — enough to read as a shape without the
+    // heavy opaque bar; the annealed bases show on the adjacent sequence track.
+    let fill_color = base.gamma_multiply(0.4);
+    let tail_color = base.gamma_multiply(0.6);
 
     for &(primer_idx, row) in rows {
         let Some(primer) = ctx.render_ann.primer_by_position(primer_idx) else {
@@ -121,8 +124,17 @@ fn paint_band(
             continue;
         };
 
-        // Body: solid column-aligned bar.
-        painter.rect_filled(body, 2.0, body_color);
+        // Body: outlined arrow aligned to the annealed footprint (SnapGene /
+        // Benchling idiom) — a faint fill + solid outline, not an opaque bar, so
+        // it frames the corresponding bases on the adjacent sequence row rather
+        // than hiding them.
+        painter.rect_filled(body, 2.0, fill_color);
+        painter.rect_stroke(
+            body,
+            2.0,
+            Stroke::new(1.5, body_color),
+            egui::StrokeKind::Inside,
+        );
 
         let mid_y = body.center().y;
         let head_len = (char_width * 0.8).clamp(4.0, 10.0);
