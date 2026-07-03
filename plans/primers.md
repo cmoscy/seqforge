@@ -1,18 +1,23 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: Phase 0.1 landed; design settled for the rest.** Architecture,
-> sourcing, and consistency-with-the-implemented-model all worked out (see
-> "Decisions locked" and "Consistency with the implemented model" below). Phase
-> **0 complete; Phase 1.1 complete.** 0.1–0.5 done (thermo + `seqforge
-> tm`; live Tm/%GC readout; `Primer` model + shift handler; `primer_bind`
-> round-trip; `PrimerTrack` arrows). Phase 1.1's **decomposition + base-level
-> render** landed (`decompose_primer`: annealed/mismatch/tail, strand-correct;
-> the track draws the oligo's bases with amber mismatch cells + tail letters;
-> translation reordered to hug the sequence). **Phase 1.1 also landed**: the
-> seed-and-extend find pass (`find_primer_binding_sites` → `PrimerBinding`),
-> Confirmed/Drifted/Detached classification (`classify_attachment`), version-
-> keyed cache in the viewer, and drifted/off-target badges on the track. Canonical
-> cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
+> **Status: Phases 0–1.2 + 1.3a/1.3b landed; design settled for the rest.**
+> Architecture, sourcing, and consistency-with-the-implemented-model all worked
+> out (see "Decisions locked" and "Consistency with the implemented model"
+> below). **Done:** 0.1–0.5 (thermo + `seqforge tm`; live Tm/%GC readout;
+> `Primer` model + shift handler; `primer_bind` round-trip; `PrimerTrack`
+> arrows). **1.1** — `decompose_primer` (annealed/mismatch/tail, strand-correct)
+> + base-level render; the seed-and-extend find pass
+> (`find_primer_binding_sites` → `PrimerBinding`), Confirmed/Drifted/Detached
+> classification (`classify_attachment`), version-keyed cache, drifted/off-target
+> badges. **1.2** — `hairpin_dg`/`self_dimer_dg`/`duplex_tm` (thermo) +
+> `primer_qc`/`anneal_tm` (bio). **1.3a** — shared `ListPrimers →
+> core::PrimerInfo`/`PrimerState` projection via `BioOps::primer_infos` (bio
+> assembles; mirrors `find_cut_sites`). **1.3b** — the right-docked **Inspector**
+> pane + Primers tab (read-only list, version-keyed `InspectorState` cache,
+> `View → Inspector` show/hide toggle; layout back-compat tested). **Next: 1.3c**
+> — the interactive Primers table (select/reveal + double-click/Enter → edit
+> modal), then generalize to the `InspectorCollection` trait (see "Panels /
+> Inspector"). Canonical cross-track status: [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
 
@@ -311,13 +316,60 @@ detail** (keeps it clean — do not inline everything):
 - **Sort by binding position by default** (list mirrors the map top→bottom).
 - **Floating oligos in a separate "Unattached" section** at the bottom (Benchling
   idiom) — QC but no map location.
-- **Interactions:** click row → `scroll_to` + select footprint (attached);
-  panel-only for floating. **Header toggles:** show/hide primers on map, and
-  **arrows-vs-bases** (Benchling "Primer bases" — toggles the 1.1 base render).
-  `Check specificity` / `Add primer` come later (1.1 find / 2.1).
+- **Interactions:**
+  - **single click / select** row → `scroll_to` + select footprint (attached);
+    panel-only for floating (sets `View.selected_primer`).
+  - **double-click / Enter on a selected row → open the edit modal** (the
+    *launcher* model, see below). Never inline editing.
+  - **Header toggles:** show/hide primers on map, and **arrows-vs-bases**
+    (Benchling "Primer bases" — toggles the 1.1 base render).
+    `Check specificity` / `Add primer` come later (1.1 find / 2.1).
 - **Clean-look rules:** ≤ ~6 columns; compact cues over text (strand arrow, amber
   Drifted dot, grey/italic Detached, warning icon) instead of extra columns;
   right-align numerics.
+
+### Editing model — table is the *launcher*, modal is the *edit view*
+
+Decision 10's surface grammar (forms → modals, collections → panes) is preserved
+**exactly** — the Inspector does **not** introduce inline editing. Instead:
+
+- The **table** is a browser + selector + **trigger**: a row's double-click / Enter
+  activates it.
+- Activation opens the **existing modal** for that noun (`OpenFeatureForm{id}`
+  today; `OpenPrimerForm{id}` at Phase 2.1), pre-filled with the row's data.
+- The **modal's Submit emits exactly one `ViewerRequest`** (`UpdateFeature`,
+  `AddPrimer`, …) — which *is* the CLI verb. One request shape, two front-ends
+  (GUI modal + CLI), single applier + history, no parallel mutation path and no
+  GUI/agent drift. This is why keeping modals **lowers** complexity: the pane holds
+  no draft state / edit-mode machinery, and grabs no text-editing focus — only a
+  lightweight activation gesture (the modal owns Enter=submit / Escape=cancel).
+
+Consequence: **cut-sites/enzymes are read-only** (derived; changed via the enzyme
+*bar*, not row edits) → their rows have no edit modal (activation just reveals).
+Editability is therefore **opt-in per collection**, not universal.
+
+### `InspectorCollection` trait — templatize display, *not* editing (the Track analog)
+
+The three sub-tabs share one **generic table renderer** driven by a per-noun
+descriptor — the same move as the `Track` trait (`plans/render-tracks.md`): one
+mechanism, many implementations. Templatize **display + selection + activation
+dispatch**; do **not** templatize the edit forms (unlike paint, edit schemas
+diverge — features have qualifiers, primers have tail+QC — so each noun keeps its
+own modal, or none).
+
+```rust
+trait InspectorCollection {
+    fn columns(&self) -> &[Column];
+    fn rows(&self, ctx) -> Vec<Row>;                 // from PrimerInfo / FeatureInfo / CutSite
+    fn on_select(&self, id) -> AppCommand;           // reveal + select footprint
+    fn on_activate(&self, id) -> Option<AppCommand>; // → Open*Form{id}; None = read-only
+}
+```
+
+Primers implement it first (1.3c) as the seed; Cut-sites (`view.cut_sites`,
+read-only) and Features (activation → the *existing* feature modal, an early
+payoff) follow. Adding a fourth noun later = one descriptor. Backed by the `List*`
+projections so the table can't drift from the CLI.
 
 ### One projection under it (agent/GUI parity)
 
@@ -444,12 +496,22 @@ Each item cites the code it must stay consistent with.
       `primers find`.)*
 - [x] 1.2 `thermo`: self-hairpin ΔG, self-dimer ΔG (seqfold `fold`/`dg`);
       `anneal_tm` + `primer_qc` in `bio` (orientation-safe heteroduplex Tm).
-- [ ] 1.3 **Inspector** pane (right-docked, tabbable; **Primers** tab first) —
-      list (name/binding/Tm/GC/strand + QC + state, incl. floating oligos),
-      jump-to-binding, show/hide + arrows-vs-bases toggles, "check specificity".
-      Backed by `ListPrimers → PrimerInfo` (shared with 1.4). Full surface spec +
-      the "solid pane" checklist: **"Panels / Inspector — surfacing"** above
-      (track decision 10). Cut-sites tab is a cheap follow-on (`view.cut_sites`).
+- [x] 1.3a **`ListPrimers → PrimerInfo` projection** (`core` type + dispatch +
+      `BioOps::primer_infos`; bio assembles via `classify_attachment` +
+      `primer_qc_with_anneal`, mapping `AttachmentState → PrimerState`). Shared
+      with 1.4; unit-tested headless.
+- [x] 1.3b **Inspector pane machinery** — right-docked singleton
+      (`Tab::Inspector`/`FocusScope::Inspector`, `split_right` @
+      `layout.inspector_fraction`), version-keyed `InspectorState` cache, Primers
+      tab as a **read-only** list, `View → Inspector` show/hide toggle. Layout
+      back-compat + default-dock + focus-scope tested.
+- [ ] 1.3c **Interactive Primers table** — the first `InspectorCollection`
+      instance: columns + select→reveal (`View.selected_primer`) +
+      double-click/Enter → `on_activate` (edit-modal launcher; `None` for primers
+      until 2.1). Header toggles (show/hide on map, arrows-vs-bases). Then
+      **generalize to the trait** + add Cut-sites (read-only, `view.cut_sites`)
+      and Features (activation → the existing feature modal). Full spec: **"Panels
+      / Inspector"** above (decision 10).
 - [ ] 1.4 CLI: `seqforge primers list` (→ `PrimerInfo`, shared with 1.3),
       `seqforge primers find <oligo>`.
 
@@ -530,6 +592,16 @@ Each item cites the code it must stay consistent with.
     `primers list`) so GUI and agent can't drift. Full shape: "Panels / Inspector"
     above. Rationale: matches SnapGene tabs / Benchling inspector; keeps the
     sequence map central; reuses proven pane machinery instead of a new surface.
+    **Refinement (implementation): horizontal sub-tabs** (lean on egui_dock, no
+    icon rail). One **`InspectorCollection` trait** templatizes the table
+    (display + selection + activation dispatch) across the three nouns — the
+    `Track` analog — but **not** the edit forms. **Editing = launcher, not inline:**
+    a row's double-click/Enter opens the noun's **existing modal**
+    (`OpenFeatureForm`/`OpenPrimerForm`), whose Submit is one `ViewerRequest` =
+    the CLI verb. This *preserves* the forms→modals grammar (does not bend it),
+    keeps the pane keyless beyond an activation gesture, and lowers LoC (no
+    inline-edit state machine). Read-only nouns (cut-sites) have no modal —
+    editability is opt-in per collection.
 
 ## Resolved (previously open) questions
 

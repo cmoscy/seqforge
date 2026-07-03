@@ -21,7 +21,7 @@ architecture contracts live under [`docs/`](docs/).
 | **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (no tag — see Tagging policy) |
 | **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ⏳ next |
 | **(parallel)** | Restriction cloning depth (digest → ligation → Golden Gate) | 🟡 Tier 1 done |
-| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phase 0 complete; Phase 1.1 complete (find + attachment-state) |
+| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phase 0–1.2 + 1.3a/1.3b complete (thermo QC, projection, Inspector pane) |
 
 ### Tagging policy (pre-1.0)
 
@@ -50,7 +50,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0 + 1.1 + 1.2 complete (QC thermo, `anneal_tm`) | Phase 1.3 — Inspector pane |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phase 0–1.2 + 1.3a/1.3b complete (QC thermo, `PrimerInfo` projection, Inspector pane machinery) | Phase 1.3c — interactive Primers table (`InspectorCollection` trait) |
 
 ---
 
