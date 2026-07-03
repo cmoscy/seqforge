@@ -19,6 +19,7 @@
 //! is anchored at the 3' terminus and is `min(oligo_len, footprint)` long.
 
 mod anneal;
+mod evaluate;
 
 use std::ops::Range;
 
@@ -29,6 +30,9 @@ use crate::dna::complement_byte;
 pub use anneal::{
     AnnealSettings, AttachmentState, PrimerAttachment, PrimerBinding, classify_attachment,
     find_primer_binding_sites,
+};
+pub use evaluate::{
+    PrimerQc, PrimerQcPlusAnneal, anneal_tm, primer_qc, primer_qc_with_anneal,
 };
 
 /// One template column covered by a primer's annealed footprint.

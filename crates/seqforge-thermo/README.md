@@ -1,8 +1,8 @@
 # seqforge-thermo
 
 Sequence thermodynamics for SeqForge: melting temperature (`tm`), GC content
-(`gc`), and — reserved for later phases — nucleic-acid MFE folding (`fold`/`dg`)
-for self-hairpin / self-dimer ΔG and two-sequence heteroduplex Tm.
+(`gc`), self-hairpin / self-dimer ΔG (MFE folding), and two-sequence heteroduplex
+Tm (`duplex_tm`).
 
 This crate is **pure and zero-dependency** (no workspace or non-std deps) and
 `publish = false`, mirroring `seqforge-restriction`. That constraint is what
@@ -10,17 +10,25 @@ keeps a future crates.io extraction a one-crate change. It is reached only via
 `seqforge-bio` (`bio → thermo` is the single new cross-crate edge); `seqforge-core`
 never depends on it — Tm/GC are *derived* data, never stored on the model.
 
-## Public API (Phase 0.1)
+## Public API
 
 - `tm(oligo) -> Result<f64, TmError>` — nearest-neighbour Tm (°C) of a single
   oligo (SantaLucia unified NN + Owczarzy-2008 salt), under seqfold's default
   PCR salt conditions.
+- `duplex_tm(seq1, seq2) -> Result<f64, TmError>` — heteroduplex Tm (°C) for
+  two aligned sequences (ungapped, mismatch-aware).
 - `gc(seq) -> f64` — GC content as a percentage (`0.0..=100.0`).
+- `hairpin_dg(oligo, temp_c) -> Result<f64, FoldError>` — self-hairpin ΔG
+  (kcal/mol) at `temp_c` (°C). Returns overall MFE when the fold includes a
+  hairpin; `0.0` when none or unfavorable.
+- `self_dimer_dg(oligo, temp_c) -> Result<f64, FoldError>` — self-dimer ΔG via
+  unimolecular fold of `oligo + linker + revcomp(oligo)` (seqfold has no
+  bimolecular dimer mode).
+- `DEFAULT_FOLD_TEMP_C` — `37.0` °C (seqfold `fold_test.py` / Lattice primers).
+- `FoldError` — invalid fold input.
 
-The vendored `core` module additionally carries seqfold's Zuker MFE folding and
-the two-sequence `core::tm::tm(seq1, seq2, pcr)` heteroduplex path; those back
-later phases (self-structure ΔG, primer:template annealing) and are not part of
-the 0.1 thin API.
+The vendored `core` module carries seqfold's Zuker MFE folding engine and the
+full `core::tm::tm(seq1, seq2, pcr)` implementation behind the thin API above.
 
 ## Vendored from seqfold (MIT)
 

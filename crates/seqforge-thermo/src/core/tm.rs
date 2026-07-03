@@ -4,7 +4,7 @@ use super::energies::{self, Energies};
 use super::pyfloat::pyround;
 
 /// Error raised for invalid Tm inputs (maps to Python `ValueError`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TmError(pub String);
 
 fn dna() -> &'static Energies {

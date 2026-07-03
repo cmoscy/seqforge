@@ -147,7 +147,7 @@ fn render_desc(
 }
 
 /// Error raised for invalid sequences (maps to Python `RuntimeError`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FoldError(pub String);
 
 type Cache = Vec<Vec<Struct>>;
@@ -189,6 +189,34 @@ pub fn dg(seq: &str, temp: f64) -> Result<f64, FoldError> {
     Ok(pyround(dg_sum, 2))
 }
 
+fn emap_for_seq(s: &[u8]) -> Result<&'static Energies, FoldError> {
+    let bps: HashSet<u8> = s.iter().copied().collect();
+    if bps.contains(&b'U') && bps.contains(&b'T') {
+        return Err(FoldError(
+            "Both T and U in sequence. Provide one or the other for DNA OR RNA.".to_string(),
+        ));
+    }
+    let mut dna = true;
+    if bps.iter().all(|b| b"AUCG".contains(b)) {
+        dna = false;
+    } else if bps.iter().any(|b| !b"ATGC".contains(b)) {
+        let diff: Vec<char> = bps
+            .iter()
+            .filter(|b| !b"ATUGC".contains(b))
+            .map(|&b| b as char)
+            .collect();
+        return Err(FoldError(format!(
+            "Unknown bp: {:?}. Only DNA/RNA foldable",
+            diff
+        )));
+    }
+    Ok(if dna {
+        energies::dna()
+    } else {
+        energies::rna()
+    })
+}
+
 /// Fold and return the (i, j) -> min-free-energy matrix (the W cache energies).
 pub fn dg_cache(seq: &str, temp: f64) -> Result<Vec<Vec<f64>>, FoldError> {
     let (_v, w_cache) = cache(seq, temp)?;
@@ -216,35 +244,7 @@ pub fn cache(seq: &str, temp: f64) -> Result<(Cache, Cache), FoldError> {
     let seq = seq.to_uppercase();
     let temp = temp + 273.15; // kelvin
     let s = seq.as_bytes();
-
-    // figure out whether it's DNA or RNA, choose energy map
-    let bps: HashSet<u8> = s.iter().copied().collect();
-    if bps.contains(&b'U') && bps.contains(&b'T') {
-        return Err(FoldError(
-            "Both T and U in sequence. Provide one or the other for DNA OR RNA.".to_string(),
-        ));
-    }
-
-    let mut dna = true;
-    if bps.iter().all(|b| b"AUCG".contains(b)) {
-        dna = false;
-    } else if bps.iter().any(|b| !b"ATGC".contains(b)) {
-        let diff: Vec<char> = bps
-            .iter()
-            .filter(|b| !b"ATUGC".contains(b))
-            .map(|&b| b as char)
-            .collect();
-        return Err(FoldError(format!(
-            "Unknown bp: {:?}. Only DNA/RNA foldable",
-            diff
-        )));
-    }
-    let emap: &Energies = if dna {
-        energies::dna()
-    } else {
-        energies::rna()
-    };
-
+    let emap = emap_for_seq(s)?;
     Ok(fill(s, temp, emap))
 }
 

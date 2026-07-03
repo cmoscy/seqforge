@@ -104,12 +104,16 @@ pub fn run_orfs(
 pub fn run_tm(oligo: &str) -> anyhow::Result<()> {
     let tm = seqforge_bio::tm(oligo)
         .map_err(|e| anyhow::anyhow!("cannot compute Tm for {oligo:?}: {}", e.0))?;
+    let hairpin = seqforge_bio::hairpin_dg(oligo, seqforge_bio::DEFAULT_FOLD_TEMP_C);
+    let dimer = seqforge_bio::self_dimer_dg(oligo, seqforge_bio::DEFAULT_FOLD_TEMP_C);
     let out = serde_json::json!({
         "kind": "oligo_tm",
         "oligo": oligo.to_uppercase(),
         "length": oligo.len(),
         "tm": tm,
         "gc": seqforge_bio::gc(oligo),
+        "hairpin_dg": hairpin.ok(),
+        "self_dimer_dg": dimer.ok(),
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

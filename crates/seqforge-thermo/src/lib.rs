@@ -6,18 +6,12 @@
 //! is `publish = false` until it is extracted — the constraint that keeps that
 //! extraction a one-crate change.
 //!
-//! ## Thin API (Phase 0.1)
+//! ## Thin API
 //!
-//! The stable public surface is intentionally narrow — [`tm`] and [`gc`]:
-//!
-//! - [`tm`] — nearest-neighbour melting temperature of a single oligo
-//!   (SantaLucia NN + Owczarzy-2008 salt), in °C.
-//! - [`gc`] — GC content of a sequence, as a percentage.
-//!
-//! The vendored [`core`] module also carries seqfold's Zuker MFE folding
-//! (`core::fold::fold` / `core::fold::dg`) and the two-sequence heteroduplex
-//! `core::tm::tm`; those back later phases (self-structure ΔG, primer:template
-//! annealing) and are not part of the 0.1 thin API.
+//! - [`tm`] / [`duplex_tm`] — nearest-neighbour melting temperature (°C).
+//! - [`gc`] — GC content as a percentage.
+//! - [`hairpin_dg`] / [`self_dimer_dg`] — self-structure ΔG (kcal/mol) via
+//!   vendored MFE folding (Phase 1.2).
 //!
 //! ```
 //! let t = seqforge_thermo::tm("GGGACCGCCT").unwrap();
@@ -35,7 +29,17 @@
 )]
 pub mod core;
 
+pub use core::fold::FoldError;
 pub use core::tm::TmError;
+
+/// Default folding temperature (°C) for primer QC — matches seqfold's
+/// `fold_test.py` vectors and Lattice primers scoring.
+pub const DEFAULT_FOLD_TEMP_C: f64 = 37.0;
+
+/// Linker between oligo and its reverse complement in [`self_dimer_dg`].
+/// AT-rich so it does not add false GC pairing (and avoids `N`, which seqfold
+/// cannot fold).
+const SELF_DIMER_LINKER: &str = "AAAAA";
 
 /// Melting temperature (°C) of a single oligo, by the nearest-neighbour model
 /// (SantaLucia unified NN parameters + Owczarzy-2008 salt correction).
@@ -50,6 +54,64 @@ pub use core::tm::TmError;
 pub fn tm(oligo: &str) -> Result<f64, TmError> {
     // seqfold `tm(seq1, seq2="", pcr=true)`: empty seq2 ⇒ exact complement.
     core::tm::tm(oligo, "", true)
+}
+
+/// Melting temperature (°C) of a two-sequence duplex (antiparallel), with
+/// internal mismatch support. Used for primer:template annealing ([`duplex_tm`]
+/// in `seqforge-bio::anneal_tm`).
+pub fn duplex_tm(seq1: &str, seq2: &str) -> Result<f64, TmError> {
+    core::tm::tm(seq1, seq2, true)
+}
+
+/// Most stable hairpin ΔG (kcal/mol) in `oligo` at `temp_c`.
+///
+/// When the MFE fold includes a hairpin loop, returns the overall MFE ΔG (more
+/// negative = more stable self-structure). Returns `0.0` when no hairpin appears
+/// in the decomposition or the MFE is not favorable (ΔG ≥ 0).
+pub fn hairpin_dg(oligo: &str, temp_c: f64) -> Result<f64, FoldError> {
+    let structs = core::fold::fold(oligo, temp_c)?;
+    let has_hairpin = structs
+        .iter()
+        .any(|s| s.desc.starts_with("HAIRPIN"));
+    if !has_hairpin {
+        return Ok(0.0);
+    }
+    let overall: f64 = structs.iter().map(|s| s.e).sum();
+    Ok(if overall < 0.0 {
+        core::pyfloat::pyround(overall, 2)
+    } else {
+        0.0
+    })
+}
+
+/// Self-dimer ΔG (kcal/mol) at `temp_c`.
+///
+/// Unimolecular approximation: MFE fold of `oligo + linker + revcomp(oligo)`.
+/// seqfold has no bimolecular dimer mode; hetero-dimer QC is Phase 3.1. More
+/// negative = more self-dimer-prone.
+pub fn self_dimer_dg(oligo: &str, temp_c: f64) -> Result<f64, FoldError> {
+    let upper: String = oligo.bytes().map(|b| b.to_ascii_uppercase() as char).collect();
+    if upper.is_empty() {
+        return Ok(0.0);
+    }
+    let rc = reverse_complement_dna(upper.as_bytes());
+    let concat = format!("{upper}{SELF_DIMER_LINKER}{rc}");
+    core::fold::dg(&concat, temp_c)
+}
+
+fn reverse_complement_dna(seq: &[u8]) -> String {
+    seq.iter()
+        .rev()
+        .map(|&b| {
+            (match b.to_ascii_uppercase() {
+                b'A' => b'T',
+                b'T' => b'A',
+                b'G' => b'C',
+                b'C' => b'G',
+                other => other,
+            }) as char
+        })
+        .collect()
 }
 
 /// GC content of a sequence, as a percentage in `0.0..=100.0`.
@@ -161,5 +223,70 @@ mod tests {
         let upper = tm("GGGACCGCCT").unwrap();
         let lower = tm("gggaccgcct").unwrap();
         assert_eq!(upper, lower);
+    }
+
+    // ── fold / structure (seqfold fold_test.py DNA vectors) ─────────────────
+
+    #[test]
+    fn dg_matches_unafold_ballpark() {
+        let seq = "GGGAGGTCGTTACATCTGGGTAACACCGGTACTGATCCGGTGACCTCCC";
+        let ufold = -10.94;
+        let d = core::fold::dg(seq, DEFAULT_FOLD_TEMP_C).unwrap();
+        let delta = (0.6 * d.min(ufold)).abs();
+        assert!(
+            (d - ufold).abs() <= delta,
+            "dg({seq}) = {d}, expected {ufold} ± {delta}"
+        );
+    }
+
+    #[test]
+    fn fold_rejects_invalid_sequence() {
+        assert!(core::fold::dg("EASFEASFAST", DEFAULT_FOLD_TEMP_C).is_err());
+        assert!(core::fold::dg("ATGCATGACGATUU", DEFAULT_FOLD_TEMP_C).is_err());
+    }
+
+    #[test]
+    fn hairpin_dg_on_structured_oligo_is_negative() {
+        let hp = hairpin_dg("CGCGTTTTTGCGC", DEFAULT_FOLD_TEMP_C).unwrap();
+        assert!(hp < 0.0, "structured oligo with hairpin MFE; got {hp}");
+    }
+
+    #[test]
+    fn hairpin_dg_on_short_at_homopolymer_is_zero() {
+        let hp = hairpin_dg("ATATAT", DEFAULT_FOLD_TEMP_C).unwrap();
+        assert_eq!(hp, 0.0, "no favorable hairpin; got {hp}");
+    }
+
+    #[test]
+    fn self_dimer_dg_self_complementary_more_stable_than_random() {
+        let pal = self_dimer_dg("GCGCGCGCGC", DEFAULT_FOLD_TEMP_C).unwrap();
+        let ctrl = self_dimer_dg("ATGCGTAGCT", DEFAULT_FOLD_TEMP_C).unwrap();
+        assert!(
+            pal < ctrl,
+            "self-complementary oligo should be more negative: pal={pal}, ctrl={ctrl}"
+        );
+    }
+
+    #[test]
+    fn duplex_tm_matches_monomer_when_seq2_is_complement() {
+        let seq = "GCGTAC";
+        let mono = tm(seq).unwrap();
+        let comp_only: String = seq
+            .bytes()
+            .map(|b| {
+                (match b.to_ascii_uppercase() {
+                    b'A' => b'T',
+                    b'T' => b'A',
+                    b'G' => b'C',
+                    b'C' => b'G',
+                    other => other,
+                }) as char
+            })
+            .collect();
+        let duplex = duplex_tm(seq, &comp_only).unwrap();
+        assert!(
+            (mono - duplex).abs() < 0.5,
+            "perfect complement duplex: mono={mono}, duplex={duplex}"
+        );
     }
 }

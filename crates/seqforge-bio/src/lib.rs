@@ -20,10 +20,13 @@ pub use enzyme_query::{
 };
 pub use primer::{
     AnnealSettings, AnnealedBase, AttachmentState, PrimerAttachment, PrimerBinding,
-    PrimerDecomposition, classify_attachment, decompose_primer, find_primer_binding_sites,
+    PrimerDecomposition, PrimerQc, PrimerQcPlusAnneal, anneal_tm, classify_attachment,
+    decompose_primer, find_primer_binding_sites, primer_qc, primer_qc_with_anneal,
 };
 pub use search::{find_cut_sites, find_iupac_matches};
-pub use seqforge_thermo::{TmError, gc, tm};
+pub use seqforge_thermo::{
+    DEFAULT_FOLD_TEMP_C, FoldError, TmError, duplex_tm, gc, hairpin_dg, self_dimer_dg, tm,
+};
 pub use translate::{Orf, find_orfs, translate};
 
 use seqforge_core::{Annotations, Buffer, Document};
