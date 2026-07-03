@@ -461,6 +461,8 @@ pub enum PrimerState {
 pub struct PrimerInfo {
     pub id: PrimerId,
     pub name: String,
+    /// Full authored oligo 5'→3' (5' tail included).
+    pub sequence: String,
     /// 0-based half-open annealing footprint on the top strand; `None` for a
     /// detached/floating oligo. Display layers convert to 1-based.
     pub binding: Option<Range<usize>>,
@@ -801,9 +803,10 @@ mod tests {
                 .map(|p| PrimerInfo {
                     id: p.id,
                     name: p.name.clone(),
+                    sequence: p.sequence.clone(),
                     binding: p.binding.clone(),
                     strand: p.strand,
-                    len: p.sequence.len(),
+                    len: p.sequence.chars().count(),
                     tm: None,
                     gc: 0.0,
                     hairpin_dg: None,

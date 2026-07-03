@@ -1,7 +1,8 @@
 //! Navigation, search, selection commands.
 
 use seqforge_core::{
-    BioOps, DispatchError, EnzymeOp, FeatureId, Selection, Strand, ViewerRequest, ViewerResponse,
+    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, ViewerRequest,
+    ViewerResponse,
 };
 
 use super::{
@@ -196,6 +197,34 @@ pub(super) fn apply_select_feature(
     Ok(None)
 }
 
+/// Select a primer by id (Inspector row-click). Sets `selected_primer`, clears
+/// `selected_feature` (mutually exclusive panel selection), and — when the
+/// primer is attached — selects + reveals its footprint (lighting the status-bar
+/// Tm/%GC readout, like a map click). A detached/floating oligo is panel-only:
+/// selected by id, no map move.
+pub(super) fn apply_reveal_primer(
+    state: &mut AppState,
+    id: PrimerId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let before = active_selection(state);
+    // Look up the authored footprint in the active buffer's annotations.
+    let binding = state
+        .workspace
+        .with_active_buffer(|_v, _b, ann| ann.primer(id).and_then(|p| p.binding.clone()))
+        .ok()
+        .flatten();
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selected_primer = Some(id);
+        view.selected_feature = None;
+        if let Some(b) = &binding {
+            view.selection = Some(Selection::range(b.start, b.end));
+            view.scroll_to = Some(b.start);
+        }
+    }
+    emit_selection_diff(state, before);
+    Ok(None)
+}
+
 /// Open a modal overlay (feature editing / translation). Shared plumbing:
 /// snapshot focus for restore-on-dismiss, keep the active view focused so the
 /// modal's Escape (via the `"Overlay"` context tag) works, push uniquely.
@@ -260,4 +289,86 @@ pub(super) fn apply_open_translation(
             all_frames: false,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seqforge_core::{Primer, PrimerId};
+    use std::io::Write;
+
+    struct TestBio;
+    impl BioOps for TestBio {
+        fn load(&self, path: &std::path::Path) -> Result<seqforge_core::Document, String> {
+            seqforge_bio::load(path).map_err(|e| e.to_string())
+        }
+        fn find_matches(&self, _: &[u8], _: &[u8], _: u8, _: bool) -> Vec<seqforge_core::SearchHit> {
+            vec![]
+        }
+        fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
+            vec![]
+        }
+        fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn primer_infos(
+            &self,
+            _: &[u8],
+            _: &[&Primer],
+            _: bool,
+        ) -> Vec<seqforge_core::PrimerInfo> {
+            vec![]
+        }
+    }
+
+    fn open_with_primer(binding: Option<std::ops::Range<usize>>, tag: &str) -> (AppState, PrimerId) {
+        let mut path = std::env::temp_dir();
+        path.push(format!("sf_nav_{}_{tag}.fasta", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">t\nATGCGTACCA").unwrap();
+
+        let mut state = AppState::default();
+        let vid = state.workspace.open_path(&path, &TestBio).unwrap();
+        state.workspace.focus_view(vid);
+        let id = state
+            .workspace
+            .with_active_buffer_mut(|_v, _b, ann| {
+                ann.add_primer(Primer {
+                    id: PrimerId::default(),
+                    name: "p".into(),
+                    sequence: "GCGTAC".into(),
+                    binding,
+                    strand: Strand::Forward,
+                    qualifiers: Default::default(),
+                })
+            })
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        (state, id)
+    }
+
+    #[test]
+    fn reveal_attached_primer_selects_footprint_and_clears_feature() {
+        let (mut state, id) = open_with_primer(Some(2..8), "attached");
+        state.workspace.active_view_mut().unwrap().selected_feature = Some(FeatureId(9));
+
+        apply_reveal_primer(&mut state, id).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.selected_feature, None, "primer selection clears feature");
+        assert_eq!(v.selection, Some(Selection::range(2, 8)));
+        assert_eq!(v.scroll_to, Some(2));
+    }
+
+    #[test]
+    fn reveal_detached_primer_is_panel_only() {
+        let (mut state, id) = open_with_primer(None, "detached");
+
+        apply_reveal_primer(&mut state, id).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.scroll_to, None, "detached primer must not move the map");
+    }
 }

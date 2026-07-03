@@ -247,7 +247,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 }
             },
             Tab::Inspector => {
-                self.inspector.show(ui);
+                self.inspector.show(ui, self.pending_commands);
             }
         }
 

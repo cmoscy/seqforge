@@ -119,6 +119,7 @@ fn primer_info(
     PrimerInfo {
         id: primer.id,
         name: primer.name.clone(),
+        sequence: primer.sequence.clone(),
         binding: primer.binding.clone(),
         strand: primer.strand,
         len: primer.sequence.len(),

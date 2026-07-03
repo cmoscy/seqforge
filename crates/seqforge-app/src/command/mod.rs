@@ -131,6 +131,11 @@ pub enum AppCommand {
     // ── Selection ────────────────────────────────────────────────────
     SetSelection(Option<Selection>),
     SelectFeature(Option<FeatureId>),
+    /// Select a primer by id (Inspector row-click): sets `View.selected_primer`,
+    /// and — when attached — selects + reveals its binding footprint.
+    RevealPrimer {
+        id: seqforge_core::PrimerId,
+    },
 
     // ── Feature editing (Phase 14) ───────────────────────────────────
     /// Open the unified add/edit feature modal. `id` is `None` for a new
@@ -288,7 +293,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
-        RevealRange { .. } => state.workspace.active_view().is_some(),
+        RevealRange { .. } | RevealPrimer { .. } => state.workspace.active_view().is_some(),
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
@@ -520,6 +525,7 @@ pub fn apply<B: BioOps>(
         // ── Selection ───────────────────────────────────────────────
         SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),
         SelectFeature(new_feat) => nav::apply_select_feature(state, new_feat),
+        RevealPrimer { id } => nav::apply_reveal_primer(state, id),
 
         // ── Feature editing (Phase 14) ──────────────────────────────
         OpenFeatureForm {
