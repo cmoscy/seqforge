@@ -149,7 +149,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     .show(ui, self.workspace, self.pending_commands, &self.config);
             }
             Tab::Welcome => {
-                if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui, &[]) {
+                if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
                 }
                 ui.centered_and_justified(|ui| {
@@ -173,18 +173,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // will actually act on).
                 let bar_target = self.workspace.active_view == Some(view_id);
                 if bar_target {
-                    // Hydrate the enzyme bar's list from this view's current
-                    // results so ⌘E reopens showing what's already drawn. Only
-                    // built when the enzyme bar is actually open.
-                    let enzyme_rows = if self.overlays.has_enzyme_bar() {
-                        self.workspace
-                            .view(view_id)
-                            .map(|v| overlay::enzyme_rows(&v.active_enzymes, &v.cut_sites))
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui, &enzyme_rows) {
+                    if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                         self.pending_commands.push((cmd, None));
                     }
                 }

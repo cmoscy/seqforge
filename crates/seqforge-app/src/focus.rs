@@ -80,6 +80,11 @@ impl KeyContext {
     pub const PANE_TERMINAL: &'static str = "Pane:Terminal";
     pub const PANE_BROWSER: &'static str = "Pane:Browser";
     pub const PANE_INSPECTOR: &'static str = "Pane:Inspector";
+    /// Pushed while the Inspector pane is in inline field-edit capture mode
+    /// (Phase 1.5a / decision 15). Suppresses the workspace keybinding-override
+    /// loop the same way an overlay's `TextInput` does, so a single-key user
+    /// binding can't fire while the user is typing into a pane field.
+    pub const PANE_INSPECTOR_EDITING: &'static str = "Pane:Inspector:Editing";
     pub const TEXT_INPUT: &'static str = "TextInput";
 
     pub fn new() -> Self {
@@ -202,9 +207,17 @@ mod tests {
 
     #[test]
     fn inspector_scope_resolves_to_its_pane_tag() {
-        assert_eq!(
-            FocusScope::Inspector.pane_tag(),
-            KeyContext::PANE_INSPECTOR
-        );
+        assert_eq!(FocusScope::Inspector.pane_tag(), KeyContext::PANE_INSPECTOR);
+    }
+
+    #[test]
+    fn inspector_editing_tag_layers_over_the_pane() {
+        // The edit-capture tag rides on top of whatever base context is active
+        // (mirrors how overlay tags layer), so the keymap can gate on it.
+        let mut fs = super::FocusState::default();
+        fs.set_scope(FocusScope::Inspector);
+        fs.rebuild_context(None, std::iter::once(KeyContext::PANE_INSPECTOR_EDITING));
+        assert!(fs.context.contains(KeyContext::PANE_INSPECTOR_EDITING));
+        assert!(fs.context.contains(KeyContext::WORKSPACE));
     }
 }

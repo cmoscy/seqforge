@@ -12,9 +12,7 @@ use super::{
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
-use crate::overlay::{
-    EnzymeBar, FeatureForm, FindBar, GoToBar, Overlay, RenameFeatureForm, TranslationView,
-};
+use crate::overlay::{FeatureForm, FindBar, GoToBar, Overlay, RenameFeatureForm, TranslationView};
 
 pub(super) fn apply_open_find(
     state: &mut AppState,
@@ -53,16 +51,15 @@ pub(super) fn apply_open_goto(
 pub(super) fn apply_open_enzymes(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    snapshot_focus_for_overlay(state);
-    if let Some(vid) = state.workspace.active_view {
-        state.focus.set_scope(FocusScope::View(vid));
-    }
-    if let Some(tag) = state
-        .overlays
-        .push_unique(Overlay::EnzymeBar(EnzymeBar::default()))
-    {
-        state.events.emit(AppEvent::OverlayPushed(tag));
-    }
+    // ⌘E is now a pane verb: open the Inspector's Cut-sites tab and focus its
+    // enzyme query (decision 15 / Phase 1.5b). The standalone enzyme bar is
+    // retired; querying manages the persistent `active_enzymes` collection there.
+    super::layout::dock_inspector_if_absent(state);
+    state.inspector.reveal_enzyme_query();
+    state.focus.set_scope(FocusScope::Inspector);
+    state
+        .events
+        .emit(AppEvent::FocusChanged(FocusScope::Inspector));
     Ok(None)
 }
 
@@ -105,10 +102,10 @@ pub(super) fn apply_submit_find<B: BioOps>(
     Ok(Some(resp))
 }
 
-/// Set / Add / Remove against the active enzyme set. Unlike Find / GoTo, the
-/// enzyme overlay is **persistent**: these ops mutate the set and re-render
-/// without closing it, so the user can refine the set in place. Only
-/// `DismissOverlay` (Esc / ✕) closes the bar.
+/// Set / Add / Remove against the active enzyme set. Driven from the Inspector's
+/// Enzymes (Cut-sites) tab (decision 15 / Phase 1.5b): the query header posts
+/// Set/Add and per-row ✕ posts Remove; the set is persistent view state the tab
+/// manages in place. (`active_enzymes` mutates; cut sites re-derive.)
 pub(super) fn apply_enzyme_op<B: BioOps>(
     state: &mut AppState,
     bio: &B,
@@ -150,8 +147,8 @@ pub(super) fn apply_submit_goto<B: BioOps>(
 }
 
 /// Select `start..end` (0-based, half-open) in the active view and scroll it
-/// into view. The enzyme overlay stays open (it's persistent), so the user can
-/// keep clicking sites; the viewer behind it scrolls and highlights.
+/// into view. Used by Inspector row clicks (enzyme sites, cut sites) to jump the
+/// map to a location while the pane stays put.
 pub(super) fn apply_reveal_range(
     state: &mut AppState,
     start: usize,
@@ -343,7 +340,13 @@ mod tests {
         fn load(&self, path: &std::path::Path) -> Result<seqforge_core::Document, String> {
             seqforge_bio::load(path).map_err(|e| e.to_string())
         }
-        fn find_matches(&self, _: &[u8], _: &[u8], _: u8, _: bool) -> Vec<seqforge_core::SearchHit> {
+        fn find_matches(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u8,
+            _: bool,
+        ) -> Vec<seqforge_core::SearchHit> {
             vec![]
         }
         fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
@@ -352,17 +355,15 @@ mod tests {
         fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
             vec![]
         }
-        fn primer_infos(
-            &self,
-            _: &[u8],
-            _: &[&Primer],
-            _: bool,
-        ) -> Vec<seqforge_core::PrimerInfo> {
+        fn primer_infos(&self, _: &[u8], _: &[&Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
             vec![]
         }
     }
 
-    fn open_with_primer(binding: Option<std::ops::Range<usize>>, tag: &str) -> (AppState, PrimerId) {
+    fn open_with_primer(
+        binding: Option<std::ops::Range<usize>>,
+        tag: &str,
+    ) -> (AppState, PrimerId) {
         let mut path = std::env::temp_dir();
         path.push(format!("sf_nav_{}_{tag}.fasta", std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
@@ -422,7 +423,10 @@ mod tests {
 
         let v = state.workspace.active_view().unwrap();
         assert_eq!(v.selected_primer, Some(id));
-        assert_eq!(v.selected_feature, None, "selecting a primer clears feature");
+        assert_eq!(
+            v.selected_feature, None,
+            "selecting a primer clears feature"
+        );
         assert_eq!(v.scroll_to, None, "select (vs reveal) must not scroll");
     }
 

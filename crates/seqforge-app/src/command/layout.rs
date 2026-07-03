@@ -141,14 +141,32 @@ pub(super) fn apply_toggle_inspector(
         return Ok(None);
     }
 
-    // Otherwise dock it right of a viewer-bearing leaf; `split`'s fraction is
-    // the retained (viewer) share, so pass the complement of the pane's width.
+    // Otherwise dock it and focus it.
+    dock_inspector_if_absent(state);
+    let scope = FocusScope::Inspector;
+    state.focus.set_scope(scope);
+    state.events.emit(AppEvent::FocusChanged(scope));
+    Ok(None)
+}
+
+/// Dock the Inspector on the right of a viewer-bearing leaf if it isn't already
+/// present; a no-op when it is. Shared by `ToggleInspector` and the ⌘E enzyme
+/// re-target (decision 15). Does **not** touch focus — callers decide that.
+pub(super) fn dock_inspector_if_absent(state: &mut AppState) {
+    if state.dock_state.find_tab(&Tab::Inspector).is_some() {
+        return;
+    }
+    // `split`'s fraction is the retained (viewer) share, so pass the complement
+    // of the pane's width.
     let target = {
         let mut found = None;
         for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
             for (n_idx, node) in surface.iter_nodes().enumerate() {
                 if let Some(tabs) = node.tabs() {
-                    if tabs.iter().any(|t| matches!(t, Tab::View(_) | Tab::Welcome)) {
+                    if tabs
+                        .iter()
+                        .any(|t| matches!(t, Tab::View(_) | Tab::Welcome))
+                    {
                         found = Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
                         break;
                     }
@@ -170,10 +188,6 @@ pub(super) fn apply_toggle_inspector(
         }
         None => state.dock_state.push_to_focused_leaf(Tab::Inspector),
     }
-    let scope = FocusScope::Inspector;
-    state.focus.set_scope(scope);
-    state.events.emit(AppEvent::FocusChanged(scope));
-    Ok(None)
 }
 
 // ── Dock-tree helpers (also used by file.rs) ────────────────────────────────

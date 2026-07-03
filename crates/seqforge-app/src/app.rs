@@ -962,7 +962,12 @@ impl eframe::App for SeqForgeApp {
         // (Stage 2.5d) + overlay tags. Drift-proof: the overlay stack
         // and the active view's kind are the sources of truth.
         let active_view_kind = self.state.workspace.active_view().map(|v| v.kind);
-        let overlay_tags: Vec<&'static str> = self.state.overlays.context_tags().collect();
+        let mut overlay_tags: Vec<&'static str> = self.state.overlays.context_tags().collect();
+        // Inline Inspector field-edit contributes a capture tag (Phase 1.5a), so
+        // the keymap suppresses single-key user bindings while typing in a field.
+        if self.state.inspector.is_editing() {
+            overlay_tags.push(crate::focus::KeyContext::PANE_INSPECTOR_EDITING);
+        }
         self.state
             .focus
             .rebuild_context(active_view_kind, overlay_tags.into_iter());
@@ -1271,12 +1276,8 @@ impl eframe::App for SeqForgeApp {
                         });
                     });
                     ui.separator();
-                    let inspector_shown =
-                        self.state.dock_state.find_tab(&Tab::Inspector).is_some();
-                    if ui
-                        .selectable_label(inspector_shown, "Inspector")
-                        .clicked()
-                    {
+                    let inspector_shown = self.state.dock_state.find_tab(&Tab::Inspector).is_some();
+                    if ui.selectable_label(inspector_shown, "Inspector").clicked() {
                         menu_cmds.push(AppCommand::ToggleInspector);
                         ui.close_menu();
                     }

@@ -212,7 +212,27 @@ pub(super) fn apply_copy(
     end: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    let slice = read_slice(state, vid, start..end)?;
+    // Object-aware copy (decision 15 / Phase 1.5c): when the copy covers exactly
+    // a selected primer's binding footprint, copy the authored oligo (5'→3', tail
+    // included) — the reagent — instead of the template slice. The template slice
+    // is the *wrong strand* for a reverse primer and can't represent a 5' tail
+    // (which has no template column). The `range == binding` gate keeps explicit,
+    // off-footprint range copies (CLI/agent) as literal slices, so parity holds.
+    let oligo = state
+        .workspace
+        .with_buffer(vid, |v, _buf, ann| {
+            let id = v.selected_primer?;
+            let p = ann.primer(id)?;
+            let b = p.binding.as_ref()?;
+            (b.start == start && b.end == end).then(|| p.sequence.clone().into_bytes())
+        })
+        .ok()
+        .flatten();
+
+    let slice = match oligo {
+        Some(o) => o,
+        None => read_slice(state, vid, start..end)?,
+    };
     let len = slice.len();
     state.clipboard = Some(slice);
     // Copy doesn't mutate the buffer — report the copied length, not a buffer
@@ -615,6 +635,45 @@ mod tests {
             resp,
             Some(ViewerResponse::Edited { changed: false, .. })
         ));
+    }
+
+    #[test]
+    fn copy_selected_primer_yields_the_oligo_not_the_template_slice() {
+        use seqforge_core::{Primer, PrimerId, Strand};
+        let mut s = state_with(b"AAAAATGCGGGGG");
+        let vid = s.workspace.active_view().unwrap().id;
+        // A reverse primer bound at 5..8 ("TGC" on the top strand); its authored
+        // oligo is the revcomp ("GCA") — deliberately ≠ the template slice, so a
+        // wrong (slice-based) copy is observable.
+        s.workspace
+            .with_buffer_mut(vid, |v, _b, ann| {
+                let id = ann.add_primer(Primer {
+                    id: PrimerId::default(),
+                    name: "rev".into(),
+                    sequence: "GCA".into(),
+                    binding: Some(5..8),
+                    strand: Strand::Reverse,
+                    qualifiers: Default::default(),
+                });
+                v.selected_primer = Some(id);
+            })
+            .unwrap();
+
+        // Copying the primer's exact footprint copies the oligo, not "TGC".
+        apply_copy(&mut s, None, 5, 8).unwrap();
+        assert_eq!(s.clipboard.as_deref(), Some(b"GCA".as_slice()));
+
+        // A copy over a *different* range stays a literal template slice — the
+        // gate is `range == binding`, so CLI/agent range copies are unaffected.
+        apply_copy(&mut s, None, 0, 3).unwrap();
+        assert_eq!(s.clipboard.as_deref(), Some(b"AAA".as_slice()));
+    }
+
+    #[test]
+    fn copy_without_selected_primer_is_a_template_slice() {
+        let mut s = state_with(b"AAATGCGG");
+        apply_copy(&mut s, None, 3, 6).unwrap();
+        assert_eq!(s.clipboard.as_deref(), Some(b"TGC".as_slice()));
     }
 
     #[test]

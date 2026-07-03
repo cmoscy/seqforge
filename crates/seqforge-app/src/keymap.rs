@@ -203,7 +203,10 @@ pub fn dispatch(focus: &FocusState, state: &AppState, ctx: &egui::Context) -> Ve
         // of their keystrokes — the override file carries no context tag
         // and would otherwise fire unconditionally.
         let ws_ok = focus.context.contains(KeyContext::WORKSPACE)
-            && !focus.context.contains(Overlay::TAG_ACTIVE);
+            && !focus.context.contains(Overlay::TAG_ACTIVE)
+            // Inline field-edit in the Inspector captures typing like an overlay
+            // TextInput does — don't let a single-key user binding fire mid-edit.
+            && !focus.context.contains(KeyContext::PANE_INSPECTOR_EDITING);
         if ws_ok {
             for (mods, key, action) in state.config.keybindings.entries.iter() {
                 if i.consume_key(*mods, *key) {

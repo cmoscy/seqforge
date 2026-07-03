@@ -27,7 +27,7 @@
 //!   `!overlays.is_empty()` and releases keyboard capture while any
 //!   overlay is active.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use std::path::PathBuf;
 
@@ -65,24 +65,6 @@ impl Default for GoToBar {
         Self {
             input: String::new(),
             needs_focus: true,
-        }
-    }
-}
-
-pub struct EnzymeBar {
-    pub input: String,
-    needs_focus: bool,
-    /// Names of multi-site enzymes whose per-site sub-rows are expanded.
-    /// Stale entries (enzyme no longer active) are harmless.
-    expanded: HashSet<String>,
-}
-
-impl Default for EnzymeBar {
-    fn default() -> Self {
-        Self {
-            input: String::new(),
-            needs_focus: true,
-            expanded: HashSet::new(),
         }
     }
 }
@@ -144,21 +126,6 @@ pub fn enzyme_rows(active_enzymes: &[String], cut_sites: &[CutSite]) -> Vec<Enzy
             .then(a.name.cmp(&b.name))
     });
     rows
-}
-
-/// Command to select a site's recognition range and scroll it into view.
-fn reveal(s: &EnzymeSite) -> AppCommand {
-    AppCommand::RevealRange {
-        start: s.recognition_start,
-        end: s.recognition_end,
-    }
-}
-
-/// Flip an enzyme's expansion state.
-fn toggle(set: &mut HashSet<String>, name: &str) {
-    if !set.remove(name) {
-        set.insert(name.to_string());
-    }
 }
 
 // ── Feature dialogs ───────────────────────────────────────────────────────────
@@ -274,7 +241,6 @@ pub struct TranslationView {
 pub enum Overlay {
     FindBar(FindBar),
     GoToBar(GoToBar),
-    EnzymeBar(EnzymeBar),
     /// Boxed because `FileDialog` is ~2.4 KB — keeping it inline would
     /// blow up every `Overlay` value to that size.
     FileDialog(Box<FileDialog>),
@@ -304,7 +270,6 @@ pub enum Overlay {
 impl Overlay {
     pub const TAG_FIND_BAR: &'static str = "FindBar";
     pub const TAG_GOTO_BAR: &'static str = "GoToBar";
-    pub const TAG_ENZYME_BAR: &'static str = "EnzymeBar";
     pub const TAG_FILE_DIALOG: &'static str = "FileDialog";
     pub const TAG_CLI_STATUS: &'static str = "CliStatus";
     pub const TAG_FEATURE_FORM: &'static str = "FeatureForm";
@@ -322,7 +287,6 @@ impl Overlay {
         match self {
             Overlay::FindBar(_) => Self::TAG_FIND_BAR,
             Overlay::GoToBar(_) => Self::TAG_GOTO_BAR,
-            Overlay::EnzymeBar(_) => Self::TAG_ENZYME_BAR,
             Overlay::FileDialog(_) => Self::TAG_FILE_DIALOG,
             Overlay::CliStatus(_) => Self::TAG_CLI_STATUS,
             Overlay::FeatureForm(_) => Self::TAG_FEATURE_FORM,
@@ -406,21 +370,6 @@ impl OverlayStack {
         })
     }
 
-    /// Cheap, non-mutating check used by the renderer to skip building the
-    /// enzyme results list when the bar isn't open.
-    pub fn has_enzyme_bar(&self) -> bool {
-        self.overlays
-            .iter()
-            .any(|o| matches!(o, Overlay::EnzymeBar(_)))
-    }
-
-    pub fn enzyme_bar_mut(&mut self) -> Option<&mut EnzymeBar> {
-        self.overlays.iter_mut().find_map(|o| match o {
-            Overlay::EnzymeBar(b) => Some(b),
-            _ => None,
-        })
-    }
-
     pub fn file_dialog_mut(&mut self) -> Option<&mut FileDialog> {
         self.overlays.iter_mut().find_map(|o| match o {
             Overlay::FileDialog(d) => Some(d.as_mut()),
@@ -492,23 +441,15 @@ impl OverlayStack {
 /// input) but **no longer** handles Escape — that lives in the keymap
 /// (`keymap::KEYMAP`) gated on the `"Overlay"` context tag, so Escape
 /// works regardless of which widget has egui focus.
-/// `enzyme_rows` describes the active view's currently-displayed enzymes; it
-/// hydrates the enzyme bar's results list so re-opening the bar (⌘E) shows
-/// what's on screen. Ignored by the Find / GoTo bars. Pass `&[]` where there
-/// is no active view (e.g. the Welcome tab).
-pub fn show_inline_bar(
-    stack: &mut OverlayStack,
-    ui: &mut egui::Ui,
-    enzyme_rows: &[EnzymeRow],
-) -> Option<AppCommand> {
+///
+/// Only the transient one-shot verbs (Find / GoTo) live here; enzyme querying
+/// moved into the Inspector's Cut-sites tab (decision 15 / Phase 1.5b).
+pub fn show_inline_bar(stack: &mut OverlayStack, ui: &mut egui::Ui) -> Option<AppCommand> {
     if let Some(b) = stack.find_bar_mut() {
         return render_find_bar(b, ui);
     }
     if let Some(b) = stack.goto_bar_mut() {
         return render_goto_bar(b, ui);
-    }
-    if let Some(b) = stack.enzyme_bar_mut() {
-        return render_enzyme_bar(b, ui, enzyme_rows);
     }
     None
 }
@@ -571,146 +512,6 @@ fn render_find_bar(b: &mut FindBar, ui: &mut egui::Ui) -> Option<AppCommand> {
                 }
             });
         });
-    });
-
-    ui.separator();
-    command
-}
-
-fn render_enzyme_bar(
-    b: &mut EnzymeBar,
-    ui: &mut egui::Ui,
-    rows: &[EnzymeRow],
-) -> Option<AppCommand> {
-    let mut command: Option<AppCommand> = None;
-
-    bar_frame(ui).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Enzymes:");
-            let text_resp = ui.add(
-                egui::TextEdit::singleline(&mut b.input)
-                    .hint_text("unique • unique+dual • non-cutters • type IIs • golden gate • moclo • EcoRI BamHI • none")
-                    .desired_width(380.0),
-            );
-            if b.needs_focus {
-                text_resp.request_focus();
-                b.needs_focus = false;
-            }
-
-            let has_input = !b.input.trim().is_empty();
-            // Show = replace the set (Set). Add = union into it. Both leave the
-            // overlay open so the set can be refined in place.
-            if ui.button("Show").clicked() {
-                command = Some(AppCommand::SubmitEnzymes { query: b.input.clone() });
-            }
-            if ui
-                .add_enabled(has_input, egui::Button::new("＋ Add"))
-                .on_hover_text("Add these enzymes to the current set")
-                .clicked()
-            {
-                command = Some(AppCommand::AddEnzymes { query: b.input.clone() });
-            }
-            if ui.add_enabled(!rows.is_empty(), egui::Button::new("Clear All")).clicked() {
-                command = Some(AppCommand::SubmitEnzymes { query: String::new() });
-            }
-
-            // Enter submits as Show (Set) — same lost_focus + key_pressed(Enter)
-            // idiom as `render_find_bar`.
-            let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
-            if enter_pressed && text_resp.lost_focus() {
-                command = Some(AppCommand::SubmitEnzymes { query: b.input.clone() });
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✕").clicked() {
-                    command = Some(AppCommand::DismissOverlay);
-                }
-            });
-        });
-
-        // ── Results list ────────────────────────────────────────────────
-        // Hydrated from the active view, so opening the bar always reflects
-        // what's currently drawn. Per row: ✕ removes that enzyme; clicking the
-        // name jumps to its site (single) or expands per-site rows (multiple);
-        // each site row jumps to that occurrence.
-        if !rows.is_empty() {
-            let total: usize = rows.iter().map(|r| r.sites.len()).sum();
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} enzyme{}, {} site{}",
-                    rows.len(),
-                    if rows.len() == 1 { "" } else { "s" },
-                    total,
-                    if total == 1 { "" } else { "s" },
-                ))
-                .weak()
-                .small(),
-            );
-            egui::ScrollArea::vertical()
-                .max_height(160.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for r in rows {
-                        let n = r.sites.len();
-                        let is_expanded = b.expanded.contains(&r.name);
-                        ui.horizontal(|ui| {
-                            if ui.small_button("✕").on_hover_text("Remove from set").clicked() {
-                                command =
-                                    Some(AppCommand::RemoveEnzyme { name: r.name.clone() });
-                            }
-                            // ▸/▾ for multi-site (expandable); spacer otherwise.
-                            let prefix = match n {
-                                0 | 1 => "   ",
-                                _ if is_expanded => "▾ ",
-                                _ => "▸ ",
-                            };
-                            let name = egui::RichText::new(format!("{prefix}{}", r.name)).monospace();
-                            let name = if n == 0 { name.weak() } else { name };
-                            let hover = match n {
-                                0 => "No sites",
-                                1 => "Jump to site",
-                                _ if is_expanded => "Collapse",
-                                _ => "Show sites",
-                            };
-                            let resp = ui
-                                .add_enabled(n > 0, egui::SelectableLabel::new(is_expanded, name))
-                                .on_hover_text(hover);
-                            if resp.clicked() {
-                                if n == 1 {
-                                    command = Some(reveal(&r.sites[0]));
-                                } else if n > 1 {
-                                    toggle(&mut b.expanded, &r.name);
-                                }
-                            }
-                            ui.label(egui::RichText::new(format!("×{n}")).small().weak());
-                            if !r.recognition.is_empty() {
-                                // Normal foreground (not weak) for readability;
-                                // theme-adaptive across light/dark.
-                                ui.label(
-                                    egui::RichText::new(&r.recognition).monospace().small(),
-                                );
-                            }
-                        });
-                        // Per-site sub-rows for an expanded multi-site enzyme.
-                        if n > 1 && is_expanded {
-                            for s in &r.sites {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(24.0);
-                                    // 1-based position for display.
-                                    if ui
-                                        .small_button(format!("@ {}", s.recognition_start + 1))
-                                        .on_hover_text("Jump to this site")
-                                        .clicked()
-                                    {
-                                        command = Some(reveal(s));
-                                    }
-                                });
-                            }
-                        }
-                    }
-                });
-        }
     });
 
     ui.separator();
