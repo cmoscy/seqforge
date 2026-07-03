@@ -197,6 +197,12 @@ impl Annotations {
             ann.features.push(f);
         }
         for mut p in primers {
+            // An import with no name-bearing qualifier arrives here unnamed;
+            // give it a unique default from the one shared generator (decision 9)
+            // so nameless imports never collide. Named primers are untouched.
+            if p.name.trim().is_empty() {
+                p.name = ann.suggest_primer_name();
+            }
             p.id = ann.mint_primer();
             ann.primers.push(p);
         }
@@ -337,6 +343,19 @@ impl Annotations {
             }
             None => false,
         }
+    }
+
+    /// Suggest a unique default primer name — the lowest `Primer N` (N ≥ 1) that
+    /// no existing primer already uses (ROADMAP-track decision 9). One shared
+    /// generator for creation (the CLI `--name` fallback and the GUI dialog
+    /// pre-fill, Phase 2.1/2.3) and the GenBank import fallback, so every path
+    /// names primers the same way. Creation is never blocked on a missing name;
+    /// `rename_primer` covers relabeling afterwards.
+    pub fn suggest_primer_name(&self) -> String {
+        (1..)
+            .map(|n| format!("Primer {n}"))
+            .find(|name| self.primers.iter().all(|p| &p.name != name))
+            .expect("an infinite range always yields an unused name")
     }
 }
 
@@ -607,5 +626,28 @@ mod tests {
         v.selected_primer = Some(PrimerId(1));
         v.clear_selection();
         assert!(v.selected_primer.is_none());
+    }
+
+    #[test]
+    fn suggest_primer_name_picks_lowest_unused() {
+        let mut ann = Annotations::new(vec![]);
+        assert_eq!(ann.suggest_primer_name(), "Primer 1");
+        ann.add_primer(primer("Primer 1"));
+        assert_eq!(ann.suggest_primer_name(), "Primer 2");
+        // Gaps are filled: with 1 and 3 taken, the next is 2.
+        ann.add_primer(primer("Primer 3"));
+        assert_eq!(ann.suggest_primer_name(), "Primer 2");
+    }
+
+    #[test]
+    fn from_parts_auto_names_unnamed_primers_uniquely() {
+        // Two unnamed imports get distinct defaults; a named one is untouched.
+        let unnamed = || Primer {
+            name: String::new(),
+            ..primer("x")
+        };
+        let ann = Annotations::from_parts(vec![], vec![unnamed(), primer("kept"), unnamed()]);
+        let names: Vec<_> = ann.primers().map(|p| p.name.clone()).collect();
+        assert_eq!(names, vec!["Primer 1", "kept", "Primer 2"]);
     }
 }

@@ -145,12 +145,15 @@ fn map_primer(f: &GbFeature, seq: &[u8]) -> Option<Primer> {
 
     let strand = location_strand(&f.location);
 
+    // Name from a name-bearing qualifier; left empty when the record has none,
+    // so `Annotations::from_parts` assigns a unique `Primer N` default via the
+    // shared generator (decision 9) rather than a colliding literal.
     let name = f
         .qualifiers
         .iter()
         .find(|(k, _)| k == "label" || k == "gene" || k == "product" || k == "note")
         .and_then(|(_, v)| v.clone())
-        .unwrap_or_else(|| "primer".to_string());
+        .unwrap_or_default();
 
     // Preserve every qualifier except our own `/seqforge_primer` note, which is
     // pulled into the typed `sequence` (mirrors the provenance handling above).
