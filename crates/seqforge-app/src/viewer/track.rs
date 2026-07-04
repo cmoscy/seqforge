@@ -926,8 +926,6 @@ pub(crate) struct FeatureContext {
     pub end: usize,
     pub strand: Strand,
     pub label: String,
-    /// Verbatim GenBank feature-type string (for the Edit dialog).
-    pub kind: String,
     /// `true` when the feature classifies as a CDS — the menu offers a CDS
     /// translation prefilled with its reading frame.
     pub is_cds: bool,
@@ -943,7 +941,6 @@ impl FeatureContext {
             start: f.range.start,
             end: f.range.end,
             strand: f.strand,
-            kind: f.raw_kind.clone(),
             label: f.label.clone(),
             is_cds: matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds),
             codon_start: f
@@ -966,16 +963,12 @@ pub(crate) fn strand_flag(strand: Strand) -> &'static str {
     }
 }
 
-/// Build the edit-mode `OpenFeatureForm` command pre-filled from a right-clicked
-/// / double-clicked feature.
+/// Route a right-clicked / double-clicked feature into the Inspector's inline
+/// editor (decision 15, tab-exclusive editing) rather than a center modal.
 pub(crate) fn open_edit_feature_cmd(fc: &FeatureContext) -> AppCommand {
-    AppCommand::OpenFeatureForm {
-        id: Some(fc.id),
-        label: fc.label.clone(),
-        kind: fc.kind.clone(),
-        strand: strand_flag(fc.strand).to_string(),
-        start: fc.start,
-        end: fc.end,
+    AppCommand::EditFeatureInInspector {
+        id: fc.id,
+        arm_delete: false,
     }
 }
 

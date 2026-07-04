@@ -343,6 +343,32 @@ fn handle_keyboard(
         return;
     }
 
+    // ── Delete on a selected feature → delete the FEATURE, not the sequence ──
+    // A feature object-selection (`selected_feature` set; its range *is* the
+    // selection, per the object-vs-range invariant in `apply_set_selection`)
+    // reinterprets Delete/Backspace as feature deletion, routed to the Inspector's
+    // two-step confirm. Only when nothing is staged, so typing-then-backspace
+    // still edits the sequence. `consume_key` stops the later staging loop from
+    // also counting it. (SnapGene/Benchling convention.)
+    if pending.is_none() {
+        if let Some(fid) = view.selected_feature {
+            let del = ui.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace)
+            });
+            if del {
+                post(
+                    cmds,
+                    AppCommand::EditFeatureInInspector {
+                        id: fid,
+                        arm_delete: true,
+                    },
+                );
+                return;
+            }
+        }
+    }
+
     // ── Arrow-key cursor navigation ───────────────────────────────────────
     // Left/Right move one base, Up/Down one line; Shift extends the selection
     // (anchor fixed, focus moves), else collapse to a cursor. Consumed so the
@@ -1165,12 +1191,14 @@ impl SequenceView {
                     ));
                     ui.close_menu();
                 }
-                if ui.button("Remove").clicked() {
+                if ui.button("Delete…").clicked() {
+                    // Route to the Inspector editor with the two-step delete
+                    // armed — one confirmation path for all feature deletion.
                     cmds.push((
-                        AppCommand::Viewer(ViewerRequest::RemoveFeature {
+                        AppCommand::EditFeatureInInspector {
                             id: fc.id,
-                            view: None,
-                        }),
+                            arm_delete: true,
+                        },
                         None,
                     ));
                     ui.close_menu();

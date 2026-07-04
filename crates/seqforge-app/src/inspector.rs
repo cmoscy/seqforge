@@ -257,6 +257,35 @@ impl InspectorState {
         self.focus_enzyme_query = true;
     }
 
+    /// Enter the inline feature editor for `id`, pre-filled — the entry point for
+    /// canvas edit/delete gestures routing into the pane (decision 15,
+    /// tab-exclusive editing). `arm_delete` opens with the two-step delete
+    /// pre-armed (from a Delete gesture / context-menu Delete). Called by
+    /// `apply_edit_feature_in_inspector` after docking the pane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_feature_edit(
+        &mut self,
+        id: FeatureId,
+        label: String,
+        kind: String,
+        strand: String,
+        start: usize,
+        end: usize,
+        arm_delete: bool,
+    ) {
+        self.tab = InspectorTab::Features;
+        self.editing = Some(FeatureDraft {
+            id,
+            label,
+            kind,
+            strand,
+            start,
+            end,
+            needs_focus: true,
+            confirm_delete: arm_delete,
+        });
+    }
+
     /// Render the active sub-tab. Row interactions enqueue commands only
     /// (single-applier contract preserved).
     pub fn show(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {

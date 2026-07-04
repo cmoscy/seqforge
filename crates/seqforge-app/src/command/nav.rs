@@ -171,6 +171,11 @@ pub(super) fn apply_set_selection(
     let before = active_selection(state);
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = new_sel;
+        // A fresh text selection deselects any feature *object* — this keeps the
+        // object-vs-range invariant: `selected_feature.is_some()` ⟺ the feature's
+        // range is the current selection. Delete-on-feature relies on it. A
+        // feature click re-sets it (its `SelectFeature` applies after this).
+        view.selected_feature = None;
         // Keep the moving end (focus) on screen. Fires only when the focus is
         // outside the last-rendered visible range — a no-op for clicks (always
         // within view), so this just serves off-screen moves like arrow-key nav.
@@ -260,6 +265,60 @@ pub(super) fn apply_reveal_feature(
         }
     }
     emit_selection_diff(state, before);
+    Ok(None)
+}
+
+/// Route a feature into the Inspector's inline editor (decision 15,
+/// tab-exclusive editing): dock the pane if hidden, enter the inline editor
+/// pre-filled from the feature's current fields, select + reveal it on the map,
+/// and move focus to the pane. `arm_delete` opens with the two-step delete armed.
+/// The canvas edit/delete gestures route here instead of the center modal.
+pub(super) fn apply_edit_feature_in_inspector(
+    state: &mut AppState,
+    id: FeatureId,
+    arm_delete: bool,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Pull the feature's fields to seed the draft (id-addressed; decision 12).
+    let fields = state
+        .workspace
+        .with_active_buffer(|_v, _b, ann| {
+            ann.get(id).map(|f| {
+                let flag = match f.strand {
+                    Strand::Forward => "+",
+                    Strand::Reverse => "-",
+                    _ => ".",
+                };
+                (
+                    f.label.clone(),
+                    f.raw_kind.clone(),
+                    flag.to_string(),
+                    f.range.start,
+                    f.range.end,
+                )
+            })
+        })
+        .ok()
+        .flatten();
+    let Some((label, kind, strand, start, end)) = fields else {
+        return Ok(None); // feature vanished — nothing to edit
+    };
+
+    let before = active_selection(state);
+    super::layout::dock_inspector_if_absent(state);
+    state
+        .inspector
+        .begin_feature_edit(id, label, kind, strand, start, end, arm_delete);
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selected_feature = Some(id);
+        view.selected_primer = None;
+        view.selection = Some(Selection::range(start, end));
+        view.scroll_to = Some(start);
+    }
+    emit_selection_diff(state, before);
+    state.focus.set_scope(FocusScope::Inspector);
+    state
+        .events
+        .emit(AppEvent::FocusChanged(FocusScope::Inspector));
     Ok(None)
 }
 
@@ -463,5 +522,66 @@ mod tests {
         assert_eq!(v.selected_primer, None, "selecting a feature clears primer");
         assert_eq!(v.selection, Some(Selection::range(1, 5)));
         assert_eq!(v.scroll_to, Some(1));
+    }
+
+    /// Build a state with one feature (range 2..8, reverse) for the routing tests.
+    fn open_with_feature() -> (AppState, FeatureId) {
+        let mut path = std::env::temp_dir();
+        path.push(format!("sf_nav_{}_editfeat.fasta", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">t\nATGCGTACCAATGC").unwrap();
+        let mut state = AppState::default();
+        let vid = state.workspace.open_path(&path, &TestBio).unwrap();
+        state.workspace.focus_view(vid);
+        let fid = state
+            .workspace
+            .with_active_buffer_mut(|_v, _b, ann| {
+                ann.add(seqforge_core::Feature {
+                    id: FeatureId::default(),
+                    range: 2..8,
+                    raw_kind: "CDS".into(),
+                    label: "lacZ".into(),
+                    strand: Strand::Reverse,
+                    qualifiers: Default::default(),
+                    provenance: None,
+                })
+            })
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        (state, fid)
+    }
+
+    #[test]
+    fn set_selection_clears_the_feature_object_selection() {
+        // The object-vs-range invariant Delete-on-feature relies on: a fresh text
+        // selection deselects the feature object.
+        let (mut state, fid) = open_with_feature();
+        state.workspace.active_view_mut().unwrap().selected_feature = Some(fid);
+        apply_set_selection(&mut state, Some(Selection::range(0, 3))).unwrap();
+        assert_eq!(
+            state.workspace.active_view().unwrap().selected_feature,
+            None
+        );
+    }
+
+    #[test]
+    fn edit_feature_in_inspector_enters_editor_selects_and_focuses_pane() {
+        let (mut state, fid) = open_with_feature();
+        apply_edit_feature_in_inspector(&mut state, fid, true).unwrap();
+        assert!(
+            state.inspector.is_editing(),
+            "inline editor should be armed"
+        );
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_feature, Some(fid));
+        assert_eq!(v.selection, Some(Selection::range(2, 8)));
+        assert_eq!(state.focus.scope, FocusScope::Inspector);
+    }
+
+    #[test]
+    fn edit_feature_in_inspector_missing_feature_is_a_noop() {
+        let (mut state, _fid) = open_with_feature();
+        apply_edit_feature_in_inspector(&mut state, FeatureId(9999), false).unwrap();
+        assert!(!state.inspector.is_editing());
     }
 }

@@ -166,6 +166,14 @@ pub enum AppCommand {
         start: usize,
         end: usize,
     },
+    /// Route a feature into the Inspector's inline editor (decision 15,
+    /// tab-exclusive editing): dock/focus the pane, select the feature, enter
+    /// edit mode. `arm_delete` opens with the two-step delete pre-armed (Delete
+    /// gesture / context-menu Delete). Replaces the canvas edit modal.
+    EditFeatureInInspector {
+        id: FeatureId,
+        arm_delete: bool,
+    },
     /// Open the Rename modal for a feature (right-click → Rename…).
     OpenRenameFeature {
         id: FeatureId,
@@ -308,6 +316,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         RevealRange { .. } | RevealPrimer { .. } | RevealFeature { .. } => {
             state.workspace.active_view().is_some()
         }
+        EditFeatureInInspector { .. } => state.workspace.active_view().is_some(),
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
@@ -543,6 +552,9 @@ pub fn apply<B: BioOps>(
         SelectPrimer(new_primer) => nav::apply_select_primer(state, new_primer),
         RevealPrimer { id } => nav::apply_reveal_primer(state, id),
         RevealFeature { id } => nav::apply_reveal_feature(state, id),
+        EditFeatureInInspector { id, arm_delete } => {
+            nav::apply_edit_feature_in_inspector(state, id, arm_delete)
+        }
 
         // ── Feature editing (Phase 14) ──────────────────────────────
         OpenFeatureForm {
