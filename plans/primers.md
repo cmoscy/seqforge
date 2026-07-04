@@ -1,7 +1,7 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: Phase 1 complete (0.1–1.4 landed); Phase 1.5 (Inspector as unified
-> viewer/detail/editor) specced next; Phase 2+ design settled.**
+> **Status: Phases 1 + 1.5 complete on `main` (0.1–1.5d landed); next = Phase 2.1
+> (inline primer form). Phase 2+ design settled.**
 > Architecture, sourcing, and consistency-with-the-implemented-model all worked
 > out (see "Decisions locked" and "Consistency with the implemented model"
 > below). **Done:** 0.1–0.5 (thermo + `seqforge tm`; live Tm/%GC readout;
@@ -18,11 +18,16 @@
 > three tabs (Primers · Cut sites · Features); single-click select/reveal,
 > double-click → edit modal (Features → `OpenFeatureForm`), map↔panel selection
 > sync, and the Primers header map-toggles (show/hide, arrows-vs-bases). **1.4** —
-> CLI `primers list` / `primers find` (same `primer_infos` projection). **Phase 1
-> complete; next: Phase 1.5** (Inspector as unified viewer/detail/inline-editor —
-> inline edit + enzyme query→pane + primer oligo-copy; ROADMAP decision 15), **then
-> Phase 2** (creation/editing — inline primer form + `AddPrimer` / `UpdatePrimer` /
-> `RemovePrimer`). Canonical cross-track status:
+> CLI `primers list` / `primers find` (same `primer_infos` projection). **1.5**
+> (a–d) — Inspector is now a unified viewer/detail/**inline-editor**: Features edit
+> inline (staged, pure **confirm/cancel**: `Enter` commits the pending op, `Esc`
+> cancels; `Delete` re-stages to a delete → `Delete → Enter` deletes), canvas edit
+> gestures route into the pane (center `FeatureForm` retired for editing), enzyme
+> query re-homed to the Cut-sites tab (overlay retired), primer oligo-copy fixed,
+> icon font added. **Next = Phase 2.1** (creation/editing — inline primer form +
+> `AddPrimer` / `UpdatePrimer` / `RemovePrimer`, riding 1.5's edit-mode +
+> confirm/cancel grammar; primer delete = trash-staged like features). Canonical
+> cross-track status:
 > [`../ROADMAP.md`](../ROADMAP.md).
 
 ## Goal
@@ -348,25 +353,50 @@ earlier launcher→modal design; ROADMAP decision 15). The grammar's load-bearin
 invariant — *one `ViewerRequest` = one CLI verb = single applier + history* — is
 preserved **exactly**; only the *authoring surface* moves from a floating window
 into the pane. Historical note: 1.3c shipped the launcher→`OpenFeatureForm` modal;
-Phase 1.5a replaces it with the inline editor below.
+Phase 1.5a replaced it with the inline editor; Phase 1.5d completed the retirement
+(canvas gestures route into the pane too — below).
 
 - The **row is a viewer by default**: selecting it expands to a read-only field
   view (evolves the existing on-select detail).
 - **Edit-on-initiation:** the first edit gesture on a field enters a capture mode —
-  the pane pushes a `Pane:Inspector:Editing` focus-capture context-tag (**Enter =
-  commit, Esc = cancel/revert**) and holds a small transient **draft**. Until then
-  the pane grabs no keys (the `docs/focus-refactor.md` "later, additively" hook).
+  the pane pushes a `Pane:Inspector:Editing` focus-capture context-tag and holds a
+  small transient **draft** (`FeatureDraft`; buffer untouched until commit). Until
+  then the pane grabs no keys (the `docs/focus-refactor.md` "later, additively" hook).
 - **Commit emits exactly one `ViewerRequest`** (`UpdateFeature`, `UpdatePrimer`, …)
   — the same request the CLI verb posts — through the single applier + history. No
   parallel mutation path, no GUI/agent drift. The draft is transient (keyed to the
   selected id in the active view, discarded on any selection/view change), so the
   orphan-id protection (pane holds no `ViewId`) is untouched.
 
+**The editor is one *staged operation* — pure confirm/cancel (mirrors the canvas
+staging grammar, decision 10).** There are exactly two verbs:
+
+- **`Enter` = confirm** the *pending op* (commit to buffer via the applier);
+  **`Esc`/Cancel = cancel** the editor (discard the draft, touch nothing).
+- "Save" is not a special verb — it is *confirm the staged field-edit*. The pending
+  op defaults to **update**; the **`Delete` button re-stages it to delete** (shows
+  "Confirm delete?"). It doesn't act — it only changes *what `Enter` commits*
+  (`EditOutcome::{Commit|Delete|Cancel}`; `FeatureDraft.confirm_delete`). So `Enter`
+  always commits the current pending op — Save when editing, the delete when armed.
+- **Feature deletion is keyboard-complete: `Delete → Enter`** (arm → commit). It is
+  `RemoveFeature` (undoable via history), never a casual row click — rows carry no
+  delete (see decision 15 / 1.5d icon rules).
+
+**One editor, reached from the pane *or* the canvas (1.5d).** Canvas gestures
+(double-click / right-click **Edit…** / **Delete…**, and **Delete/Backspace on a
+selected feature**) post `EditFeatureInInspector { id, arm_delete }`, which docks
+the pane, seeds the inline editor from the feature's fields, selects + reveals it,
+and focuses the pane. The center `FeatureForm` is retired **for editing** (still
+used for create-from-selection until that folds inline at 2.1). The Delete-key path
+relies on the **object-vs-range invariant**: `apply_set_selection` clears
+`selected_feature`, so `selected_feature.is_some()` ⟺ the feature's range *is* the
+selection — Delete means feature-delete only then (and only when nothing is staged).
+
 Consequence: **cut-sites are read-only** (derived; managed via the pane's enzyme
 query, not row edits) → they opt out of `edit_fields`. Editability stays **opt-in
-per collection**. Because the *edit mechanism* (draft + focus tag) is shared while
-the *field schema* is per-noun, Features (Phase 1.5a) and Primers (Phase 2.1) reuse
-one implementation.
+per collection**. Because the *edit mechanism* (staged draft + focus tag +
+confirm/cancel grammar) is shared while the *field schema* is per-noun, Features
+(Phase 1.5a/d) and Primers (Phase 2.1) reuse one implementation.
 
 ### `InspectorCollection` trait — templatize the *mechanism*, not the schema (the Track analog)
 
@@ -587,24 +617,33 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       (CLI/agent) as literal slices, so parity holds; centralised in `apply_copy`
       so both canvas ⌘C and the menu Copy benefit. Tests: oligo-vs-slice +
       different-range parity + no-selection control (105 total green).
-- [x] 1.5d **Editing-surface unification + delete (decision 15 completion).**
+- [x] 1.5d **Editing-surface unification + staged delete (decision 15 completion).**
       Icon vocabulary via **egui-phosphor** (bundled font tofu'd ✕/＋/arrows/dots) —
       remove/close, strand arrows; primer state dots painter-drawn. **Rows carry no
       delete** (enzyme ✕ = reversible view-filter remove; features/primers are
-      authored data). **Feature deletion lives in the editor** with an inline
-      **two-step confirm** (`Delete → Confirm delete?`, modal-free; `RemoveFeature`,
-      undoable). **Canvas feature gestures route into the Inspector inline editor**
+      authored data → delete lives in the editor). **The editor is one staged op —
+      pure confirm/cancel** (see "Editing model"): `Enter` commits the pending op
+      (Save when editing, delete when armed), `Esc`/Cancel cancels; the `Delete`
+      button only re-stages what `Enter` commits. **Feature deletion is
+      keyboard-complete: `Delete → Enter`** (`RemoveFeature`, undoable). **Canvas
+      feature gestures route into the Inspector inline editor**
       (`EditFeatureInInspector`), retiring the center `FeatureForm` **for editing**
       (create-from-selection still modal, folds inline at 2.1). **Delete/Backspace
-      on a selected feature** → same confirm, via the object-vs-range invariant
-      (`apply_set_selection` clears `selected_feature`). Default tab order
-      **Features · Enzymes · Primers**. Tests: invariant + edit-routing + copy
-      semantics (108 total, clippy + fmt green; toolchain pinned 1.95.0).
+      on a selected feature** → same staged delete, via the object-vs-range
+      invariant (`apply_set_selection` clears `selected_feature`). Default tab order
+      **Features · Enzymes · Primers**. Commits `5862c03`→`5e0cda9`. Tests:
+      invariant + edit-routing + copy semantics (108 total, clippy + fmt green;
+      toolchain pinned 1.95.0).
 
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
-      primer form** in the Inspector (rides 1.5a's edit-mode — *not* a modal);
-      create-from-selection;
+      primer form** in the Inspector — **rides 1.5's edit-mode + confirm/cancel
+      staged grammar** (a `PrimerDraft` sibling of `FeatureDraft`; `Enter` commits,
+      `Esc` cancels; **`RemovePrimer` = the trash-staged delete**, same as features,
+      routed from a Primers-row/canvas gesture). *Not* a modal. Pattern to follow:
+      `FeatureDraft`/`feature_editor`/`begin_feature_edit`/`EditFeatureInInspector`
+      in `inspector.rs` + `command/nav.rs`. Includes **create-from-selection** (the
+      last `FeatureForm` modal holdout folds inline here for both nouns);
       **optional name → `suggest_primer_name()` default** (decision 9);
       detach-on-destroy surfaced in the staged preview / reported by CLI.
 - [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
