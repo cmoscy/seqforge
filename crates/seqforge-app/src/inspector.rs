@@ -968,10 +968,11 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
             });
         ui.add_space(4.0);
         if d.confirm_delete {
-            // Deletion is a *staged* edit (decision 10 grammar): armed → **Enter
-            // commits**, **Esc cancels**; "Keep" disarms back to editing. Enter
-            // means confirm-delete here, not Save. A global Enter read covers the
-            // case where focus isn't on the label field.
+            // The editor is one *staged* operation (decision 10 grammar): **Enter
+            // commits the pending op, Esc/Cancel cancels the editor**. Arming just
+            // re-stages the pending op from update → delete, so here Enter means
+            // confirm-delete (not Save). A global Enter read covers the case where
+            // focus isn't on the label field.
             let enter = submit_on_enter || ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
                 let btn = egui::Button::new(
@@ -985,8 +986,9 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
                 if ui.add(btn).clicked() || enter {
                     outcome = Some(EditOutcome::Delete(d.to_delete_request()));
                 }
-                if ui.button("Keep").on_hover_text("Back to editing").clicked() {
-                    d.confirm_delete = false;
+                // Cancel means the same thing in both states: cancel the editor.
+                if ui.button("Cancel").clicked() {
+                    outcome = Some(EditOutcome::Cancel);
                 }
             });
         } else {
