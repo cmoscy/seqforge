@@ -250,10 +250,18 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
 - **State:** `Confirmed` normal; `Drifted` amber badge + mismatch marks;
   `Detached` **not drawn on the sequence** (no binding) — listed in the panel as a
   floating oligo. Additional-sites → off-target count badge.
+- **Selection = highlight the oligo, not the template** (planned; see item 1.5e).
+  A primer is a single-strand *object*, so selecting it (`selected_primer`)
+  highlights **its own rendered bases on the track** — annealed body + lifted 5'
+  tail, and the future overhang/internal-bulge/loop — **not** the template row at
+  the footprint. Bases with no template column (tail/loop) *can only* be shown on
+  the track, so the track must own the highlight. This is the visual counterpart
+  of 1.5c's oligo-copy: **object-selection is authoritative** for both.
 - **Track trait:** `block_height` reserves the arrow row (+ a sliver for a
-  floating tail); `paint` draws annealed body + tail ribbon + mismatch marks;
-  `hit_test` returns `Hit::Primer(id)` across the annealed footprint **and** the
-  tail ribbon (co-location invariant: paint rect == hit rect). Theme-driven.
+  floating tail); `paint` draws annealed body + tail ribbon + mismatch marks (and
+  a selected-emphasis pass keyed on `selected_primer`); `hit_test` returns
+  `Hit::Primer(id)` across the annealed footprint **and** the tail ribbon
+  (co-location invariant: paint rect == hit rect). Theme-driven.
 - **Future internal bulge** (deferred) reuses the identical lift-off vocabulary,
   anchored internally — paint layer needs no rethink.
 
@@ -335,10 +343,12 @@ detail** (keeps it clean — do not inline everything):
 - **Floating oligos in a separate "Unattached" section** at the bottom (Benchling
   idiom) — QC but no map location.
 - **Interactions:**
-  - **single click / select** row → `scroll_to` + select footprint (attached);
-    panel-only for floating (sets `View.selected_primer`).
-  - **double-click / Enter on a selected row → open the edit modal** (the
-    *launcher* model, see below). Never inline editing.
+  - **single click / select** row → `scroll_to` + set `View.selected_primer`,
+    which **highlights the oligo on the track** (item 1.5e — *not* the template
+    footprint, revising the earlier "select footprint" wording); panel-only for a
+    floating oligo (no map location).
+  - **double-click / Enter on a selected row → inline editor** (decision 15;
+    supersedes the earlier "launcher → modal" wording).
   - **Header toggles:** show/hide primers on map, and **arrows-vs-bases**
     (Benchling "Primer bases" — toggles the 1.1 base render).
     `Check specificity` / `Add primer` come later (1.1 find / 2.1).
@@ -634,6 +644,20 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       **Features · Enzymes · Primers**. Commits `5862c03`→`5e0cda9`. Tests:
       invariant + edit-routing + copy semantics (108 total, clippy + fmt green;
       toolchain pinned 1.95.0).
+- [ ] 1.5e **Primer selection highlights the oligo, not the template** (read-side;
+      discovered post-1.5). Today `selected_primer` drives **nothing** on the map —
+      `apply_reveal_primer` sets `view.selection` to the *template* footprint, so
+      the highlight lands on template bases (wrong strand for reverse primers; can't
+      represent a 5' tail / overhang / loop). Fix: `PrimerTrack.paint` gets a
+      **selected-emphasis pass keyed on `selected_primer`** that highlights the
+      oligo's own drawn bases (annealed body + lifted tail; extends to the deferred
+      overhang/bulge/loop). **Drop the template-range `view.selection` reveal for
+      primers** (keep `scroll_to`); the status-bar Tm is redundant with the panel
+      anneal-Tm. **Simplifies 1.5c's copy trigger:** with no template selection,
+      "copy the selected primer" keys off `selected_primer` directly (no
+      `range == binding` gate). Mirrors the object-vs-range split done for features
+      (1.5d). Small; can land before or with 2.1. Pairs with Phase 3 overhang/bulge
+      rendering — bases with no template column can only live on the track.
 
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
