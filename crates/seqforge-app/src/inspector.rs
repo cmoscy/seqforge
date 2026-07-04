@@ -72,6 +72,9 @@ struct FeatureDraft {
     end: usize,
     /// Grab keyboard focus for the label field on the first edit frame.
     needs_focus: bool,
+    /// Delete is armed (two-step confirm): the Delete button became
+    /// "Confirm delete?" and a second click commits the removal.
+    confirm_delete: bool,
 }
 
 impl FeatureDraft {
@@ -84,6 +87,15 @@ impl FeatureDraft {
             start: f.range.start,
             end: f.range.end,
             needs_focus: true,
+            confirm_delete: false,
+        }
+    }
+
+    /// The `RemoveFeature` verb — identical to the CLI `remove-feature` request.
+    fn to_delete_request(&self) -> ViewerRequest {
+        ViewerRequest::RemoveFeature {
+            id: self.id,
+            view: None,
         }
     }
 
@@ -496,20 +508,12 @@ impl InspectorState {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in &feats {
                 let is_sel = selected == Some(f.id);
-                let row = feature_display_row(f, is_sel);
-                let hit = row_shell(ui, &row);
-                if hit.remove_clicked {
-                    if let Some(spec) = row.on_remove {
-                        pending.push((spec.cmd, None));
-                    }
-                    *editing = None; // the row is going away
-                    continue;
-                }
-                if hit.resp.double_clicked() {
+                let resp = row_shell(ui, &feature_display_row(f, is_sel));
+                if resp.double_clicked() {
                     *editing = Some(FeatureDraft::from_row(f));
                     // Ensure the map selection follows the row being edited.
                     pending.push((AppCommand::RevealFeature { id: f.id }, None));
-                } else if hit.resp.clicked() {
+                } else if resp.clicked() {
                     // Selecting a different row cancels an in-flight edit.
                     if editing.as_ref().is_some_and(|d| d.id != f.id) {
                         *editing = None;
@@ -524,6 +528,10 @@ impl InspectorState {
                         if let Some(outcome) = feature_editor(ui, d) {
                             match outcome {
                                 EditOutcome::Commit(req) => {
+                                    pending.push((AppCommand::Viewer(req), None));
+                                    *editing = None;
+                                }
+                                EditOutcome::Delete(req) => {
                                     pending.push((AppCommand::Viewer(req), None));
                                     *editing = None;
                                 }
@@ -573,13 +581,17 @@ struct DetailLine {
     mono: bool,
 }
 
-/// A rendered row: compact columns + the commands its clicks enqueue.
+/// A rendered row: compact columns + the commands its clicks enqueue. Rows carry
+/// no remove control — deletion of authored data (features/primers) lives in the
+/// edit interface with confirmation; the enzyme *view-filter* remove is bespoke to
+/// that tab (decision 15 follow-up).
 struct Row {
     selected: bool,
     /// Strand arrow glyph (fwd/rev), if the noun is stranded.
     glyph: Option<&'static str>,
-    /// State dot + tone (primers), if any.
-    dot: Option<(&'static str, Tone)>,
+    /// Primer state indicator (painted dot), if any. The tone maps 1:1 to state
+    /// (Normal = Confirmed, Warn = Drifted, Dim = Detached).
+    dot: Option<Tone>,
     name: String,
     /// Render the name subdued (unnamed feature / detached oligo).
     dim_name: bool,
@@ -589,27 +601,8 @@ struct Row {
     on_select: AppCommand,
     /// Double-click → edit modal (`None` = read-only noun).
     on_activate: Option<AppCommand>,
-    /// Right-edge remove/close control. `None` = the row is not removable.
-    /// Shared affordance across tabs (decision 15 base layer).
-    on_remove: Option<RemoveSpec>,
     /// Shown under the row while selected.
     detail: Vec<DetailLine>,
-}
-
-/// A row's remove control: the command it posts, the Phosphor icon that conveys
-/// its intent (`X` = reversible "remove from view"; `TRASH` = destructive
-/// "delete"), and hover text.
-struct RemoveSpec {
-    cmd: AppCommand,
-    icon: &'static str,
-    hover: String,
-}
-
-/// What a row interaction resolved to this frame.
-struct RowHit {
-    resp: egui::Response,
-    /// The right-edge remove control was clicked (takes priority over select).
-    remove_clicked: bool,
 }
 
 fn render_collection(
@@ -657,18 +650,35 @@ fn remove_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
     resp
 }
 
-/// Draw a row's compact shell (fill + glyph + dot + name + right cells + optional
-/// remove control) and report the interaction. Shared by the generic renderer and
-/// the editable Features tab so their rows look and behave identically.
-fn row_shell(ui: &mut egui::Ui, row: &Row) -> RowHit {
+/// Paint a primer state dot (filled for Confirmed/Drifted, hollow ring for
+/// Detached), coloured by tone. Painted rather than a font glyph because the
+/// bundled font tofus ●◐○, and colour is the primary signal for a status dot.
+fn state_dot(ui: &mut egui::Ui, tone: &Tone) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
+    let color = tone_color(ui, tone);
+    let c = rect.center();
+    match tone {
+        Tone::Dim => {
+            ui.painter()
+                .circle_stroke(c, 3.5, egui::Stroke::new(1.2, color));
+        }
+        _ => {
+            ui.painter().circle_filled(c, 3.5, color);
+        }
+    }
+}
+
+/// Draw a row's compact shell (fill + glyph + dot + name + right cells) and return
+/// its click-sensed response. Shared by the generic renderer and the editable
+/// Features tab so their rows look and behave identically.
+fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
     let fill = if row.selected {
         ui.visuals().selection.bg_fill
     } else {
         egui::Color32::TRANSPARENT
     };
 
-    let mut remove_clicked = false;
-    let resp = egui::Frame::new()
+    egui::Frame::new()
         .fill(fill)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
@@ -677,8 +687,8 @@ fn row_shell(ui: &mut egui::Ui, row: &Row) -> RowHit {
                 if let Some(g) = row.glyph {
                     ui.weak(g);
                 }
-                if let Some((d, tone)) = &row.dot {
-                    ui.colored_label(tone_color(ui, tone), *d);
+                if let Some(tone) = &row.dot {
+                    state_dot(ui, tone);
                 }
                 if row.dim_name {
                     ui.weak(&row.name);
@@ -686,16 +696,6 @@ fn row_shell(ui: &mut egui::Ui, row: &Row) -> RowHit {
                     ui.label(&row.name);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Remove control pinned to the far right edge (if removable).
-                    if let Some(spec) = &row.on_remove {
-                        if remove_button(ui, spec.icon)
-                            .on_hover_text(spec.hover.clone())
-                            .clicked()
-                        {
-                            remove_clicked = true;
-                        }
-                        ui.add_space(4.0);
-                    }
                     for cell in row.right.iter().rev() {
                         ui.weak(cell);
                         ui.add_space(8.0);
@@ -704,29 +704,18 @@ fn row_shell(ui: &mut egui::Ui, row: &Row) -> RowHit {
             });
         })
         .response
-        .interact(egui::Sense::click());
-    RowHit {
-        resp,
-        remove_clicked,
-    }
+        .interact(egui::Sense::click())
 }
 
 fn render_row(ui: &mut egui::Ui, row: Row, pending: &mut Vec<PendingCommand>) {
-    let hit = row_shell(ui, &row);
+    let resp = row_shell(ui, &row);
 
-    // Remove takes priority over select (it sits inside the row's click rect).
-    if hit.remove_clicked {
-        if let Some(spec) = row.on_remove {
-            pending.push((spec.cmd, None));
-        }
-        return;
-    }
     // Double-click activates (edit modal); a plain click selects/reveals.
-    if hit.resp.double_clicked() {
+    if resp.double_clicked() {
         if let Some(cmd) = row.on_activate {
             pending.push((cmd, None));
         }
-    } else if hit.resp.clicked() {
+    } else if resp.clicked() {
         pending.push((row.on_select, None));
     }
 
@@ -775,10 +764,10 @@ impl InspectorCollection for PrimersCollection<'_> {
         order
             .iter()
             .map(|p| {
-                let (dot, tone) = match p.state {
-                    PrimerState::Confirmed => ("●", Tone::Normal),
-                    PrimerState::Drifted => ("◐", Tone::Warn),
-                    PrimerState::Detached => ("○", Tone::Dim),
+                let tone = match p.state {
+                    PrimerState::Confirmed => Tone::Normal,
+                    PrimerState::Drifted => Tone::Warn,
+                    PrimerState::Detached => Tone::Dim,
                 };
                 let right = vec![
                     binding_label(p),
@@ -829,14 +818,12 @@ impl InspectorCollection for PrimersCollection<'_> {
                 Row {
                     selected: self.selected == Some(p.id),
                     glyph: Some(strand_glyph(p.strand)),
-                    dot: Some((dot, tone)),
+                    dot: Some(tone),
                     name: p.name.clone(),
                     dim_name: matches!(p.state, PrimerState::Detached),
                     right,
                     on_select: AppCommand::RevealPrimer { id: p.id },
                     on_activate: None, // primer edit modal = Phase 2.1
-                    // RemovePrimer (delete-with-undo, trash icon) lands with 2.1.
-                    on_remove: None,
                     detail,
                 }
             })
@@ -864,18 +851,6 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
         ],
         on_select: AppCommand::RevealFeature { id: f.id },
         on_activate: None,
-        // Delete-with-undo (trash icon = destructive; reversible via history).
-        on_remove: Some(RemoveSpec {
-            cmd: AppCommand::Viewer(ViewerRequest::RemoveFeature {
-                id: f.id,
-                view: None,
-            }),
-            icon: egui_phosphor::regular::TRASH,
-            hover: format!(
-                "Delete feature {}",
-                if unnamed { "(unnamed)" } else { &f.label }
-            ),
-        }),
         detail: vec![],
     }
 }
@@ -883,6 +858,7 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
 /// Outcome of one frame of the inline feature editor.
 enum EditOutcome {
     Commit(ViewerRequest),
+    Delete(ViewerRequest),
     Cancel,
 }
 
@@ -970,9 +946,35 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
             if ui.button("Cancel").clicked() {
                 outcome = Some(EditOutcome::Cancel);
             }
+            // Delete pinned right, two-step so it's deliberate (modal-free, per
+            // decision 15; undoable via history regardless).
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if d.confirm_delete {
+                    let btn = egui::Button::new(
+                        egui::RichText::new(format!(
+                            "{} Confirm delete?",
+                            egui_phosphor::regular::TRASH
+                        ))
+                        .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
+                    if ui.add(btn).clicked() {
+                        outcome = Some(EditOutcome::Delete(d.to_delete_request()));
+                    }
+                } else if ui
+                    .button(egui::RichText::new(format!(
+                        "{} Delete",
+                        egui_phosphor::regular::TRASH
+                    )))
+                    .on_hover_text("Delete this feature")
+                    .clicked()
+                {
+                    d.confirm_delete = true;
+                }
+            });
         });
     });
-    // Escape cancels (no overlay is active, so the keymap leaves Escape for us).
+    // Escape cancels — including backing out of an armed delete.
     if outcome.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         outcome = Some(EditOutcome::Cancel);
     }
@@ -981,12 +983,14 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
 
 // ── Display helpers ───────────────────────────────────────────────────────────
 
+/// Phosphor strand arrows (the bundled font tofus →/←/↔).
 fn strand_glyph(strand: Strand) -> &'static str {
+    use egui_phosphor::regular;
     match strand {
-        Strand::Forward => "→",
-        Strand::Reverse => "←",
-        Strand::Both => "↔",
-        Strand::None => "·",
+        Strand::Forward => regular::ARROW_RIGHT,
+        Strand::Reverse => regular::ARROW_LEFT,
+        Strand::Both => regular::ARROWS_LEFT_RIGHT,
+        Strand::None => regular::MINUS,
     }
 }
 
