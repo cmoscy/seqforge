@@ -915,8 +915,11 @@ fn feature_viewer(ui: &mut egui::Ui, f: &FeatureRow) -> bool {
 
 /// The inline field editor for the selected feature (decision 15). Mutates the
 /// pane-local draft; returns `Some(Commit)` on Save/Enter (draft valid),
-/// `Some(Cancel)` on Cancel/Escape, else `None` (still editing). Enter/Escape are
-/// handled at the widget level — the keymap has no plain-key bindings, and the
+/// `Some(Cancel)` on Cancel/Escape, `Some(Delete)` when an armed delete is
+/// confirmed, else `None` (still editing). **Enter always commits the current
+/// primary action** — Save when editing, the delete when armed ("Confirm
+/// delete?") — mirroring the canvas staging grammar (arm → Enter → commit).
+/// Handled at the widget level: the keymap has no plain-key bindings, and the
 /// `Pane:Inspector:Editing` tag suppresses single-key user bindings while typing.
 fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome> {
     let mut outcome = None;
@@ -964,46 +967,58 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
                 ui.end_row();
             });
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(d.is_valid(), egui::Button::new("Save"))
-                .clicked()
-                || (submit_on_enter && d.is_valid())
-            {
-                outcome = Some(EditOutcome::Commit(d.to_request()));
-            }
-            if ui.button("Cancel").clicked() {
-                outcome = Some(EditOutcome::Cancel);
-            }
-            // Delete pinned right, two-step so it's deliberate (modal-free, per
-            // decision 15; undoable via history regardless).
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if d.confirm_delete {
-                    let btn = egui::Button::new(
-                        egui::RichText::new(format!(
-                            "{} Confirm delete?",
-                            egui_phosphor::regular::TRASH
-                        ))
-                        .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
-                    if ui.add(btn).clicked() {
-                        outcome = Some(EditOutcome::Delete(d.to_delete_request()));
-                    }
-                } else if ui
-                    .button(egui::RichText::new(format!(
-                        "{} Delete",
+        if d.confirm_delete {
+            // Deletion is a *staged* edit (decision 10 grammar): armed → **Enter
+            // commits**, **Esc cancels**; "Keep" disarms back to editing. Enter
+            // means confirm-delete here, not Save. A global Enter read covers the
+            // case where focus isn't on the label field.
+            let enter = submit_on_enter || ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!(
+                        "{} Confirm delete?  (Enter)",
                         egui_phosphor::regular::TRASH
-                    )))
-                    .on_hover_text("Delete this feature")
-                    .clicked()
-                {
-                    d.confirm_delete = true;
+                    ))
+                    .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
+                if ui.add(btn).clicked() || enter {
+                    outcome = Some(EditOutcome::Delete(d.to_delete_request()));
+                }
+                if ui.button("Keep").on_hover_text("Back to editing").clicked() {
+                    d.confirm_delete = false;
                 }
             });
-        });
+        } else {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(d.is_valid(), egui::Button::new("Save"))
+                    .clicked()
+                    || (submit_on_enter && d.is_valid())
+                {
+                    outcome = Some(EditOutcome::Commit(d.to_request()));
+                }
+                if ui.button("Cancel").clicked() {
+                    outcome = Some(EditOutcome::Cancel);
+                }
+                // Delete pinned right; arms the two-step confirm (modal-free).
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(egui::RichText::new(format!(
+                            "{} Delete",
+                            egui_phosphor::regular::TRASH
+                        )))
+                        .on_hover_text("Delete this feature")
+                        .clicked()
+                    {
+                        d.confirm_delete = true;
+                    }
+                });
+            });
+        }
     });
-    // Escape cancels — including backing out of an armed delete.
+    // Escape cancels the editor (armed or not — closing an armed delete never
+    // deletes; use "Keep" to disarm without closing).
     if outcome.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         outcome = Some(EditOutcome::Cancel);
     }
