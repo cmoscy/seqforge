@@ -587,6 +587,19 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       (CLI/agent) as literal slices, so parity holds; centralised in `apply_copy`
       so both canvas ⌘C and the menu Copy benefit. Tests: oligo-vs-slice +
       different-range parity + no-selection control (105 total green).
+- [x] 1.5d **Editing-surface unification + delete (decision 15 completion).**
+      Icon vocabulary via **egui-phosphor** (bundled font tofu'd ✕/＋/arrows/dots) —
+      remove/close, strand arrows; primer state dots painter-drawn. **Rows carry no
+      delete** (enzyme ✕ = reversible view-filter remove; features/primers are
+      authored data). **Feature deletion lives in the editor** with an inline
+      **two-step confirm** (`Delete → Confirm delete?`, modal-free; `RemoveFeature`,
+      undoable). **Canvas feature gestures route into the Inspector inline editor**
+      (`EditFeatureInInspector`), retiring the center `FeatureForm` **for editing**
+      (create-from-selection still modal, folds inline at 2.1). **Delete/Backspace
+      on a selected feature** → same confirm, via the object-vs-range invariant
+      (`apply_set_selection` clears `selected_feature`). Default tab order
+      **Features · Enzymes · Primers**. Tests: invariant + edit-routing + copy
+      semantics (108 total, clippy + fmt green; toolchain pinned 1.95.0).
 
 ### Phase 2 — Creation / editing (uses the editor)
 - [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
