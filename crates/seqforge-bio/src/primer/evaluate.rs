@@ -3,12 +3,15 @@
 
 use std::ops::Range;
 
-use seqforge_core::{Primer, PrimerInfo, PrimerState, Strand};
+use seqforge_core::{Primer, PrimerInfo, PrimerSiteInfo, PrimerState, Strand};
 use seqforge_thermo::{
     DEFAULT_FOLD_TEMP_C, FoldError, TmError, duplex_tm, gc, hairpin_dg, self_dimer_dg, tm,
 };
 
-use super::{AnnealSettings, AttachmentState, classify_attachment, decompose_primer};
+use super::{
+    AnnealSettings, AttachmentState, classify_attachment, decompose_primer,
+    find_primer_binding_sites,
+};
 use crate::dna::{complement, reverse_complement};
 
 /// Monomer and self-structure QC for a primer oligo.
@@ -119,6 +122,30 @@ fn primer_info(
         .map(|b| decompose_primer(&primer.sequence, b, primer.strand, template).mismatches)
         .unwrap_or(0);
     let qc = primer_qc_with_anneal(primer, template);
+
+    // Every place the oligo anneals — scanned independently of the authored
+    // binding so a floating oligo still surfaces its candidate sites (drives the
+    // Inspector site list + rescan). Each site is tagged `attached` when it
+    // coincides with the authored footprint.
+    let sites: Vec<PrimerSiteInfo> =
+        find_primer_binding_sites(&primer.sequence, template, circular, settings)
+            .into_iter()
+            .map(|s| {
+                let attached = primer
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| s.range == *b && s.strand == primer.strand);
+                PrimerSiteInfo {
+                    anneal_tm: anneal_tm(&primer.sequence, &s.range, s.strand, template).ok(),
+                    range: s.range,
+                    strand: s.strand,
+                    mismatches: s.mismatches,
+                    attached,
+                }
+            })
+            .collect();
+    let off_targets = sites.iter().filter(|s| !s.attached).count();
+
     PrimerInfo {
         id: primer.id,
         name: primer.name.clone(),
@@ -133,7 +160,8 @@ fn primer_info(
         anneal_tm: qc.anneal_tm.and_then(Result::ok),
         state,
         mismatches,
-        off_targets: attachment.off_target_sites.len(),
+        off_targets,
+        sites,
     }
 }
 
@@ -198,6 +226,68 @@ mod tests {
         let out = primer_qc_with_anneal(&primer, T);
         assert!(out.anneal_tm.is_some());
         assert!(out.anneal_tm.unwrap().is_ok());
+    }
+
+    #[test]
+    fn primer_infos_lists_all_sites_marking_attached_and_off_target() {
+        // GCGTAC occurs twice on the top strand → one attached, one off-target.
+        let template = b"GCGTACAAGCGTAC";
+        let primer = Primer {
+            id: PrimerId(1),
+            name: "fwd".into(),
+            sequence: "GCGTAC".into(),
+            binding: Some(0..6),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+        let infos = primer_infos(template, &[&primer], false);
+        let sites = &infos[0].sites;
+        assert!(sites.len() >= 2, "both occurrences found: {sites:?}");
+        let attached: Vec<_> = sites.iter().filter(|s| s.attached).collect();
+        assert_eq!(
+            attached.len(),
+            1,
+            "exactly one site is the attached footprint"
+        );
+        assert_eq!(attached[0].range, 0..6);
+        assert_eq!(
+            infos[0].off_targets,
+            sites.iter().filter(|s| !s.attached).count(),
+            "off_targets counts the non-attached sites"
+        );
+        assert!(
+            infos[0].off_targets >= 1,
+            "the second occurrence is off-target"
+        );
+        assert!(
+            sites.iter().all(|s| s.anneal_tm.is_some()),
+            "each site carries an annealing Tm"
+        );
+    }
+
+    #[test]
+    fn primer_infos_lists_sites_for_a_floating_oligo() {
+        // A detached primer still surfaces candidate sites (none attached) so the
+        // Inspector can offer rescan/attach.
+        let template = b"ATGCGTACCA";
+        let primer = Primer {
+            id: PrimerId(1),
+            name: "float".into(),
+            sequence: "GCGTAC".into(),
+            binding: None,
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+        let infos = primer_infos(template, &[&primer], false);
+        assert_eq!(infos[0].state, PrimerState::Detached);
+        assert!(
+            !infos[0].sites.is_empty(),
+            "candidate site listed for rescan"
+        );
+        assert!(
+            infos[0].sites.iter().all(|s| !s.attached),
+            "none attached while floating"
+        );
     }
 
     #[test]

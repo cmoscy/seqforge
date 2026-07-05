@@ -1,0 +1,732 @@
+//! The Primers tab — the `PrimerDraft`, display row, read-only viewer (with the
+//! binding-site list + Attach/Rescan actions), inline editor, and the
+//! `InspectorState::{show_primers, begin_primer_create}` render loop. This is
+//! where Phase 2.2 tail-composition (insertion tools) grows. `PrimerDraft` fields
+//! are `pub(super)` because `mod.rs` (`refresh`, `begin_primer_edit`) constructs
+//! and reconciles the draft by struct literal; the methods and most free
+//! functions stay private (only `draft_anneal_tm`, used by `refresh`, is shared).
+
+use std::ops::Range;
+
+use seqforge_core::{PrimerId, PrimerInfo, PrimerState, Strand, ViewerRequest};
+
+use super::row::{
+    DetailLine, EditOutcome, Row, binding_label, detail_frame, row_shell, strand_flag, strand_glyph,
+};
+use super::{InspectorState, InspectorTab};
+use crate::command::{AppCommand, PendingCommand};
+use crate::workspace::Workspace;
+
+/// Live draft for the Inspector's inline **primer** editor (Phase 2.1 / decision
+/// 15) — the sibling of [`super::feature::FeatureDraft`]. `id = Some` edits an
+/// existing primer (commits `UpdatePrimer`); `id = None` creates one (`AddPrimer`,
+/// create-from-selection). Pane-local until commit; the buffer never mutates
+/// until then. The oligo `sequence` is the authored reagent (5'→3', tail incl.);
+/// `attached` reflects whether the primer has an annealing footprint.
+pub(super) struct PrimerDraft {
+    pub(super) id: Option<PrimerId>,
+    pub(super) name: String,
+    pub(super) sequence: String,
+    /// `"+"`, `"-"`, or `"."`.
+    pub(super) strand: String,
+    /// Whether this primer has a binding footprint (drives whether start/end are
+    /// editable + sent). A detached/floating oligo keeps `attached = false`.
+    pub(super) attached: bool,
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) needs_focus: bool,
+    pub(super) confirm_delete: bool,
+    /// Memoized self-structure QC, keyed on the exact oligo string it was computed
+    /// for. egui is immediate-mode, so `primer_editor` re-runs every frame; the
+    /// O(n³) fold behind [`primer_qc`](seqforge_bio::primer_qc) recomputes only
+    /// when `sequence` actually changes (compute-on-change, not per-frame).
+    pub(super) qc_cache: Option<(String, seqforge_bio::PrimerQc)>,
+    /// Live primer:template annealing Tm (°C) for the draft's current footprint,
+    /// recomputed in [`InspectorState::refresh`] (which has the template) whenever
+    /// the draft is attached with a valid binding. `None` when floating/invalid.
+    pub(super) anneal_tm: Option<f64>,
+}
+
+impl PrimerDraft {
+    /// Seed an edit draft from the projection row (`UpdatePrimer` on commit).
+    fn from_info(p: &PrimerInfo) -> Self {
+        let (attached, start, end) = match &p.binding {
+            Some(b) => (true, b.start, b.end),
+            None => (false, 0, 0),
+        };
+        Self {
+            id: Some(p.id),
+            name: p.name.clone(),
+            sequence: p.sequence.clone(),
+            strand: strand_flag(p.strand).to_string(),
+            attached,
+            start,
+            end,
+            needs_focus: true,
+            confirm_delete: false,
+            qc_cache: None,
+            anneal_tm: None,
+        }
+    }
+
+    /// Seed a create draft (`AddPrimer` on commit). `binding` + `oligo` come from
+    /// the current selection when creating from a range (else a floating oligo).
+    pub(super) fn create(name: String, oligo: String, binding: Option<Range<usize>>) -> Self {
+        let (attached, start, end) = match binding {
+            Some(b) => (true, b.start, b.end),
+            None => (false, 0, 0),
+        };
+        Self {
+            id: None,
+            name,
+            sequence: oligo,
+            strand: "+".to_string(),
+            attached,
+            start,
+            end,
+            needs_focus: true,
+            confirm_delete: false,
+            qc_cache: None,
+            anneal_tm: None,
+        }
+    }
+
+    /// A valid draft needs a non-empty oligo and (when attached) a non-empty
+    /// half-open footprint.
+    fn is_valid(&self) -> bool {
+        !self.sequence.trim().is_empty() && (!self.attached || self.start < self.end)
+    }
+
+    /// Map the draft to its one CLI verb — `UpdatePrimer` (edit) or `AddPrimer`
+    /// (create) — so GUI and agent can't drift. When attached, the footprint is
+    /// sent as `start`/`end`; when floating, an edit sends `detach: true` to
+    /// *clear* any existing binding (the `(None, None) = keep` ambiguity), while a
+    /// create simply omits the footprint.
+    fn to_request(&self) -> ViewerRequest {
+        let (start, end) = if self.attached {
+            (Some(self.start), Some(self.end))
+        } else {
+            (None, None)
+        };
+        match self.id {
+            Some(id) => ViewerRequest::UpdatePrimer {
+                id,
+                name: Some(self.name.clone()),
+                sequence: Some(self.sequence.clone()),
+                strand: Some(self.strand.clone()),
+                start,
+                end,
+                detach: !self.attached,
+                view: None,
+            },
+            None => ViewerRequest::AddPrimer {
+                name: Some(self.name.clone()),
+                sequence: self.sequence.clone(),
+                start,
+                end,
+                strand: self.strand.clone(),
+                view: None,
+            },
+        }
+    }
+
+    /// The `RemovePrimer` verb (only meaningful for an existing primer).
+    fn to_delete_request(&self) -> Option<ViewerRequest> {
+        self.id
+            .map(|id| ViewerRequest::RemovePrimer { id, view: None })
+    }
+}
+
+/// Compact display row for a primer (the Primers tab renders these directly so it
+/// can layer the inline viewer/editor under the selected one — decision 15).
+fn primer_display_row(p: &PrimerInfo, selected: bool) -> Row {
+    let tone = match p.state {
+        PrimerState::Confirmed => super::row::Tone::Normal,
+        PrimerState::Drifted => super::row::Tone::Warn,
+        PrimerState::Detached => super::row::Tone::Dim,
+    };
+    Row {
+        selected,
+        glyph: Some(strand_glyph(p.strand)),
+        dot: Some(tone),
+        name: p.name.clone(),
+        dim_name: matches!(p.state, PrimerState::Detached),
+        right: vec![
+            binding_label(p),
+            p.tm.map_or_else(|| "— °C".into(), |t| format!("{t:.1} °C")),
+            if p.len > 0 {
+                format!("{:.0} %", p.gc)
+            } else {
+                "— %".into()
+            },
+        ],
+    }
+}
+
+/// The on-select detail lines for a primer (full oligo + QC), shown under a
+/// selected row in the read-only viewer.
+fn primer_detail_lines(p: &PrimerInfo) -> Vec<DetailLine> {
+    let mut detail = vec![DetailLine {
+        text: format!("5′ {} 3′", p.sequence),
+        mono: true,
+    }];
+    let mut meta = format!("{} nt", p.len);
+    if p.mismatches > 0 {
+        let s = if p.mismatches == 1 { "" } else { "es" };
+        meta += &format!(" · {} mismatch{s}", p.mismatches);
+    }
+    if p.off_targets > 0 {
+        let s = if p.off_targets == 1 { "" } else { "s" };
+        meta += &format!(" · {} off-target{s}", p.off_targets);
+    }
+    detail.push(DetailLine {
+        text: meta,
+        mono: false,
+    });
+    if let Some(at) = p.anneal_tm {
+        detail.push(DetailLine {
+            text: format!("anneal Tm {at:.1} °C"),
+            mono: false,
+        });
+    }
+    if let Some(h) = p.hairpin_dg {
+        detail.push(DetailLine {
+            text: format!("hairpin ΔG {h:.1} kcal/mol"),
+            mono: false,
+        });
+    }
+    if let Some(d) = p.self_dimer_dg {
+        detail.push(DetailLine {
+            text: format!("self-dimer ΔG {d:.1} kcal/mol"),
+            mono: false,
+        });
+    }
+    detail
+}
+
+/// Apply one frame's editor outcome to the pane-local primer draft: commit posts
+/// the one `ViewerRequest` (`AddPrimer`/`UpdatePrimer`/`RemovePrimer`) and clears
+/// the draft; cancel just clears it. Shared by the create + edit render paths.
+fn commit_primer_outcome(
+    outcome: EditOutcome,
+    editing: &mut Option<PrimerDraft>,
+    pending: &mut Vec<PendingCommand>,
+) {
+    match outcome {
+        EditOutcome::Commit(req) | EditOutcome::Delete(req) => {
+            pending.push((AppCommand::Viewer(req), None));
+            *editing = None;
+        }
+        EditOutcome::Cancel => *editing = None,
+    }
+}
+
+/// Read-only detail shown under a selected (non-editing) primer row: full oligo +
+/// QC (the [`primer_detail_lines`]), the list of every place the oligo anneals
+/// (attached + off-target, each with an anneal Tm and — for the unattached ones —
+/// an **Attach** action), a **Rescan** re-anchor for a drifted/detached primer,
+/// plus the gesture into edit mode. Returns `true` when the user asks to edit
+/// (Edit button; double-click is the other entry point). Enqueues its own
+/// site/rescan commands. Mirror of [`super::feature`]'s `feature_viewer`.
+fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCommand>) -> bool {
+    let mut edit = false;
+    detail_frame().show(ui, |ui| {
+        for line in primer_detail_lines(p) {
+            if line.mono {
+                ui.horizontal_wrapped(|ui| ui.monospace(&line.text));
+            } else {
+                ui.weak(&line.text);
+            }
+        }
+
+        if !p.sites.is_empty() {
+            // Header names the reality: a floating oligo shows *candidate* sites;
+            // an anchored one shows its footprint + any off-targets.
+            let header = if p.binding.is_some() {
+                "Binding sites"
+            } else {
+                "Candidate sites"
+            };
+            ui.add_space(2.0);
+            ui.weak(header);
+            for site in &p.sites {
+                ui.horizontal(|ui| {
+                    let tm = site
+                        .anneal_tm
+                        .map_or_else(|| "— °C".into(), |t| format!("{t:.1} °C"));
+                    let mm = if site.mismatches == 0 {
+                        String::new()
+                    } else {
+                        format!(" · {} mm", site.mismatches)
+                    };
+                    let label = format!(
+                        "{} {}–{} · {tm}{mm}",
+                        strand_glyph(site.strand),
+                        site.range.start + 1,
+                        site.range.end,
+                    );
+                    if site.attached {
+                        ui.strong(label);
+                        ui.weak("attached");
+                    } else {
+                        ui.weak(label);
+                        if ui.small_button("Attach").clicked() {
+                            pending.push((
+                                AppCommand::Viewer(ViewerRequest::UpdatePrimer {
+                                    id: p.id,
+                                    name: None,
+                                    sequence: None,
+                                    strand: Some(strand_flag(site.strand).to_string()),
+                                    start: Some(site.range.start),
+                                    end: Some(site.range.end),
+                                    detach: false,
+                                    view: None,
+                                }),
+                                None,
+                            ));
+                        }
+                    }
+                });
+            }
+        }
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui.small_button("Edit").clicked() {
+                edit = true;
+            }
+            // Re-anchor to the best site — offered when the primer isn't cleanly
+            // attached (drifted footprint or floating oligo) and something binds.
+            if !matches!(p.state, PrimerState::Confirmed) && !p.sites.is_empty() {
+                if ui.small_button("Rescan").clicked() {
+                    pending.push((
+                        AppCommand::Viewer(ViewerRequest::RescanPrimer {
+                            id: p.id,
+                            view: None,
+                        }),
+                        None,
+                    ));
+                }
+            } else {
+                ui.weak("or double-click");
+            }
+        });
+    });
+    edit
+}
+
+/// The inline field editor for a primer draft (create or edit — decision 15).
+/// Mutates the pane-local draft; returns `Some(Commit)` on Save/Enter (draft
+/// valid), `Some(Cancel)` on Cancel/Escape, `Some(Delete)` when an armed delete
+/// is confirmed, else `None`. **Enter always commits the current primary action**
+/// (Save when editing, the delete when armed) — the canvas staging grammar.
+/// Carries a live Tm/%GC/self-structure QC readout off the draft oligo.
+fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft) -> Option<EditOutcome> {
+    let mut outcome = None;
+    let mut submit_on_enter = false;
+    let grid_salt = d.id.map_or(0, |id| id.0.wrapping_add(1));
+    detail_frame().show(ui, |ui| {
+        egui::Grid::new(("primer_inline_editor", grid_salt))
+            .num_columns(2)
+            .spacing([10.0, 5.0])
+            .show(ui, |ui| {
+                ui.label("Name");
+                let r = ui.text_edit_singleline(&mut d.name);
+                if d.needs_focus {
+                    r.request_focus();
+                    d.needs_focus = false;
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit_on_enter = true;
+                }
+                ui.end_row();
+
+                ui.label("Oligo 5′→3′");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut d.sequence)
+                            .font(egui::TextStyle::Monospace),
+                    )
+                    .lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    submit_on_enter = true;
+                }
+                ui.end_row();
+
+                ui.label("Strand");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut d.strand, "+".into(), "+ fwd");
+                    ui.selectable_value(&mut d.strand, "-".into(), "− rev");
+                    ui.selectable_value(&mut d.strand, ".".into(), ". none");
+                });
+                ui.end_row();
+
+                // Binding: an Attached ⇄ Floating toggle (③). Attaching seeds a
+                // default footprint (oligo-length at the current start) if none is
+                // set; a commit sends the footprint or `detach: true` accordingly.
+                ui.label("Binding");
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(d.attached, "Attached").clicked() && !d.attached {
+                        d.attached = true;
+                        if d.start >= d.end {
+                            d.end = d.start + d.sequence.chars().count().max(1);
+                        }
+                    }
+                    if ui.selectable_label(!d.attached, "Floating").clicked() {
+                        d.attached = false;
+                    }
+                });
+                ui.end_row();
+                if d.attached {
+                    ui.label("Start");
+                    ui.add(egui::DragValue::new(&mut d.start).range(0..=usize::MAX));
+                    ui.end_row();
+                    ui.label("End");
+                    ui.add(egui::DragValue::new(&mut d.end).range(d.start + 1..=usize::MAX));
+                    ui.end_row();
+                }
+            });
+
+        // Live QC readout off the draft oligo (Phase 0.5 thermo). The evaluation
+        // layer is total + self-describing (decision 12): Tm is a `Result` whose
+        // `Err` *is* the "not meaningful yet" signal, GC is always defined, and the
+        // structure ΔGs are `Ok(0.0)` when nothing can fold. So the view just renders
+        // what QC returns — no length threshold. egui re-runs this closure every
+        // frame, so the O(n³) fold is memoized on the exact oligo string.
+        if d.sequence.is_empty() {
+            d.qc_cache = None;
+            ui.weak("Tm — · —% GC"); // nothing typed yet
+        } else {
+            // Anneal Tm (①) leads when the draft is attached — it's the number that
+            // governs annealing to *this* footprint; self-Tm stays as context.
+            let anneal = d.anneal_tm.filter(|_| d.attached);
+            if d.qc_cache.as_ref().map(|(seq, _)| seq) != Some(&d.sequence) {
+                let qc = seqforge_bio::primer_qc(&d.sequence);
+                d.qc_cache = Some((d.sequence.clone(), qc));
+            }
+            let qc = &d.qc_cache.as_ref().expect("qc_cache set above").1;
+            let self_tm = qc
+                .tm
+                .as_ref()
+                .map_or_else(|_| "—".to_string(), |t| format!("{t:.1} °C"));
+            let head = match anneal {
+                Some(at) => format!("anneal Tm {at:.1} °C · self {self_tm}"),
+                None => format!("Tm {self_tm}"),
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!("{head} · {:.0}% GC", qc.gc));
+                // Structure ΔG lines appear only when *destabilizing* (< 0): a
+                // ΔG ≥ 0 is the healthy primer (and the short-oligo) case, which
+                // needs no line. Value-driven — the readout surfaces problems.
+                if let Ok(h) = &qc.hairpin_dg {
+                    if *h < 0.0 {
+                        ui.weak(format!("· hairpin ΔG {h:.1}"));
+                    }
+                }
+                if let Ok(sd) = &qc.self_dimer_dg {
+                    if *sd < 0.0 {
+                        ui.weak(format!("· self-dimer ΔG {sd:.1}"));
+                    }
+                }
+            });
+        }
+
+        ui.add_space(4.0);
+        if d.confirm_delete {
+            // Armed delete (existing primer only): Enter confirms the delete.
+            let enter = submit_on_enter || ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!(
+                        "{} Confirm delete?  (Enter)",
+                        egui_phosphor::regular::TRASH
+                    ))
+                    .color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
+                if (ui.add(btn).clicked() || enter) && d.to_delete_request().is_some() {
+                    outcome = Some(EditOutcome::Delete(d.to_delete_request().expect("checked")));
+                }
+                if ui.button("Cancel").clicked() {
+                    outcome = Some(EditOutcome::Cancel);
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(d.is_valid(), egui::Button::new("Save"))
+                    .clicked()
+                    || (submit_on_enter && d.is_valid())
+                {
+                    outcome = Some(EditOutcome::Commit(d.to_request()));
+                }
+                if ui.button("Cancel").clicked() {
+                    outcome = Some(EditOutcome::Cancel);
+                }
+                // Delete pinned right — only for an existing primer (create has
+                // nothing to remove). Arms the two-step confirm (modal-free).
+                if d.id.is_some() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(egui::RichText::new(format!(
+                                "{} Delete",
+                                egui_phosphor::regular::TRASH
+                            )))
+                            .on_hover_text("Delete this primer")
+                            .clicked()
+                        {
+                            d.confirm_delete = true;
+                        }
+                    });
+                }
+            });
+        }
+    });
+    if outcome.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        outcome = Some(EditOutcome::Cancel);
+    }
+    outcome
+}
+
+/// Primer:template annealing Tm (°C) for a draft's current footprint, or `None`
+/// when the draft is floating / the footprint is invalid or out of bounds. Only
+/// Forward/Reverse primers anneal (an unstranded oligo has no duplex sense).
+pub(super) fn draft_anneal_tm(d: &PrimerDraft, workspace: &mut Workspace) -> Option<f64> {
+    if !d.attached || d.start >= d.end {
+        return None;
+    }
+    let strand = match d.strand.as_str() {
+        "+" => Strand::Forward,
+        "-" => Strand::Reverse,
+        _ => return None,
+    };
+    workspace
+        .with_active_buffer(|_v, buf, _ann| {
+            (d.end <= buf.text.len())
+                .then(|| seqforge_bio::anneal_tm(&d.sequence, &(d.start..d.end), strand, &buf.text))
+                .and_then(Result::ok)
+        })
+        .ok()
+        .flatten()
+}
+
+impl InspectorState {
+    /// The Primers tab: the read-only list expands the selected row into an
+    /// inline **viewer** (full oligo + QC) and, on an edit gesture, an inline
+    /// **editor** (Phase 2.1). A create draft (`id = None`, from ＋ Add primer)
+    /// renders at the top. Editing/creating is pane-local until commit, which
+    /// posts one `UpdatePrimer`/`AddPrimer` (the CLI verb) through the single
+    /// applier + history. Mirrors `show_features`.
+    pub(super) fn show_primers(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {
+        // Attached-first, floating oligos last (list mirrors the map top→bottom).
+        let mut primers = self.primers().to_vec();
+        primers.sort_by_key(|p| p.binding.as_ref().map_or(usize::MAX, |b| b.start));
+        let selected = self.selected_primer;
+        let editing = &mut self.editing_primer;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // A create draft has no row to sit under → render it at the top.
+            if editing.as_ref().is_some_and(|d| d.id.is_none()) {
+                let d = editing.as_mut().expect("checked is_none ⇒ Some");
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.strong("New primer");
+                });
+                if let Some(outcome) = primer_editor(ui, d) {
+                    commit_primer_outcome(outcome, editing, pending);
+                }
+                ui.separator();
+            }
+
+            if primers.is_empty() {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| ui.weak("No primers on this sequence."));
+                return;
+            }
+
+            for p in &primers {
+                let is_sel = selected == Some(p.id);
+                let resp = row_shell(ui, &primer_display_row(p, is_sel));
+                if resp.double_clicked() {
+                    *editing = Some(PrimerDraft::from_info(p));
+                    pending.push((AppCommand::RevealPrimer { id: p.id }, None));
+                } else if resp.clicked() {
+                    // Selecting a different row cancels an in-flight edit.
+                    if editing.as_ref().is_some_and(|d| d.id != Some(p.id)) {
+                        *editing = None;
+                    }
+                    pending.push((AppCommand::RevealPrimer { id: p.id }, None));
+                }
+
+                if is_sel {
+                    let editing_this = editing.as_ref().is_some_and(|d| d.id == Some(p.id));
+                    if editing_this {
+                        let d = editing.as_mut().expect("editing_this ⇒ Some");
+                        if let Some(outcome) = primer_editor(ui, d) {
+                            commit_primer_outcome(outcome, editing, pending);
+                        }
+                    } else if primer_viewer(ui, p, pending) {
+                        *editing = Some(PrimerDraft::from_info(p));
+                        pending.push((AppCommand::RevealPrimer { id: p.id }, None));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Begin a create-from-selection primer draft: binding = the current range
+    /// selection when present (binding = selection, oligo = template slice), else
+    /// a floating oligo; the name defaults to the shared `suggest_primer_name()`
+    /// (decision 9, editable before commit). Clears any in-flight edit.
+    pub(super) fn begin_primer_create(&mut self, pending: &mut Vec<PendingCommand>) {
+        self.tab = InspectorTab::Primers;
+        let (oligo, binding) = match &self.selection_seed {
+            Some((range, oligo)) => (oligo.clone(), Some(range.clone())),
+            None => (String::new(), None),
+        };
+        self.editing_primer = Some(PrimerDraft::create(
+            self.suggested_primer_name.clone(),
+            oligo,
+            binding,
+        ));
+        // A create draft has no selected row; clear the panel primer selection so
+        // the editor renders at the top, not under a stale row.
+        pending.push((AppCommand::SelectPrimer(None), None));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn primer_info(binding: Option<Range<usize>>, strand: Strand) -> PrimerInfo {
+        PrimerInfo {
+            id: PrimerId(4),
+            name: "P1".into(),
+            sequence: "ATGCGT".into(),
+            binding,
+            strand,
+            len: 6,
+            tm: Some(42.0),
+            gc: 50.0,
+            hairpin_dg: None,
+            self_dimer_dg: None,
+            anneal_tm: None,
+            state: PrimerState::Confirmed,
+            mismatches: 0,
+            off_targets: 0,
+            sites: vec![],
+        }
+    }
+
+    #[test]
+    fn primer_draft_seeds_from_attached_info() {
+        let d = PrimerDraft::from_info(&primer_info(Some(2..8), Strand::Reverse));
+        assert_eq!(d.id, Some(PrimerId(4)));
+        assert_eq!(d.sequence, "ATGCGT");
+        assert_eq!(d.strand, "-");
+        assert!(d.attached);
+        assert_eq!((d.start, d.end), (2, 8));
+        assert!(d.needs_focus);
+    }
+
+    #[test]
+    fn primer_draft_seeds_from_floating_info() {
+        let d = PrimerDraft::from_info(&primer_info(None, Strand::Forward));
+        assert!(!d.attached, "no binding → floating oligo");
+    }
+
+    #[test]
+    fn primer_edit_commits_to_update_primer_verb() {
+        // An attached edit sends both binding ends (Some) + all authored fields.
+        let d = PrimerDraft::from_info(&primer_info(Some(2..8), Strand::Forward));
+        match d.to_request() {
+            ViewerRequest::UpdatePrimer {
+                id,
+                name,
+                sequence,
+                strand,
+                start,
+                end,
+                detach,
+                view,
+            } => {
+                assert_eq!(id, PrimerId(4));
+                assert_eq!(name.as_deref(), Some("P1"));
+                assert_eq!(sequence.as_deref(), Some("ATGCGT"));
+                assert_eq!(strand.as_deref(), Some("+"));
+                assert_eq!((start, end), (Some(2), Some(8)));
+                assert!(!detach, "an attached edit keeps the binding");
+                assert_eq!(view, None);
+            }
+            other => panic!("expected UpdatePrimer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn floating_primer_update_detaches() {
+        // A floating oligo edit sends no footprint + detach = true → the binding
+        // is cleared (③: the editor now attaches/detaches via the detach flag).
+        let d = PrimerDraft::from_info(&primer_info(None, Strand::Forward));
+        match d.to_request() {
+            ViewerRequest::UpdatePrimer {
+                start, end, detach, ..
+            } => {
+                assert_eq!((start, end), (None, None));
+                assert!(detach, "floating edit clears the binding");
+            }
+            other => panic!("expected UpdatePrimer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primer_create_commits_to_add_primer_verb() {
+        let d = PrimerDraft::create("Primer 1".into(), "ATGC".into(), Some(0..4));
+        match d.to_request() {
+            ViewerRequest::AddPrimer {
+                name,
+                sequence,
+                start,
+                end,
+                strand,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("Primer 1"));
+                assert_eq!(sequence, "ATGC");
+                assert_eq!((start, end), (Some(0), Some(4)));
+                assert_eq!(strand, "+");
+            }
+            other => panic!("expected AddPrimer, got {other:?}"),
+        }
+        // A create draft has no delete verb.
+        assert!(d.to_delete_request().is_none());
+    }
+
+    #[test]
+    fn primer_draft_validity() {
+        let mut d = PrimerDraft::create("p".into(), "ATGC".into(), Some(0..4));
+        assert!(d.is_valid());
+        d.sequence = "   ".into();
+        assert!(!d.is_valid(), "empty oligo is invalid");
+        d.sequence = "ATGC".into();
+        d.end = d.start; // collapsed footprint while attached
+        assert!(!d.is_valid(), "attached needs start < end");
+        // A floating oligo ignores the (unused) start/end.
+        d.attached = false;
+        assert!(d.is_valid());
+    }
+
+    #[test]
+    fn edit_primer_delete_verb() {
+        let d = PrimerDraft::from_info(&primer_info(Some(0..4), Strand::Forward));
+        assert!(matches!(
+            d.to_delete_request(),
+            Some(ViewerRequest::RemovePrimer {
+                id: PrimerId(4),
+                ..
+            })
+        ));
+    }
+}

@@ -551,6 +551,13 @@ pub(crate) struct BlockCtx<'a> {
     pub deleted: Option<(usize, usize)>,
     pub selection: Option<Selection>,
     pub selected_feature: Option<FeatureId>,
+    /// The selected primer *object* (id), if any. Drives the PrimerTrack's
+    /// selected-emphasis pass over the oligo's own drawn bases (annealed body +
+    /// lifted 5' tail) — the object-vs-range counterpart of `selected_feature`
+    /// (Phase 1.5e). A primer's tail/overhang has no template column, so the
+    /// highlight lives on the track, not on `selection` (which stays `None` for
+    /// a selected primer).
+    pub selected_primer: Option<PrimerId>,
     /// Cursor blink phase (true = draw the cursor this frame).
     pub blink_on: bool,
     /// Cut site the pointer is hovering (full staple reveals), if any.
@@ -1092,6 +1099,7 @@ mod tests {
             deleted: None,
             selection: None,
             selected_feature: None,
+            selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
             layout: &layout,
@@ -1161,6 +1169,7 @@ mod tests {
             deleted: None,
             selection: None,
             selected_feature: None,
+            selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
             layout,
@@ -1265,6 +1274,7 @@ mod tests {
             deleted: None,
             selection: None,
             selected_feature: None,
+            selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
             layout,

@@ -367,6 +367,25 @@ fn handle_keyboard(
                 return;
             }
         }
+        // Delete on a selected primer *object* → route to the Inspector's staged
+        // primer delete (Phase 2.1), the sibling of the feature path. A primer is
+        // a reagent (not sequence), so Delete never edits bases here.
+        if let Some(pid) = view.selected_primer {
+            let del = ui.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace)
+            });
+            if del {
+                post(
+                    cmds,
+                    AppCommand::EditPrimerInInspector {
+                        id: pid,
+                        arm_delete: true,
+                    },
+                );
+                return;
+            }
+        }
     }
 
     // ── Arrow-key cursor navigation ───────────────────────────────────────
@@ -461,6 +480,20 @@ fn handle_keyboard(
                 ViewerRequest::Copy {
                     start,
                     end,
+                    view: Some(vid),
+                },
+            );
+        } else if view.selected_primer.is_some() {
+            // A selected primer carries no template range post-1.5e; ⌘C copies the
+            // authored oligo (5'→3', tail incl.). `apply_copy` keys off
+            // `selected_primer` when the range is a bare cursor, so a zero range
+            // suffices as the trigger (the object-vs-range invariant guarantees no
+            // conflicting text selection).
+            post_req(
+                cmds,
+                ViewerRequest::Copy {
+                    start: 0,
+                    end: 0,
                     view: Some(vid),
                 },
             );
@@ -931,6 +964,7 @@ impl SequenceView {
         let primer_display = self.primer_display;
         let selection = view.selection;
         let selected_feature = view.selected_feature;
+        let selected_primer = view.selected_primer;
 
         // Per-primer decomposition against the render sequence — annealed bases,
         // mismatches, and the 5' tail the Primer tracks draw (Phase 1.1). Aligned
@@ -982,6 +1016,7 @@ impl SequenceView {
                 deleted: diff_deleted,
                 selection,
                 selected_feature,
+                selected_primer,
                 blink_on,
                 hovered_cut_site: hovered,
                 layout: &block_layouts[block_idx],
@@ -1068,12 +1103,14 @@ impl SequenceView {
                             .and_then(|id| render_ann.primer(id))
                             .filter(|p| p.binding.is_some())
                         {
-                            // Clicking a primer selects its annealed footprint —
-                            // reusing the selection machinery (lights the status-bar
-                            // Tm/%GC readout) — and drives the Inspector highlight
-                            // by id (map↔panel selection sync).
-                            let b = primer.binding.clone().expect("filtered Some");
-                            push_sel(cmds, Some(Selection::range(b.start, b.end)));
+                            // Clicking a primer selects the oligo *object* (Phase
+                            // 1.5e), highlighting its own drawn bases on the track —
+                            // not a `view.selection` on the template (wrong strand
+                            // for a reverse primer; a 5' tail has no template
+                            // column). Clear any prior text selection, then set
+                            // `selected_primer` (which also drives the Inspector
+                            // highlight by id — map↔panel sync).
+                            push_sel(cmds, None);
                             cmds.push((AppCommand::SelectPrimer(Some(primer.id)), None));
                         } else if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
@@ -1114,10 +1151,20 @@ impl SequenceView {
                 }
             }
 
-            // ── Double-click a feature → Edit dialog ──────────────────────
+            // ── Double-click → inline editor (primer first, then feature) ──
             if response.double_clicked() {
                 if let Some(p) = ptr {
-                    if let Some(fc) = find_hit(&hits, p, Hit::as_feature)
+                    if let Some(pid) = find_hit(&hits, p, Hit::as_primer) {
+                        // A primer object routes into the Inspector's inline primer
+                        // editor (Phase 2.1) — the sibling of the feature gesture.
+                        cmds.push((
+                            AppCommand::EditPrimerInInspector {
+                                id: pid,
+                                arm_delete: false,
+                            },
+                            None,
+                        ));
+                    } else if let Some(fc) = find_hit(&hits, p, Hit::as_feature)
                         .and_then(|fi| render_ann.by_position(fi))
                         .map(FeatureContext::from_feature)
                     {

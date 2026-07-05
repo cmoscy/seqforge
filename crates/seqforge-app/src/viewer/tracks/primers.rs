@@ -146,15 +146,27 @@ fn paint_band(
             continue;
         };
 
+        // Selection = highlight the oligo *object* (Phase 1.5e), not the template
+        // row. A primer is a single-strand reagent, so selecting it emphasises its
+        // own drawn bases — annealed body here + the lifted 5' tail below — rather
+        // than a `view.selection` on the template (wrong strand for a reverse
+        // primer; a 5' tail has no template column). Keyed on `selected_primer`,
+        // the counterpart of the Features track's `selected_feature` pass.
+        let is_selected = ctx.selected_primer == Some(primer.id);
+        if is_selected {
+            painter.rect_filled(body, 2.0, body_color.gamma_multiply(0.28));
+        }
+
         // Body: an outline only (no fill) aligned to the annealed footprint
         // (SnapGene / Benchling idiom) — the strand-coloured stroke + arrowhead
-        // carry identity; the primer's own bases fill the interior.
-        painter.rect_stroke(
-            body,
-            2.0,
-            Stroke::new(1.5, body_color),
-            egui::StrokeKind::Inside,
-        );
+        // carry identity; the primer's own bases fill the interior. A selected
+        // oligo gets a brighter, heavier outline.
+        let body_stroke = if is_selected {
+            Stroke::new(2.0, Color32::WHITE)
+        } else {
+            Stroke::new(1.5, body_color)
+        };
+        painter.rect_stroke(body, 2.0, body_stroke, egui::StrokeKind::Inside);
 
         let mid_y = body.center().y;
         let head_len = (char_width * 0.8).clamp(4.0, 10.0);
@@ -244,6 +256,18 @@ fn paint_band(
             let lift_y = if reverse { body.max.y } else { body.min.y } + lift;
             let edge_x = if reverse { body.max.x } else { body.min.x };
             let dir = if reverse { 1.0 } else { -1.0 };
+            // Selected-emphasis pass over the lifted tail (Phase 1.5e): a soft wash
+            // behind the ribbon letters so the whole oligo — body + tail — reads as
+            // one selected object, mirroring the body highlight above.
+            if is_selected {
+                let wash_w =
+                    dir * (shown as f32 + if tail.len() > cap { 1.0 } else { 0.0 }) * char_width;
+                let wash = Rect::from_two_pos(
+                    Pos2::new(edge_x, lift_y - style.primer_row_h * 0.5),
+                    Pos2::new(edge_x + wash_w, lift_y + style.primer_row_h * 0.5),
+                );
+                painter.rect_filled(wash, 2.0, tail_color.gamma_multiply(0.28));
+            }
             // Kink connecting the body's 5' corner up to the lifted ribbon.
             painter.line_segment(
                 [

@@ -216,10 +216,12 @@ pub(super) fn apply_select_primer(
 }
 
 /// Select a primer by id (Inspector row-click). Sets `selected_primer`, clears
-/// `selected_feature` (mutually exclusive panel selection), and — when the
-/// primer is attached — selects + reveals its footprint (lighting the status-bar
-/// Tm/%GC readout, like a map click). A detached/floating oligo is panel-only:
-/// selected by id, no map move.
+/// `selected_feature` (mutually exclusive panel selection) and any text
+/// `selection`, and — when the primer is attached — scrolls its footprint into
+/// view. The highlight itself lands on the **oligo object** via the PrimerTrack's
+/// `selected_primer` emphasis pass (Phase 1.5e), *not* a `view.selection` on the
+/// template (wrong strand for a reverse primer; a 5' tail has no template
+/// column). A detached/floating oligo is panel-only: selected by id, no map move.
 pub(super) fn apply_reveal_primer(
     state: &mut AppState,
     id: PrimerId,
@@ -234,8 +236,10 @@ pub(super) fn apply_reveal_primer(
     if let Some(view) = state.workspace.active_view_mut() {
         view.selected_primer = Some(id);
         view.selected_feature = None;
+        // Object selection, not a range: drop any prior text selection so the map
+        // shows only the oligo highlight (the PrimerTrack draws it by id).
+        view.selection = None;
         if let Some(b) = &binding {
-            view.selection = Some(Selection::range(b.start, b.end));
             view.scroll_to = Some(b.start);
         }
     }
@@ -313,6 +317,63 @@ pub(super) fn apply_edit_feature_in_inspector(
         view.selected_primer = None;
         view.selection = Some(Selection::range(start, end));
         view.scroll_to = Some(start);
+    }
+    emit_selection_diff(state, before);
+    state.focus.set_scope(FocusScope::Inspector);
+    state
+        .events
+        .emit(AppEvent::FocusChanged(FocusScope::Inspector));
+    Ok(None)
+}
+
+/// Route a primer into the Inspector's inline editor (Phase 2.1, sibling of
+/// [`apply_edit_feature_in_inspector`]): dock the pane if hidden, select + reveal
+/// the primer on the map (object highlight, no template range — 1.5e), enter the
+/// inline editor seeded from the shared `PrimerInfo` projection, and focus the
+/// pane. `arm_delete` opens with the two-step delete pre-armed. The canvas
+/// primer edit/delete gestures route here.
+pub(super) fn apply_edit_primer_in_inspector(
+    state: &mut AppState,
+    id: PrimerId,
+    arm_delete: bool,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Pull the primer's authored fields to seed the draft (id-addressed).
+    let fields = state
+        .workspace
+        .with_active_buffer(|_v, _b, ann| {
+            ann.primer(id).map(|p| {
+                let flag = match p.strand {
+                    Strand::Reverse => "-",
+                    Strand::None => ".",
+                    _ => "+",
+                };
+                (
+                    p.name.clone(),
+                    p.sequence.clone(),
+                    flag.to_string(),
+                    p.binding.clone(),
+                )
+            })
+        })
+        .ok()
+        .flatten();
+    let Some((name, sequence, strand, binding)) = fields else {
+        return Ok(None); // primer vanished — nothing to edit
+    };
+
+    let before = active_selection(state);
+    super::layout::dock_inspector_if_absent(state);
+    let scroll = binding.as_ref().map(|b| b.start);
+    state
+        .inspector
+        .begin_primer_edit(id, name, sequence, strand, binding, arm_delete);
+    if let Some(view) = state.workspace.active_view_mut() {
+        view.selected_primer = Some(id);
+        view.selected_feature = None;
+        view.selection = None;
+        if let Some(s) = scroll {
+            view.scroll_to = Some(s);
+        }
     }
     emit_selection_diff(state, before);
     state.focus.set_scope(FocusScope::Inspector);
@@ -449,17 +510,26 @@ mod tests {
     }
 
     #[test]
-    fn reveal_attached_primer_selects_footprint_and_clears_feature() {
+    fn reveal_attached_primer_selects_object_and_scrolls_without_range() {
+        // Phase 1.5e: revealing a primer selects the oligo *object* (id) and
+        // scrolls its footprint into view, but sets **no** template `selection`
+        // (the highlight lands on the oligo via the PrimerTrack, not the template).
         let (mut state, id) = open_with_primer(Some(2..8), "attached");
-        state.workspace.active_view_mut().unwrap().selected_feature = Some(FeatureId(9));
+        let v0 = state.workspace.active_view_mut().unwrap();
+        v0.selected_feature = Some(FeatureId(9));
+        v0.selection = Some(Selection::range(0, 4)); // a stale text selection
 
         apply_reveal_primer(&mut state, id).unwrap();
 
         let v = state.workspace.active_view().unwrap();
         assert_eq!(v.selected_primer, Some(id));
         assert_eq!(v.selected_feature, None, "primer selection clears feature");
-        assert_eq!(v.selection, Some(Selection::range(2, 8)));
-        assert_eq!(v.scroll_to, Some(2));
+        assert_eq!(v.selection, None, "object selection, not a template range");
+        assert_eq!(
+            v.scroll_to,
+            Some(2),
+            "still scrolls the footprint into view"
+        );
     }
 
     #[test]
@@ -526,8 +596,14 @@ mod tests {
 
     /// Build a state with one feature (range 2..8, reverse) for the routing tests.
     fn open_with_feature() -> (AppState, FeatureId) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let uniq = SEQ.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("sf_nav_{}_editfeat.fasta", std::process::id()));
+        path.push(format!(
+            "sf_nav_{}_{uniq}_editfeat.fasta",
+            std::process::id()
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, ">t\nATGCGTACCAATGC").unwrap();
         let mut state = AppState::default();
@@ -582,6 +658,29 @@ mod tests {
     fn edit_feature_in_inspector_missing_feature_is_a_noop() {
         let (mut state, _fid) = open_with_feature();
         apply_edit_feature_in_inspector(&mut state, FeatureId(9999), false).unwrap();
+        assert!(!state.inspector.is_editing());
+    }
+
+    #[test]
+    fn edit_primer_in_inspector_enters_editor_selects_and_focuses_pane() {
+        // Phase 2.1: routing a primer into the inline editor arms it (seeded from
+        // authored fields, not the projection), selects the oligo object (no
+        // template range — 1.5e), scrolls the footprint, and focuses the pane.
+        let (mut state, id) = open_with_primer(Some(2..8), "editp");
+        apply_edit_primer_in_inspector(&mut state, id, true).unwrap();
+        assert!(state.inspector.is_editing(), "inline primer editor armed");
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.selected_feature, None);
+        assert_eq!(v.selection, None, "object selection, not a template range");
+        assert_eq!(v.scroll_to, Some(2));
+        assert_eq!(state.focus.scope, FocusScope::Inspector);
+    }
+
+    #[test]
+    fn edit_primer_in_inspector_missing_primer_is_a_noop() {
+        let (mut state, _id) = open_with_primer(Some(2..8), "missp");
+        apply_edit_primer_in_inspector(&mut state, PrimerId(9999), false).unwrap();
         assert!(!state.inspector.is_editing());
     }
 }

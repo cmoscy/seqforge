@@ -22,7 +22,9 @@
 
 use std::ops::Range;
 
-use seqforge_core::{DispatchError, EditKind, Feature, FeatureId, Strand, ViewId, ViewerResponse};
+use seqforge_core::{
+    DispatchError, EditKind, Feature, FeatureId, Primer, PrimerId, Strand, ViewId, ViewerResponse,
+};
 
 use crate::app::AppState;
 use crate::command::{AppCommand, StagedEdit};
@@ -212,19 +214,26 @@ pub(super) fn apply_copy(
     end: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    // Object-aware copy (decision 15 / Phase 1.5c): when the copy covers exactly
-    // a selected primer's binding footprint, copy the authored oligo (5'→3', tail
-    // included) — the reagent — instead of the template slice. The template slice
-    // is the *wrong strand* for a reverse primer and can't represent a 5' tail
-    // (which has no template column). The `range == binding` gate keeps explicit,
-    // off-footprint range copies (CLI/agent) as literal slices, so parity holds.
+    // Object-aware copy (decision 15 / Phase 1.5c + 1.5e): copy the authored oligo
+    // (5'→3', tail included) — the reagent — instead of the template slice when the
+    // copy targets a selected primer. The template slice is the *wrong strand* for
+    // a reverse primer and can't represent a 5' tail (which has no template
+    // column). Two triggers: a **bare cursor** (`start == end`) is the canvas ⌘C /
+    // menu Copy of a selected primer, which post-1.5e carries no template range;
+    // an explicit **footprint range** (`range == binding`) keeps the 1.5c path so
+    // an off-footprint range copy (CLI/agent) still yields a literal slice — parity
+    // holds. The object-vs-range invariant means `selected_primer` is only set when
+    // there's no conflicting text selection.
     let oligo = state
         .workspace
         .with_buffer(vid, |v, _buf, ann| {
             let id = v.selected_primer?;
             let p = ann.primer(id)?;
-            let b = p.binding.as_ref()?;
-            (b.start == start && b.end == end).then(|| p.sequence.clone().into_bytes())
+            let is_footprint = p
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.start == start && b.end == end);
+            (start == end || is_footprint).then(|| p.sequence.clone().into_bytes())
         })
         .ok()
         .flatten();
@@ -427,6 +436,197 @@ pub(super) fn apply_update_feature(
             f.strand = parse_strand(&s);
         }
         Ok(buf.text.len())
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
+// ── Primer ops (Phase 2.1) ──────────────────────────────────────────────────────
+//
+// Siblings of the feature ops (ROADMAP decision 11/14): annotation-only
+// mutations routed through `workspace.edit_annotations` (undoable snapshot +
+// version bump), addressed by `PrimerId`, content-given → **no `bio`**. Edits
+// never *delete* a primer implicitly — an anchor-destroying sequence edit sets
+// `binding = None` via the primer-specific shift handler; only an explicit
+// `RemovePrimer` deletes.
+
+/// Normalize + validate a primer oligo: uppercase, strip whitespace, IUPAC-check
+/// (reusing [`parse_bases`]), reject empty. Returns the clean 5'→3' string.
+fn parse_oligo(sequence: &str) -> Result<String, DispatchError> {
+    let bytes = parse_bases(sequence)?;
+    if bytes.is_empty() {
+        return Err(DispatchError::InvalidInput(
+            "primer sequence is empty".into(),
+        ));
+    }
+    Ok(String::from_utf8(bytes).expect("IUPAC bytes are ASCII"))
+}
+
+/// Resolve an optional `(start, end)` pair into an annealing footprint:
+/// both `None` → a detached/floating oligo (`None`); both `Some` → `start..end`;
+/// exactly one `Some` is only valid when combined with a current binding.
+fn resolve_binding(
+    start: Option<usize>,
+    end: Option<usize>,
+    current: Option<&Range<usize>>,
+) -> Result<Option<Range<usize>>, DispatchError> {
+    match (start, end) {
+        (None, None) => Ok(current.cloned()),
+        (s, e) => {
+            let cs = s.or_else(|| current.map(|b| b.start));
+            let ce = e.or_else(|| current.map(|b| b.end));
+            match (cs, ce) {
+                (Some(a), Some(b)) => Ok(Some(a..b)),
+                _ => Err(DispatchError::InvalidInput(
+                    "binding start/end need both ends (no current binding to combine with)".into(),
+                )),
+            }
+        }
+    }
+}
+
+/// Validate a binding footprint against the buffer (half-open, within bounds).
+fn check_binding(binding: Option<&Range<usize>>, len: usize) -> Result<(), DispatchError> {
+    if let Some(b) = binding {
+        if b.start >= b.end || b.end > len {
+            return Err(DispatchError::OutOfRange {
+                position: b.end,
+                seq_len: len,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_add_primer(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    name: Option<String>,
+    sequence: String,
+    start: Option<usize>,
+    end: Option<usize>,
+    strand: String,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    let sequence = parse_oligo(&sequence)?;
+    let binding = resolve_binding(start, end, None)?;
+    let (id, len) = state.workspace.edit_annotations(vid, |ann, buf| {
+        check_binding(binding.as_ref(), buf.text.len())?;
+        // Naming is never a blocker (decision 9): an empty/absent name falls back
+        // to the one shared `suggest_primer_name()` generator.
+        let name = name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| ann.suggest_primer_name());
+        let id = ann.add_primer(Primer {
+            id: PrimerId::default(), // reassigned by `add_primer`
+            name,
+            sequence,
+            binding,
+            strand: parse_strand(&strand),
+            qualifiers: Default::default(),
+        });
+        Ok((id, buf.text.len()))
+    })?;
+    Ok(Some(ViewerResponse::PrimerAdded { id, len }))
+}
+
+/// Edit a primer in place (`UpdatePrimer`): only the `Some(_)` fields change.
+/// Binding is resolved from the partial `start`/`end` against the current
+/// footprint. An explicit empty name is ignored (never blanks the name).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_update_primer(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    id: PrimerId,
+    name: Option<String>,
+    sequence: Option<String>,
+    strand: Option<String>,
+    start: Option<usize>,
+    end: Option<usize>,
+    detach: bool,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    if detach && (start.is_some() || end.is_some()) {
+        return Err(DispatchError::InvalidInput(
+            "--detach clears the binding; don't pass start/end with it".into(),
+        ));
+    }
+    let vid = resolve_target(state, view)?;
+    let new_seq = sequence.map(|s| parse_oligo(&s)).transpose()?;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        let cur = ann
+            .primer(id)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {id}")))?;
+        // `detach` explicitly clears the footprint (floating oligo); otherwise
+        // `resolve_binding` treats an absent start/end as "keep current".
+        let new_binding = if detach {
+            None
+        } else {
+            resolve_binding(start, end, cur.binding.as_ref())?
+        };
+        check_binding(new_binding.as_ref(), buf.text.len())?;
+        let p = ann.primer_mut(id).expect("present — checked just above");
+        p.binding = new_binding;
+        if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+            p.name = n;
+        }
+        if let Some(s) = new_seq {
+            p.sequence = s;
+        }
+        if let Some(s) = strand {
+            p.strand = parse_strand(&s);
+        }
+        Ok(buf.text.len())
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
+/// Re-anchor a primer to its best binding site on the current template
+/// (footprint + strand), turning a Drifted/Detached primer back into Confirmed
+/// without hand-entering coordinates. "Best" = fewest mismatches, then a clean
+/// 3' anchor. Errors (no mutation) if the oligo binds nowhere.
+pub(super) fn apply_rescan_primer(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    id: PrimerId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        let cur = ann
+            .primer(id)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {id}")))?;
+        let oligo = cur.sequence.clone();
+        let settings = seqforge_bio::AnnealSettings::default();
+        let best =
+            seqforge_bio::find_primer_binding_sites(&oligo, &buf.text, buf.is_circular(), settings)
+                .into_iter()
+                .min_by_key(|s| (s.mismatches, !s.three_prime_match))
+                .ok_or_else(|| {
+                    DispatchError::InvalidInput(format!(
+                        "primer {id} binds nowhere on this template"
+                    ))
+                })?;
+        let p = ann.primer_mut(id).expect("present — checked just above");
+        p.binding = Some(best.range);
+        p.strand = best.strand;
+        Ok(buf.text.len())
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
+pub(super) fn apply_remove_primer(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    id: PrimerId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        if ann.remove_primer(id) {
+            Ok(buf.text.len())
+        } else {
+            Err(DispatchError::InvalidInput(format!(
+                "no primer with id {id}"
+            )))
+        }
     })?;
     Ok(Some(ViewerResponse::Edited { len, changed: true }))
 }
@@ -670,6 +870,57 @@ mod tests {
     }
 
     #[test]
+    fn copy_bare_cursor_with_selected_primer_yields_the_oligo() {
+        use seqforge_core::{Primer, PrimerId, Strand};
+        // Phase 1.5e: a selected primer carries no template range, so the canvas
+        // ⌘C posts a zero (bare-cursor) Copy. `apply_copy` must still copy the
+        // authored oligo — keyed off `selected_primer` — not an empty slice.
+        let mut s = state_with(b"AAAAATGCGGGGG");
+        let vid = s.workspace.active_view().unwrap().id;
+        s.workspace
+            .with_buffer_mut(vid, |v, _b, ann| {
+                let id = ann.add_primer(Primer {
+                    id: PrimerId::default(),
+                    name: "rev".into(),
+                    sequence: "GCA".into(),
+                    binding: Some(5..8),
+                    strand: Strand::Reverse,
+                    qualifiers: Default::default(),
+                });
+                v.selected_primer = Some(id);
+            })
+            .unwrap();
+
+        apply_copy(&mut s, None, 0, 0).unwrap();
+        assert_eq!(s.clipboard.as_deref(), Some(b"GCA".as_slice()));
+    }
+
+    #[test]
+    fn copy_bare_cursor_with_detached_selected_primer_yields_the_oligo() {
+        use seqforge_core::{Primer, PrimerId, Strand};
+        // A detached (floating) selected oligo has no binding, but ⌘C still copies
+        // its authored sequence via the bare-cursor trigger.
+        let mut s = state_with(b"AAAAATGCGGGGG");
+        let vid = s.workspace.active_view().unwrap().id;
+        s.workspace
+            .with_buffer_mut(vid, |v, _b, ann| {
+                let id = ann.add_primer(Primer {
+                    id: PrimerId::default(),
+                    name: "float".into(),
+                    sequence: "TTTGGG".into(),
+                    binding: None,
+                    strand: Strand::Forward,
+                    qualifiers: Default::default(),
+                });
+                v.selected_primer = Some(id);
+            })
+            .unwrap();
+
+        apply_copy(&mut s, None, 0, 0).unwrap();
+        assert_eq!(s.clipboard.as_deref(), Some(b"TTTGGG".as_slice()));
+    }
+
+    #[test]
     fn copy_without_selected_primer_is_a_template_slice() {
         let mut s = state_with(b"AAATGCGG");
         apply_copy(&mut s, None, 3, 6).unwrap();
@@ -899,6 +1150,278 @@ mod tests {
         let mut s = state_with(b"ATGC");
         let err = apply_remove_feature(&mut s, None, FeatureId(999)).unwrap_err();
         assert!(matches!(err, DispatchError::InvalidInput(_)));
+    }
+
+    // ── Primer ops (Phase 2.1) ────────────────────────────────────────────────
+
+    fn primer_count(state: &mut AppState) -> usize {
+        state
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.primers_len())
+            .unwrap()
+    }
+
+    fn add_primer(
+        state: &mut AppState,
+        name: Option<&str>,
+        seq: &str,
+        start: Option<usize>,
+        end: Option<usize>,
+        strand: &str,
+    ) -> PrimerId {
+        match apply_add_primer(
+            state,
+            None,
+            name.map(str::to_string),
+            seq.into(),
+            start,
+            end,
+            strand.into(),
+        )
+        .unwrap()
+        {
+            Some(ViewerResponse::PrimerAdded { id, .. }) => id,
+            other => panic!("expected PrimerAdded, got {other:?}"),
+        }
+    }
+
+    fn first_primer<T>(state: &mut AppState, f: impl FnOnce(&Primer) -> T) -> T {
+        state
+            .workspace
+            .with_active_buffer(|_, _, ann| f(ann.primers().next().unwrap()))
+            .unwrap()
+    }
+
+    #[test]
+    fn add_primer_attached_and_floating() {
+        let mut s = state_with(b"ATGCATGCATGC");
+        let attached = add_primer(&mut s, Some("fwd"), "atg c", Some(0), Some(4), "+");
+        // Sequence normalized (uppercased, whitespace stripped).
+        let (name, seq, binding, strand) = first_primer(&mut s, |p| {
+            (
+                p.name.clone(),
+                p.sequence.clone(),
+                p.binding.clone(),
+                p.strand,
+            )
+        });
+        assert_eq!(name, "fwd");
+        assert_eq!(seq, "ATGC");
+        assert_eq!(binding, Some(0..4));
+        assert_eq!(strand, Strand::Forward);
+        assert_ne!(attached, PrimerId::default());
+
+        // A floating oligo: no start/end → binding None.
+        add_primer(&mut s, Some("float"), "GGGG", None, None, "-");
+        assert_eq!(primer_count(&mut s), 2);
+    }
+
+    #[test]
+    fn add_primer_missing_name_uses_suggested_default() {
+        let mut s = state_with(b"ATGCATGC");
+        // Empty + absent both fall back to the shared generator (decision 9).
+        add_primer(&mut s, None, "ATGC", Some(0), Some(4), "+");
+        add_primer(&mut s, Some("  "), "TTTT", None, None, "+");
+        let names: Vec<String> = s
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.primers().map(|p| p.name.clone()).collect())
+            .unwrap();
+        assert_eq!(names, vec!["Primer 1".to_string(), "Primer 2".to_string()]);
+    }
+
+    #[test]
+    fn add_primer_partial_binding_and_bad_range_error() {
+        let mut s = state_with(b"ATGC");
+        // Exactly one of start/end is invalid.
+        assert!(matches!(
+            apply_add_primer(&mut s, None, None, "ATGC".into(), Some(0), None, "+".into())
+                .unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+        // Binding past the end.
+        assert!(matches!(
+            apply_add_primer(
+                &mut s,
+                None,
+                None,
+                "ATGC".into(),
+                Some(0),
+                Some(99),
+                "+".into()
+            )
+            .unwrap_err(),
+            DispatchError::OutOfRange { .. }
+        ));
+        // Empty sequence.
+        assert!(matches!(
+            apply_add_primer(&mut s, None, None, "".into(), None, None, "+".into()).unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn update_primer_partial_and_undoable() {
+        let mut s = state_with(b"ATGCATGCATGC");
+        let vid = s.workspace.active_view().unwrap().id;
+        let id = add_primer(&mut s, Some("orig"), "ATGC", Some(0), Some(4), "+");
+
+        // Change only the binding end + strand; name/sequence untouched.
+        apply_update_primer(
+            &mut s,
+            None,
+            id,
+            None,
+            None,
+            Some("-".into()),
+            None,
+            Some(8),
+            false,
+        )
+        .unwrap();
+        let (name, binding, strand) =
+            first_primer(&mut s, |p| (p.name.clone(), p.binding.clone(), p.strand));
+        assert_eq!(name, "orig", "unspecified fields preserved");
+        assert_eq!(binding, Some(0..8), "end updated, start kept");
+        assert_eq!(strand, Strand::Reverse);
+
+        // Undo restores the original binding + strand.
+        s.workspace.undo(vid).unwrap();
+        let (binding, strand) = first_primer(&mut s, |p| (p.binding.clone(), p.strand));
+        assert_eq!(binding, Some(0..4));
+        assert_eq!(strand, Strand::Forward);
+    }
+
+    #[test]
+    fn update_primer_empty_name_is_ignored() {
+        let mut s = state_with(b"ATGCATGC");
+        let id = add_primer(&mut s, Some("keep"), "ATGC", Some(0), Some(4), "+");
+        apply_update_primer(
+            &mut s,
+            None,
+            id,
+            Some("  ".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(first_primer(&mut s, |p| p.name.clone()), "keep");
+    }
+
+    #[test]
+    fn update_primer_empty_sequence_is_rejected() {
+        // Parity with add: an update can't blank the oligo (parse_oligo guards both).
+        let mut s = state_with(b"ATGCATGC");
+        let id = add_primer(&mut s, Some("keep"), "ATGC", Some(0), Some(4), "+");
+        assert!(matches!(
+            apply_update_primer(
+                &mut s,
+                None,
+                id,
+                None,
+                Some("".into()),
+                None,
+                None,
+                None,
+                false
+            )
+            .unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+        // The original oligo is untouched by the rejected edit.
+        assert_eq!(first_primer(&mut s, |p| p.sequence.clone()), "ATGC");
+    }
+
+    #[test]
+    fn update_primer_detach_clears_binding_and_is_undoable() {
+        let mut s = state_with(b"ATGCATGCATGC");
+        let vid = s.workspace.active_view().unwrap().id;
+        let id = add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
+        apply_update_primer(&mut s, None, id, None, None, None, None, None, true).unwrap();
+        assert_eq!(
+            first_primer(&mut s, |p| p.binding.clone()),
+            None,
+            "detach clears the footprint → floating oligo"
+        );
+        s.workspace.undo(vid).unwrap();
+        assert_eq!(
+            first_primer(&mut s, |p| p.binding.clone()),
+            Some(0..4),
+            "undo restores the binding"
+        );
+    }
+
+    #[test]
+    fn update_primer_detach_with_explicit_range_is_rejected() {
+        let mut s = state_with(b"ATGCATGC");
+        let id = add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
+        assert!(matches!(
+            apply_update_primer(&mut s, None, id, None, None, None, Some(0), Some(4), true)
+                .unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn rescan_primer_reanchors_detached_oligo() {
+        // Oligo GCGTAC binds the clean forward site 2..8 of this template.
+        let mut s = state_with(b"ATGCGTACCA");
+        let id = add_primer(&mut s, Some("p"), "GCGTAC", None, None, "+");
+        assert_eq!(
+            first_primer(&mut s, |p| p.binding.clone()),
+            None,
+            "starts floating"
+        );
+        apply_rescan_primer(&mut s, None, id).unwrap();
+        let (binding, strand) = first_primer(&mut s, |p| (p.binding.clone(), p.strand));
+        assert_eq!(binding, Some(2..8), "re-anchored to the forward site");
+        assert_eq!(strand, Strand::Forward);
+    }
+
+    #[test]
+    fn rescan_primer_that_binds_nowhere_errors_without_mutation() {
+        let mut s = state_with(b"AAAAAAAAAA");
+        let id = add_primer(&mut s, Some("p"), "GCGTAC", None, None, "+");
+        assert!(matches!(
+            apply_rescan_primer(&mut s, None, id).unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+        assert_eq!(
+            first_primer(&mut s, |p| p.binding.clone()),
+            None,
+            "failed rescan leaves the primer untouched"
+        );
+    }
+
+    #[test]
+    fn remove_primer_and_bad_id() {
+        let mut s = state_with(b"ATGCATGC");
+        let id = add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
+        assert_eq!(primer_count(&mut s), 1);
+        apply_remove_primer(&mut s, None, id).unwrap();
+        assert_eq!(primer_count(&mut s), 0);
+
+        assert!(matches!(
+            apply_remove_primer(&mut s, None, PrimerId(999)).unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn primer_ops_bump_version() {
+        let mut s = state_with(b"ATGCATGC");
+        let v0 = s
+            .workspace
+            .with_active_buffer(|_, buf, _| buf.version)
+            .unwrap();
+        add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
+        let v1 = s
+            .workspace
+            .with_active_buffer(|_, buf, _| buf.version)
+            .unwrap();
+        assert_eq!(v1, v0 + 1, "primer add must bump version (cache key)");
     }
 
     #[test]

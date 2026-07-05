@@ -1,7 +1,8 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: Phases 1 + 1.5 complete on `main` (0.1–1.5d landed); next = Phase 2.1
-> (inline primer form). Phase 2+ design settled.**
+> **Status: Phases 1, 1.5, and 2.1 complete on `main` (0.1–2.1 landed); next =
+> Phase 2.2 (constructive generation) / 2.3 `oligo random`. Phase 2+ design
+> settled.**
 > Architecture, sourcing, and consistency-with-the-implemented-model all worked
 > out (see "Decisions locked" and "Consistency with the implemented model"
 > below). **Done:** 0.1–0.5 (thermo + `seqforge tm`; live Tm/%GC readout;
@@ -24,9 +25,15 @@
 > cancels; `Delete` re-stages to a delete → `Delete → Enter` deletes), canvas edit
 > gestures route into the pane (center `FeatureForm` retired for editing), enzyme
 > query re-homed to the Cut-sites tab (overlay retired), primer oligo-copy fixed,
-> icon font added. **Next = Phase 2.1** (creation/editing — inline primer form +
-> `AddPrimer` / `UpdatePrimer` / `RemovePrimer`, riding 1.5's edit-mode +
-> confirm/cancel grammar; primer delete = trash-staged like features). Canonical
+> icon font added. **1.5e** — primer selection now highlights the **oligo** on the
+> `PrimerTrack` (selected-emphasis paint pass keyed on `selected_primer`), not the
+> template footprint; the copy trigger keys off `selected_primer` directly.
+> **2.1** — `AddPrimer` / `UpdatePrimer` / `RemovePrimer` via the single applier +
+> history, plus the **inline primer form** (`PrimerDraft` sibling of
+> `FeatureDraft`) riding 1.5's confirm/cancel staged grammar: `Enter` commits,
+> `Esc` cancels, `Delete → Enter` trash-deletes; create-from-selection with
+> `suggest_primer_name()` default; CLI `add/update/remove-primer` auto-flatten.
+> **Next = Phase 2.2** (constructive generation) / `oligo random`. Canonical
 > cross-track status:
 > [`../ROADMAP.md`](../ROADMAP.md).
 
@@ -644,7 +651,7 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       **Features · Enzymes · Primers**. Commits `5862c03`→`5e0cda9`. Tests:
       invariant + edit-routing + copy semantics (108 total, clippy + fmt green;
       toolchain pinned 1.95.0).
-- [ ] 1.5e **Primer selection highlights the oligo, not the template** (read-side;
+- [x] 1.5e **Primer selection highlights the oligo, not the template** (read-side;
       discovered post-1.5). Today `selected_primer` drives **nothing** on the map —
       `apply_reveal_primer` sets `view.selection` to the *template* footprint, so
       the highlight lands on template bases (wrong strand for reverse primers; can't
@@ -660,7 +667,7 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       rendering — bases with no template column can only live on the track.
 
 ### Phase 2 — Creation / editing (uses the editor)
-- [ ] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
+- [x] 2.1 `AddPrimer`/`UpdatePrimer`/`RemovePrimer` via applier + history; **inline
       primer form** in the Inspector — **rides 1.5's edit-mode + confirm/cancel
       staged grammar** (a `PrimerDraft` sibling of `FeatureDraft`; `Enter` commits,
       `Esc` cancels; **`RemovePrimer` = the trash-staged delete**, same as features,
@@ -670,10 +677,28 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       last `FeatureForm` modal holdout folds inline here for both nouns);
       **optional name → `suggest_primer_name()` default** (decision 9);
       detach-on-destroy surfaced in the staged preview / reported by CLI.
+- [x] 2.1b **Attachment management + template-aware Tm** (post-2.1, discovered in
+      use). Four interlocking pieces, one noun (primer) vs its derived binding
+      *sites*: **Ⓛ** `PrimerInfo` now carries `sites: Vec<PrimerSiteInfo>` (every
+      place the oligo anneals — range/strand/mismatches/anneal-Tm/`attached`),
+      scanned independently of the authored binding so a floating oligo still shows
+      *candidate* sites; the Inspector detail lists them (attached marked,
+      off-targets/candidates flagged) with a per-site **Attach** (→ `UpdatePrimer`)
+      and a **Rescan** button. **①** the inline editor shows the **anneal Tm**
+      (duplex vs the footprint) as primary when attached, self-Tm secondary
+      (computed in `refresh`, which holds the template zero-copy; O(footprint) NN,
+      uncached). **②** `RescanPrimer { id }` verb (applier scans → writes the best
+      site's footprint+strand; errors if nothing binds) — CLI `rescan-primer`,
+      undoable. **③** `UpdatePrimer.detach: bool` breaks the `(start,end)=None`
+      "keep" ambiguity → a GUI **Attached ⇄ Floating** toggle + CLI `--detach`.
+      Auto-detach on template edits (`shift_primers`, decision 4) still owns the
+      *implicit* path; this adds the *explicit* one. See decision 16.
 - [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
       (min Hamming), restriction-site tails (reuse `seqforge-restriction`).
-- [ ] 2.3 CLI: `seqforge primers add/update/remove …` (`--name` optional, shares
-      `suggest_primer_name()` — decision 9), `seqforge oligo random …`.
+- [~] 2.3 CLI: `seqforge add-primer/update-primer/remove-primer …` (`--name`
+      optional, shares `suggest_primer_name()` — decision 9) landed with 2.1 (the
+      `ViewerRequest` verbs auto-flatten onto the CLI). Remaining: `seqforge oligo
+      random …` (rides Phase 2.2).
 
 ### Phase 3 — Cloning convergence (Tier 3 territory)
 - [ ] 3.1 PCR product simulation; primer-pair / amplicon logic; **hetero-dimer**
@@ -772,6 +797,58 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
     the dominant professional convention; removes the enzyme-bar special case; net
     LoC cut. Lands as **Phase 1.5**, before Phase 2.1 (so the primer form is inline
     from day one). Full shape: "Panels / Inspector" + "Editing model" above.
+12. **Draft QC is live + memoized, not modal-gated.** The inline primer form keeps
+    decision 11's staged-inline grammar (create is *not* a modal — a modal would
+    reintroduce exactly what decision 15 retired, and would be the only modal noun
+    left). Two evaluations are distinguished: **(a) intrinsic QC** (Tm/GC/hairpin/
+    self-dimer — a pure function of the oligo string) renders **live off the draft**,
+    so you tune the oligo watching Tm cross threshold (mirrors the 0.5 selection
+    readout, matches SnapGene/Benchling/IDT); **(b) template match/attachment**
+    (`find_primer_binding_sites`, Confirmed/Drifted/Detached) is **not** run on the
+    draft at all — it recomputes on the *committed* annotation set via the version-
+    keyed cache after `AddPrimer`. So "evaluate matches only once specified" already
+    holds; the panics (empty-oligo fold → `s.len()-1` underflow; 4-mer → traceback
+    walks off the diagonal) were **totality bugs in the evaluation layer**, not
+    evidence for a modal. The consolidated pattern is **two load-bearing layers +
+    a dumb view**, one concern each — *not* a UI length threshold (which was a
+    leaky, cruder duplicate of validity the evaluation layer already encodes):
+    **(1) Correctness = totality at the boundary.** `fold` is total over
+    structureless input — empty **and** too-short-to-pair (n < 5, where the DP
+    main loop never runs and the top cell stays NULL) both return ΔG 0. This is
+    the *only* crash-safety layer, and it protects every caller (CLI/agent too).
+    **(2) Performance = an owned memo.** The O(n³) fold is memoized on the exact
+    oligo string (`PrimerDraft.qc_cache`); egui is immediate-mode, so "update on
+    keystroke" = recompute-on-change-of-input, not per-frame.
+    **(3) View = pure function of self-describing QC.** No `MIN_QC_OLIGO_LEN`
+    magic number (deleted). QC is self-describing: Tm is a `Result` whose `Err`
+    *is* the "not meaningful yet" signal (renders "—"); GC is always defined;
+    structure ΔGs are `Ok(0.0)` when nothing folds. The readout shows Tm/GC always
+    and a **ΔG line only when destabilizing (< 0)** — value-driven, so it surfaces
+    *problems* and the healthy/short cases fall out for free. One number (`4`)
+    approximating three distinct domain validity boundaries was the wrong tool.
+    **Selection Tm stays live/uncached** (O(n) nearest-neighbor — below the bar for
+    any cache). `egui::util::cache::FrameCache` is **not** adopted: it earns its
+    keep only for a *shared, many-key, expensive* derived computation; today QC has
+    one owner (the draft), so an owned `Option<(String, PrimerQc)>` is the right
+    altitude. Revisit FrameCache only if fold-based QC becomes shared across ≥2
+    render sites.
+13. **Primer = one authored noun; binding *sites* = a derived 0..N set** (ROADMAP
+    decision 16; extends decision 2/14's authored-vs-derived split with the site
+    *multiplicity* it implied). The projection stops collapsing reality to one
+    `PrimerState`: `PrimerInfo.sites: Vec<PrimerSiteInfo>` lists **every** place the
+    oligo anneals (range/strand/mismatches/anneal-Tm/`attached`), scanned
+    independently of the authored binding so a floating oligo still shows candidate
+    sites. Attachment is managed on two paths: **implicit** (template edits
+    auto-detach, decision 4) and **explicit** — Rescan (`RescanPrimer`, best-site
+    re-anchor), per-site Attach (`UpdatePrimer` footprint), detach
+    (`UpdatePrimer.detach`, breaking the `(start,end)=None`="keep" ambiguity). Two
+    Tms, each in its place: intrinsic **self-Tm** (oligo-only, always) and **anneal
+    Tm** (duplex vs the footprint, primary when attached, computed where the
+    template is in hand — `refresh`, uncached O(footprint) NN). *Rationale:* a scalar
+    state can't represent mispriming or let you pick a site; the same oligo really
+    does bind in several places, and that multiplicity is the QC signal. Off-target
+    *listing* is a read-side extension of the find pass; pair/reaction specificity
+    scoring stays Phase 3. Lands as **Phase 2.1b**.
 
 ## Resolved (previously open) questions
 

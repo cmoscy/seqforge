@@ -19,6 +19,7 @@
 //! is anchored at the 3' terminus and is `min(oligo_len, footprint)` long.
 
 mod anneal;
+mod design;
 mod evaluate;
 
 use std::ops::Range;

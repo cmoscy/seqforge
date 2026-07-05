@@ -259,6 +259,24 @@ mod tests {
     }
 
     #[test]
+    fn fold_on_empty_oligo_is_structureless_not_a_panic() {
+        // Live QC on a not-yet-typed primer draft folds "" — must not underflow.
+        assert_eq!(hairpin_dg("", DEFAULT_FOLD_TEMP_C).unwrap(), 0.0);
+        assert_eq!(self_dimer_dg("", DEFAULT_FOLD_TEMP_C).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn fold_on_too_short_to_pair_is_structureless_not_a_panic() {
+        // n < 5: the DP main loop never runs, so the top cell stays NULL and
+        // traceback must be skipped (regression: index OOB walking off the
+        // diagonal when the QC length gate opens at exactly 4 bases).
+        for seq in ["A", "AT", "ATG", "ATGC", "ATGCA"] {
+            let hp = hairpin_dg(seq, DEFAULT_FOLD_TEMP_C).unwrap();
+            assert_eq!(hp, 0.0, "{seq}: no possible structure; got {hp}");
+        }
+    }
+
+    #[test]
     fn self_dimer_dg_self_complementary_more_stable_than_random() {
         let pal = self_dimer_dg("GCGCGCGCGC", DEFAULT_FOLD_TEMP_C).unwrap();
         let ctrl = self_dimer_dg("ATGCGTAGCT", DEFAULT_FOLD_TEMP_C).unwrap();

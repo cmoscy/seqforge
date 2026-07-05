@@ -325,6 +325,87 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Add a primer (authored oligo). `sequence` is the full oligo 5'→3' (5' tail
+    /// included). `name` is optional — omitted, it falls back to
+    /// `Annotations::suggest_primer_name()` (decision 9). `start`/`end` are the
+    /// optional annealing footprint (both omitted → a detached/floating oligo);
+    /// `strand` is `+`/`-`/`.`. Content-given → needs no `bio` (decision 11).
+    AddPrimer {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[arg(long)]
+        sequence: String,
+        /// 0-based start of the annealing footprint (with `end`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<usize>,
+        /// 0-based exclusive end of the annealing footprint (with `start`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<usize>,
+        /// `+`, `-`, or `.` (unstranded).
+        #[arg(long, default_value = "+")]
+        #[serde(default = "default_strand")]
+        strand: String,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Edit a primer in place: only the fields you pass change. Addressed by id
+    /// (from `list-primers`). Passing both `start` and `end` re-sets the binding
+    /// footprint; passing one combines it with the current binding.
+    UpdatePrimer {
+        #[arg(long)]
+        id: PrimerId,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// New full oligo 5'→3' (5' tail included).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<String>,
+        /// `+`, `-`, or `.` (unstranded).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strand: Option<String>,
+        /// New 0-based start of the binding footprint.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<usize>,
+        /// New 0-based exclusive end of the binding footprint.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<usize>,
+        /// Clear the binding footprint — the primer becomes a floating oligo.
+        /// Breaks the `(start, end) = None` "keep current" ambiguity; mutually
+        /// exclusive with `start`/`end`.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detach: bool,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Re-anchor a primer to the current template: scan for its best binding site
+    /// and write it back (footprint + strand). Turns a Drifted/Detached primer
+    /// back into Confirmed without hand-entering coordinates. Errors if the oligo
+    /// binds nowhere.
+    RescanPrimer {
+        #[arg(long)]
+        id: PrimerId,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Remove the primer with the given id (from `list-primers`).
+    RemovePrimer {
+        #[arg(long)]
+        id: PrimerId,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Save the active buffer to its source path.
     Save {
         /// Overwrite even if the file changed on disk since it was loaded
@@ -384,6 +465,10 @@ impl ViewerRequest {
             ViewerRequest::RemoveFeature { view, .. } => *view,
             ViewerRequest::RenameFeature { view, .. } => *view,
             ViewerRequest::UpdateFeature { view, .. } => *view,
+            ViewerRequest::AddPrimer { view, .. } => *view,
+            ViewerRequest::UpdatePrimer { view, .. } => *view,
+            ViewerRequest::RescanPrimer { view, .. } => *view,
+            ViewerRequest::RemovePrimer { view, .. } => *view,
             ViewerRequest::Save { view, .. } => *view,
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
@@ -414,6 +499,9 @@ pub enum ViewerResponse {
     /// `AddFeature` — the new feature's session-scoped id (use it to
     /// remove/rename), and the buffer length after the add.
     FeatureAdded { id: FeatureId, len: usize },
+    /// `AddPrimer` — the new primer's session-scoped id (use it to
+    /// update/remove), and the buffer length after the add.
+    PrimerAdded { id: PrimerId, len: usize },
     /// `ListFeatures` — every feature on the buffer, in definition order.
     Features { features: Vec<FeatureInfo> },
     /// `ListPrimers` — every primer on the buffer (definition order) with its
@@ -448,6 +536,24 @@ pub enum PrimerState {
     Drifted,
     /// No viable binding (3' anchor lost or below stringency) — floating oligo.
     Detached,
+}
+
+/// One place where a primer's oligo anneals on the current template — a
+/// serializable per-site projection of `seqforge_bio::PrimerBinding` plus its
+/// annealing Tm. A primer may have several (repeats, off-targets); the Inspector
+/// lists them and the CLI emits them so mispriming is visible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimerSiteInfo {
+    /// 0-based half-open footprint on the top strand.
+    pub range: Range<usize>,
+    pub strand: Strand,
+    /// Mismatches within the footprint (0 = perfect anneal).
+    pub mismatches: usize,
+    /// primer:template annealing Tm (°C) at this site; `None` on error.
+    pub anneal_tm: Option<f64>,
+    /// This found site coincides with the primer's authored `binding` (the
+    /// currently-attached footprint). At most one site is `attached`.
+    pub attached: bool,
 }
 
 /// A primer summary for `ListPrimers` — a by-value projection (mirrors
@@ -485,7 +591,12 @@ pub struct PrimerInfo {
     /// Mismatch count within the stored-binding footprint (0 = clean anneal).
     pub mismatches: usize,
     /// Count of additional (off-target) binding sites — orthogonal to `state`.
+    /// Equals the number of `sites` that are not `attached`.
     pub off_targets: usize,
+    /// Every place the oligo anneals on the current template (repeats,
+    /// off-targets, and — when anchored — the attached site itself). Empty when
+    /// the oligo binds nowhere. Drives the Inspector site list + rescan.
+    pub sites: Vec<PrimerSiteInfo>,
 }
 
 // ── BioOps trait ─────────────────────────────────────────────────────────────
@@ -590,6 +701,10 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::RemoveFeature { .. }
         | ViewerRequest::RenameFeature { .. }
         | ViewerRequest::UpdateFeature { .. }
+        | ViewerRequest::AddPrimer { .. }
+        | ViewerRequest::UpdatePrimer { .. }
+        | ViewerRequest::RescanPrimer { .. }
+        | ViewerRequest::RemovePrimer { .. }
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
         | ViewerRequest::Undo { .. }
@@ -820,6 +935,7 @@ mod tests {
                     state: PrimerState::Detached,
                     mismatches: 0,
                     off_targets: 0,
+                    sites: vec![],
                 })
                 .collect()
         }
@@ -1169,6 +1285,116 @@ mod tests {
             }
             other => panic!("expected Primers, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_add_primer() {
+        // strand omitted → defaults to "+"; name/start/end omitted stay None
+        // (floating oligo). Method tag is snake_case.
+        let json = r#"{"method":"add_primer","sequence":"ATGC"}"#;
+        let req: ViewerRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            req,
+            ViewerRequest::AddPrimer { ref sequence, ref strand, name: None, start: None, end: None, .. }
+            if sequence == "ATGC" && strand == "+"
+        ));
+        // Round-trips with a footprint.
+        let full = ViewerRequest::AddPrimer {
+            name: Some("p".into()),
+            sequence: "ATGC".into(),
+            start: Some(0),
+            end: Some(4),
+            strand: "-".into(),
+            view: None,
+        };
+        let back: ViewerRequest =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::AddPrimer {
+                start: Some(0),
+                end: Some(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn viewer_request_serde_round_trip_update_remove_primer() {
+        let upd = ViewerRequest::UpdatePrimer {
+            id: PrimerId(3),
+            name: None,
+            sequence: Some("ATG".into()),
+            strand: None,
+            start: None,
+            end: Some(9),
+            detach: false,
+            view: None,
+        };
+        let json = serde_json::to_string(&upd).unwrap();
+        assert!(json.contains(r#""method":"update_primer""#), "got {json}");
+        // `detach: false` is the omitted default — it must not bloat the wire.
+        assert!(!json.contains("detach"), "default detach elided: {json}");
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::UpdatePrimer {
+                id: PrimerId(3),
+                end: Some(9),
+                detach: false,
+                ..
+            }
+        ));
+
+        // A detach request round-trips and carries the flag.
+        let detach = ViewerRequest::UpdatePrimer {
+            id: PrimerId(3),
+            name: None,
+            sequence: None,
+            strand: None,
+            start: None,
+            end: None,
+            detach: true,
+            view: None,
+        };
+        let json = serde_json::to_string(&detach).unwrap();
+        assert!(json.contains(r#""detach":true"#), "got {json}");
+        let back: ViewerRequest =
+            serde_json::from_str(&serde_json::to_string(&detach).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::UpdatePrimer { detach: true, .. }
+        ));
+
+        // RescanPrimer round-trips.
+        let rescan = ViewerRequest::RescanPrimer {
+            id: PrimerId(5),
+            view: None,
+        };
+        let json = serde_json::to_string(&rescan).unwrap();
+        assert!(json.contains(r#""method":"rescan_primer""#), "got {json}");
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::RescanPrimer {
+                id: PrimerId(5),
+                ..
+            }
+        ));
+
+        let rm = ViewerRequest::RemovePrimer {
+            id: PrimerId(7),
+            view: None,
+        };
+        let back: ViewerRequest =
+            serde_json::from_str(&serde_json::to_string(&rm).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::RemovePrimer {
+                id: PrimerId(7),
+                ..
+            }
+        ));
     }
 
     #[test]

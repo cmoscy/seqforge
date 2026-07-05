@@ -175,10 +175,22 @@ fn code4(s: &[u8], i: i64, i1: i64, j: i64, j1: i64) -> usize {
 
 /// Fold the sequence and return the list of minimum-free-energy structures.
 pub fn fold(seq: &str, temp: f64) -> Result<Vec<Struct>, FoldError> {
+    // An empty sequence has no structure — avoid the `s.len() - 1` underflow
+    // below (e.g. live QC on a not-yet-typed primer draft).
+    if seq.is_empty() {
+        return Ok(Vec::new());
+    }
     let (v_cache, w_cache) = cache(seq, temp)?;
     // traceback renders labels from the (upper-cased) sequence, matching cache()
     let upper = seq.to_uppercase();
     let s = upper.as_bytes();
+    // Sequences too short to form any pair (n < 5, where the DP main loop
+    // `for d in 4..n` never runs) leave the top-level cell as the NULL sentinel.
+    // There's no structure to trace, and `traceback` would walk `i` off the end
+    // of the diagonal (every NULL cell compares equal). No structure → ΔG 0.
+    if !w_cache[0][s.len() - 1].truthy() {
+        return Ok(Vec::new());
+    }
     Ok(traceback(s, 0, s.len() - 1, &v_cache, &w_cache))
 }
 

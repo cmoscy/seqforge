@@ -174,6 +174,14 @@ pub enum AppCommand {
         id: FeatureId,
         arm_delete: bool,
     },
+    /// Route a primer into the Inspector's inline editor (Phase 2.1, sibling of
+    /// `EditFeatureInInspector`): dock/focus the pane, select the primer, enter
+    /// edit mode. `arm_delete` opens with the two-step delete pre-armed (Delete
+    /// gesture / canvas Delete-on-selected-primer).
+    EditPrimerInInspector {
+        id: seqforge_core::PrimerId,
+        arm_delete: bool,
+    },
     /// Open the Rename modal for a feature (right-click → Rename…).
     OpenRenameFeature {
         id: FeatureId,
@@ -316,7 +324,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         RevealRange { .. } | RevealPrimer { .. } | RevealFeature { .. } => {
             state.workspace.active_view().is_some()
         }
-        EditFeatureInInspector { .. } => state.workspace.active_view().is_some(),
+        EditFeatureInInspector { .. } | EditPrimerInInspector { .. } => {
+            state.workspace.active_view().is_some()
+        }
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
@@ -555,6 +565,9 @@ pub fn apply<B: BioOps>(
         EditFeatureInInspector { id, arm_delete } => {
             nav::apply_edit_feature_in_inspector(state, id, arm_delete)
         }
+        EditPrimerInInspector { id, arm_delete } => {
+            nav::apply_edit_primer_in_inspector(state, id, arm_delete)
+        }
 
         // ── Feature editing (Phase 14) ──────────────────────────────
         OpenFeatureForm {
@@ -719,6 +732,28 @@ pub fn apply<B: BioOps>(
                 end,
                 view,
             } => edit::apply_update_feature(state, view, id, kind, label, strand, start, end),
+            ViewerRequest::AddPrimer {
+                name,
+                sequence,
+                start,
+                end,
+                strand,
+                view,
+            } => edit::apply_add_primer(state, view, name, sequence, start, end, strand),
+            ViewerRequest::UpdatePrimer {
+                id,
+                name,
+                sequence,
+                strand,
+                start,
+                end,
+                detach,
+                view,
+            } => edit::apply_update_primer(
+                state, view, id, name, sequence, strand, start, end, detach,
+            ),
+            ViewerRequest::RescanPrimer { id, view } => edit::apply_rescan_primer(state, view, id),
+            ViewerRequest::RemovePrimer { id, view } => edit::apply_remove_primer(state, view, id),
             ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.
