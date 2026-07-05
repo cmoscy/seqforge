@@ -1,0 +1,44 @@
+SeqForge — Third-Party Notices
+==============================
+
+This file lists bundled data and vendored components that retain their own
+copyright and license terms. The root LICENSE applies to SeqForge original
+source code only.
+
+REBASE restriction enzyme data
+------------------------------
+
+Restriction enzyme names, recognition sequences, cut positions, and related
+metadata in `crates/seqforge-restriction/src/enzymes_generated.rs` are derived
+from REBASE — The Restriction Enzyme Database — http://rebase.neb.com
+
+Copyright (c) Dr. Richard J. Roberts. Used with attribution.
+
+REBASE is a free, independent resource. When using or redistributing this
+data, cite the REBASE review:
+
+  Roberts, R.J., Vincze, T., Posfai, J., Macelis, D.
+  REBASE: a database for DNA restriction and modification: enzymes, genes and
+  genomes. Nucleic Acids Res. 51: D629-D630 (2023).
+  doi: 10.1093/nar/gkac975
+  PubMed: https://pubmed.ncbi.nlm.nih.gov/36318248/
+
+See also `crates/seqforge-restriction/README.md`.
+
+Vendored seqfold (thermodynamics)
+---------------------------------
+
+The numerical engine in `crates/seqforge-thermo/src/core/` is vendored from
+seqfold (https://github.com/Lattice-Automation/seqfold) v0.10.1.
+
+Copyright (c) 2019 Lattice Automation. Licensed under the MIT License.
+See `crates/seqforge-thermo/LICENSE` for the full license text.
+
+Rust crate dependencies
+-----------------------
+
+SeqForge depends on third-party crates from crates.io (e.g. `bio`, `gb-io`,
+`eframe`, `clap`). Each crate carries its own license. To list them:
+
+  cargo install cargo-license   # once
+  cargo license
