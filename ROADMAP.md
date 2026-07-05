@@ -21,7 +21,7 @@ architecture contracts live under [`docs/`](docs/).
 | **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (no tag — see Tagging policy) |
 | **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ⏳ next |
 | **(parallel)** | Restriction cloning depth (digest → ligation → Golden Gate) | 🟡 Tier 1 done |
-| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phases 1, 1.5, 2.1 + 2.1b complete; Phase 2.2 (constructive generation) next |
+| **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phases 1, 1.5, 2.1, 2.1b, 2.2a complete; 2.2b (generative package: random oligos, barcode/overhang sets) deferred |
 
 ### Tagging policy (pre-1.0)
 
@@ -50,7 +50,7 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 | **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phases 1, 1.5, 2.1 + 2.1b complete (thermo QC; Inspector unified viewer/detail/**inline-editor**; 1.5e oligo-highlight; enzyme-in-pane; CLI list/find + add/update/remove-primer; inline primer form via `PrimerDraft`; 2.1b binding-site listing + rescan/attach/detach + anneal-Tm) | Phase 2.2 — constructive generation (random oligos, barcodes, restriction tails) / `oligo random` |
+| **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phases 1, 1.5, 2.1, 2.1b, 2.2a complete (thermo QC; Inspector unified viewer/detail/**inline-editor**; 1.5e oligo-highlight; enzyme-in-pane; CLI list/find + add/update/remove/rescan/add-site-primer; 2.1b binding-site listing + rescan/attach/detach + anneal-Tm; **2.2a restriction-site tail composition** — `restriction_tail` builder + Insert-tool UI + `AddPrimerSite`) | 2.2b generative package (random oligos, barcode/overhang **sets**) — deferred, needs RNG |
 
 ---
 

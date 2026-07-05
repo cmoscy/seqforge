@@ -753,6 +753,13 @@ pub fn apply<B: BioOps>(
                 state, view, id, name, sequence, strand, start, end, detach,
             ),
             ViewerRequest::RescanPrimer { id, view } => edit::apply_rescan_primer(state, view, id),
+            ViewerRequest::AddPrimerSite {
+                id,
+                enzyme,
+                overhang,
+                flank,
+                view,
+            } => edit::apply_add_primer_site(state, view, id, enzyme, overhang, flank),
             ViewerRequest::RemovePrimer { id, view } => edit::apply_remove_primer(state, view, id),
             ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {

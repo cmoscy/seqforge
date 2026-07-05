@@ -398,6 +398,31 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Compose a restriction-enzyme site onto a primer's 5' tail (Phase 2.2a).
+    /// Prepends `flank + recognition (+ spacer + overhang for Type IIs)` to the
+    /// authored oligo, leaving the binding footprint unchanged (the added bases
+    /// are a 5' tail). `overhang` is required for a Type IIs enzyme and must match
+    /// its overhang length; omit it for a Type II (palindromic) enzyme.
+    AddPrimerSite {
+        #[arg(long)]
+        id: PrimerId,
+        /// Enzyme name (e.g. `EcoRI`, `BsaI`) — from the enzyme catalog.
+        #[arg(long)]
+        enzyme: String,
+        /// User-designed overhang (Type IIs only); its length must equal the
+        /// enzyme's overhang.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overhang: Option<String>,
+        /// 5' flanking bases for efficient cleavage near the end (defaults to a
+        /// conservative constant when omitted).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flank: Option<String>,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Remove the primer with the given id (from `list-primers`).
     RemovePrimer {
         #[arg(long)]
@@ -468,6 +493,7 @@ impl ViewerRequest {
             ViewerRequest::AddPrimer { view, .. } => *view,
             ViewerRequest::UpdatePrimer { view, .. } => *view,
             ViewerRequest::RescanPrimer { view, .. } => *view,
+            ViewerRequest::AddPrimerSite { view, .. } => *view,
             ViewerRequest::RemovePrimer { view, .. } => *view,
             ViewerRequest::Save { view, .. } => *view,
             ViewerRequest::SaveAs { view, .. } => *view,
@@ -704,6 +730,7 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::AddPrimer { .. }
         | ViewerRequest::UpdatePrimer { .. }
         | ViewerRequest::RescanPrimer { .. }
+        | ViewerRequest::AddPrimerSite { .. }
         | ViewerRequest::RemovePrimer { .. }
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
@@ -1378,6 +1405,27 @@ mod tests {
             back,
             ViewerRequest::RescanPrimer {
                 id: PrimerId(5),
+                ..
+            }
+        ));
+
+        // AddPrimerSite round-trips; optional overhang/flank elide when None.
+        let site = ViewerRequest::AddPrimerSite {
+            id: PrimerId(3),
+            enzyme: "BsaI".into(),
+            overhang: Some("AATG".into()),
+            flank: None,
+            view: None,
+        };
+        let json = serde_json::to_string(&site).unwrap();
+        assert!(json.contains(r#""method":"add_primer_site""#), "got {json}");
+        assert!(json.contains(r#""overhang":"AATG""#), "got {json}");
+        assert!(!json.contains("flank"), "None flank elided: {json}");
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ViewerRequest::AddPrimerSite {
+                id: PrimerId(3),
                 ..
             }
         ));

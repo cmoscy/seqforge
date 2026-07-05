@@ -19,9 +19,10 @@ pub use enzyme_query::{
     EnzymePreset, EnzymeQuery, parse_enzyme_query, resolve_query, resolve_query_names,
 };
 pub use primer::{
-    AnnealSettings, AnnealedBase, AttachmentState, PrimerAttachment, PrimerBinding,
-    PrimerDecomposition, PrimerQc, PrimerQcPlusAnneal, anneal_tm, classify_attachment,
-    decompose_primer, find_primer_binding_sites, primer_infos, primer_qc, primer_qc_with_anneal,
+    AnnealSettings, AnnealedBase, AttachmentState, DesignError, EnzymeSpec, PrimerAttachment,
+    PrimerBinding, PrimerDecomposition, PrimerQc, PrimerQcPlusAnneal, anneal_tm,
+    classify_attachment, decompose_primer, enzyme_catalog, enzyme_cuts, find_primer_binding_sites,
+    primer_infos, primer_qc, primer_qc_with_anneal, restriction_tail,
 };
 pub use search::{find_cut_sites, find_iupac_matches};
 pub use seqforge_thermo::{

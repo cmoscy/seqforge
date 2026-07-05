@@ -7,7 +7,9 @@
 //! functions stay private (only `draft_anneal_tm`, used by `refresh`, is shared).
 
 use std::ops::Range;
+use std::sync::OnceLock;
 
+use seqforge_bio::EnzymeSpec;
 use seqforge_core::{PrimerId, PrimerInfo, PrimerState, Strand, ViewerRequest};
 
 use super::row::{
@@ -16,6 +18,14 @@ use super::row::{
 use super::{InspectorState, InspectorTab};
 use crate::command::{AppCommand, PendingCommand};
 use crate::workspace::Workspace;
+
+/// The enzyme catalog (name + Type IIs / overhang-length projection), built once.
+/// The app doesn't link `seqforge-restriction`; this reaches enzyme geometry
+/// through the bio seam.
+fn enzyme_catalog() -> &'static [EnzymeSpec] {
+    static CATALOG: OnceLock<Vec<EnzymeSpec>> = OnceLock::new();
+    CATALOG.get_or_init(seqforge_bio::enzyme_catalog)
+}
 
 /// Live draft for the Inspector's inline **primer** editor (Phase 2.1 / decision
 /// 15) — the sibling of [`super::feature::FeatureDraft`]. `id = Some` edits an
@@ -45,6 +55,19 @@ pub(super) struct PrimerDraft {
     /// recomputed in [`InspectorState::refresh`] (which has the template) whenever
     /// the draft is attached with a valid binding. `None` when floating/invalid.
     pub(super) anneal_tm: Option<f64>,
+    /// Transient state for the "Insert" tail-composition affordance (Phase 2.2a):
+    /// the picked enzyme, an overhang buffer (Type IIs), a filler-bases buffer,
+    /// and the last compose error. Never committed — drives the editor only.
+    pub(super) insert: InsertState,
+}
+
+/// Editor-transient state for the tail-composition insert tools (Phase 2.2a).
+#[derive(Default)]
+pub(super) struct InsertState {
+    enzyme: String,
+    overhang: String,
+    bases: String,
+    error: Option<String>,
 }
 
 impl PrimerDraft {
@@ -66,6 +89,7 @@ impl PrimerDraft {
             confirm_delete: false,
             qc_cache: None,
             anneal_tm: None,
+            insert: InsertState::default(),
         }
     }
 
@@ -88,6 +112,7 @@ impl PrimerDraft {
             confirm_delete: false,
             qc_cache: None,
             anneal_tm: None,
+            insert: InsertState::default(),
         }
     }
 
@@ -315,6 +340,73 @@ fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCom
     edit
 }
 
+/// The "Insert" tail-composition affordance (Phase 2.2a). Prepends a restriction
+/// site (`restriction_tail` via the bio seam) or filler bases to the draft oligo
+/// — a **staged** string mutation, so the QC readout / site list update live and
+/// commit still rides the existing `UpdatePrimer`. The tail leaves the binding
+/// footprint untouched (it's 5'), so `decompose_primer` treats it as tail.
+fn insert_tools(ui: &mut egui::Ui, d: &mut PrimerDraft) {
+    let salt = d.id.map_or(0, |id| id.0.wrapping_add(1));
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Insert");
+        let selected = if d.insert.enzyme.is_empty() {
+            "enzyme…".to_string()
+        } else {
+            d.insert.enzyme.clone()
+        };
+        egui::ComboBox::from_id_salt(("primer_insert_enzyme", salt))
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for spec in enzyme_catalog() {
+                    ui.selectable_value(&mut d.insert.enzyme, spec.name.clone(), &spec.name);
+                }
+            });
+        let spec = enzyme_catalog().iter().find(|s| s.name == d.insert.enzyme);
+        let overhang_len = spec.filter(|s| s.type_iis).and_then(|s| s.overhang_len);
+        if let Some(n) = overhang_len {
+            ui.add(
+                egui::TextEdit::singleline(&mut d.insert.overhang)
+                    .desired_width(64.0)
+                    .hint_text(format!("{n} nt")),
+            );
+        }
+        if ui
+            .add_enabled(!d.insert.enzyme.is_empty(), egui::Button::new("Add site"))
+            .clicked()
+        {
+            let overhang = overhang_len.map(|_| d.insert.overhang.clone());
+            match seqforge_bio::restriction_tail(&d.insert.enzyme, overhang.as_deref(), None) {
+                Ok(tail) => {
+                    d.sequence.insert_str(0, &tail);
+                    d.insert.overhang.clear();
+                    d.insert.error = None;
+                }
+                Err(e) => d.insert.error = Some(e.to_string()),
+            }
+        }
+        // Filler bases (validated at commit by `parse_oligo`).
+        ui.add(
+            egui::TextEdit::singleline(&mut d.insert.bases)
+                .desired_width(72.0)
+                .hint_text("5′ bases"),
+        );
+        if ui
+            .add_enabled(
+                !d.insert.bases.trim().is_empty(),
+                egui::Button::new("Prepend"),
+            )
+            .clicked()
+        {
+            let bases = d.insert.bases.trim().to_ascii_uppercase();
+            d.sequence.insert_str(0, &bases);
+            d.insert.bases.clear();
+        }
+    });
+    if let Some(err) = &d.insert.error {
+        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x60, 0x60), err);
+    }
+}
+
 /// The inline field editor for a primer draft (create or edit — decision 15).
 /// Mutates the pane-local draft; returns `Some(Commit)` on Save/Enter (draft
 /// valid), `Some(Cancel)` on Cancel/Escape, `Some(Delete)` when an armed delete
@@ -387,6 +479,9 @@ fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft) -> Option<EditOutcome> 
                     ui.end_row();
                 }
             });
+
+        ui.add_space(2.0);
+        insert_tools(ui, d);
 
         // Live QC readout off the draft oligo (Phase 0.5 thermo). The evaluation
         // layer is total + self-describing (decision 12): Tm is a `Result` whose

@@ -613,6 +613,32 @@ pub(super) fn apply_rescan_primer(
     Ok(Some(ViewerResponse::Edited { len, changed: true }))
 }
 
+/// Compose a restriction site onto a primer's 5' tail (Phase 2.2a): build the
+/// tail via `seqforge_bio::restriction_tail` and prepend it to the authored
+/// oligo. The binding footprint is unchanged (the added bases are a 5' tail, so
+/// `decompose_primer`/QC/off-target re-scan all treat them as such). Builder
+/// failures (unknown enzyme, wrong overhang length, …) surface as `InvalidInput`.
+pub(super) fn apply_add_primer_site(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    id: PrimerId,
+    enzyme: String,
+    overhang: Option<String>,
+    flank: Option<String>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let tail = seqforge_bio::restriction_tail(&enzyme, overhang.as_deref(), flank.as_deref())
+        .map_err(|e| DispatchError::InvalidInput(e.to_string()))?;
+    let vid = resolve_target(state, view)?;
+    let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        let p = ann
+            .primer_mut(id)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {id}")))?;
+        p.sequence = format!("{tail}{}", p.sequence);
+        Ok(buf.text.len())
+    })?;
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
 pub(super) fn apply_remove_primer(
     state: &mut AppState,
     view: Option<ViewId>,
@@ -1392,6 +1418,49 @@ mod tests {
             first_primer(&mut s, |p| p.binding.clone()),
             None,
             "failed rescan leaves the primer untouched"
+        );
+    }
+
+    #[test]
+    fn add_primer_site_prepends_tail_keeps_binding_and_is_undoable() {
+        let mut s = state_with(b"ATGCGTACCATGCGTAC");
+        let vid = s.workspace.active_view().unwrap().id;
+        let id = add_primer(&mut s, Some("p"), "GCGTAC", Some(2), Some(8), "+");
+        // BsaI (Type IIs) with a 4-nt overhang, empty flank for a deterministic tail.
+        apply_add_primer_site(
+            &mut s,
+            None,
+            id,
+            "BsaI".into(),
+            Some("AATG".into()),
+            Some("".into()),
+        )
+        .unwrap();
+        let (seq, binding) = first_primer(&mut s, |p| (p.sequence.clone(), p.binding.clone()));
+        assert_eq!(seq, "GGTCTCAAATGGCGTAC", "tail prepended to the oligo");
+        assert_eq!(
+            binding,
+            Some(2..8),
+            "binding footprint unchanged (tail is 5')"
+        );
+        s.workspace.undo(vid).unwrap();
+        assert_eq!(first_primer(&mut s, |p| p.sequence.clone()), "GCGTAC");
+    }
+
+    #[test]
+    fn add_primer_site_surfaces_builder_errors() {
+        let mut s = state_with(b"ATGCATGC");
+        let id = add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
+        // Wrong overhang length for BsaI (expects 4).
+        assert!(matches!(
+            apply_add_primer_site(&mut s, None, id, "BsaI".into(), Some("AA".into()), None)
+                .unwrap_err(),
+            DispatchError::InvalidInput(_)
+        ));
+        assert_eq!(
+            first_primer(&mut s, |p| p.sequence.clone()),
+            "ATGC",
+            "failed compose leaves the oligo untouched"
         );
     }
 

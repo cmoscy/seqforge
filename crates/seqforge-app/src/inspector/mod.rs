@@ -307,6 +307,7 @@ impl InspectorState {
             confirm_delete: arm_delete,
             qc_cache: None,
             anneal_tm: None,
+            insert: Default::default(),
         });
     }
 

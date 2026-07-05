@@ -32,6 +32,7 @@ pub use anneal::{
     AnnealSettings, AttachmentState, PrimerAttachment, PrimerBinding, classify_attachment,
     find_primer_binding_sites,
 };
+pub use design::{DesignError, EnzymeSpec, enzyme_catalog, enzyme_cuts, restriction_tail};
 pub use evaluate::{
     PrimerQc, PrimerQcPlusAnneal, anneal_tm, primer_infos, primer_qc, primer_qc_with_anneal,
 };

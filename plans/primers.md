@@ -693,12 +693,29 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       "keep" ambiguity → a GUI **Attached ⇄ Floating** toggle + CLI `--detach`.
       Auto-detach on template edits (`shift_primers`, decision 4) still owns the
       *implicit* path; this adds the *explicit* one. See decision 16.
-- [ ] 2.2 (Deferred within v0.2) Constructive generation: random oligos, barcodes
-      (min Hamming), restriction-site tails (reuse `seqforge-restriction`).
-- [~] 2.3 CLI: `seqforge add-primer/update-primer/remove-primer …` (`--name`
-      optional, shares `suggest_primer_name()` — decision 9) landed with 2.1 (the
-      `ViewerRequest` verbs auto-flatten onto the CLI). Remaining: `seqforge oligo
-      random …` (rides Phase 2.2).
+- [x] 2.2a **Restriction-site tail composition** (the SnapGene "insert enzyme
+      site" model). Deterministic **prepend** to `Primer.sequence` (binding
+      unchanged → the added bases flow through the existing tail-aware derivation:
+      `decompose_primer` tail, off-target re-scan, QC hairpin/dimer, lifted-tail
+      render — no new modeling). `seqforge-bio/src/primer/design.rs`:
+      `restriction_tail(enzyme, overhang?, flank?)` (Type II = flank+recognition;
+      Type IIs = flank+recognition+spacer+user-overhang, length-checked;
+      orientation automatic), `enzyme_catalog()` + `EnzymeSpec` projection (the
+      app can't link `seqforge-restriction`), `enzyme_cuts()`, `DesignError`.
+      GUI: staged **Insert ▸ enzyme site / bases** in `inspector/primer.rs`
+      (prepend to the draft, commit via existing `UpdatePrimer`). CLI/agent:
+      `AddPrimerSite` verb → `apply_add_primer_site` (`seqforge add-primer-site
+      --id 3 --enzyme BsaI --overhang AATG`), undoable.
+- [~] 2.2b (Deferred → **generative package**) Random oligos, barcode **sets**
+      (distance + colour balance), Golden Gate overhang **sets** (fidelity). The
+      dividing line is deterministic composition (2.2a, shipped) vs stochastic /
+      rule-driven production. Random oligo moved here (not a near-term one-off): it
+      shares the package's RNG + constraints + generate-and-filter infra. **No RNG
+      in the workspace yet** — the RNG decision (hand-rolled PRNG vs `rand`) rides
+      with this package.
+- [~] 2.3 CLI: `seqforge add-primer/update-primer/remove-primer/rescan-primer/
+      add-primer-site …` all landed (auto-flatten). Remaining: `seqforge oligo
+      random …` (rides the 2.2b generative package).
 
 ### Phase 3 — Cloning convergence (Tier 3 territory)
 - [ ] 3.1 PCR product simulation; primer-pair / amplicon logic; **hetero-dimer**
