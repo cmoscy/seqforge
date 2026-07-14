@@ -1,8 +1,11 @@
 //! The Cut-sites tab — a query **header** (the re-homed ⌘E enzyme verb) over a
 //! grouped enzyme→sites **noun** list (Phase 1.5b / decision 15). Read-only: it
-//! reuses the existing `SubmitEnzymes`/`AddEnzymes`/`RemoveEnzyme`/`RevealRange`
-//! commands and touches only the enzyme-related `InspectorState` fields, so it
+//! reuses the `SubmitEnzymes`/`AddEnzymes`/`RemoveEnzyme` commands + emits
+//! `RevealCutSite` (single-site object selection, map↔panel sync) and touches
+//! only the enzyme-related `InspectorState` fields, so it
 //! extracts cleanly as a split `impl` block.
+
+use seqforge_core::CutSiteKey;
 
 use super::InspectorState;
 use super::row::remove_button;
@@ -93,17 +96,36 @@ impl InspectorState {
             ));
         });
 
+        // The selected cut site (map↔panel sync) — read before the mutable
+        // `expanded` borrow. A selected multi-site enzyme reveals its sub-rows
+        // (so the specific site shows) without fighting the manual expand toggle.
+        let sel_cut = match &self.selected {
+            Some(super::SelectedNoun::CutSite(k)) => Some(k.clone()),
+            _ => None,
+        };
+        let owns_selected = |r: &crate::overlay::EnzymeRow| {
+            sel_cut.as_ref().is_some_and(|k| {
+                k.enzyme == r.name
+                    && r.sites
+                        .iter()
+                        .any(|s| s.recognition_start == k.recognition_start)
+            })
+        };
         let expanded = &mut self.enzyme_expanded;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for r in &rows {
                 let n = r.sites.len();
                 let is_expanded = expanded.contains(&r.name);
+                let row_selected = owns_selected(r);
+                // Show sub-rows when manually expanded OR when this enzyme owns
+                // the selected site (so the chosen site is always visible).
+                let show_sites = n > 1 && (is_expanded || row_selected);
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
                     // ▸/▾ for multi-site (expandable); spacer otherwise.
                     let prefix = match n {
                         0 | 1 => "   ",
-                        _ if is_expanded => "▾ ",
+                        _ if show_sites => "▾ ",
                         _ => "▸ ",
                     };
                     let name = egui::RichText::new(format!("{prefix}{}", r.name)).monospace();
@@ -111,17 +133,24 @@ impl InspectorState {
                     let hover = match n {
                         0 => "No sites",
                         1 => "Jump to site",
-                        _ if is_expanded => "Collapse",
+                        _ if show_sites => "Collapse",
                         _ => "Show sites",
                     };
+                    // Highlight the row when it owns the selected site (single-site)
+                    // or is expanded (multi-site affordance).
+                    let highlighted = row_selected || (show_sites && n > 1);
                     let resp = ui
-                        .add_enabled(n > 0, egui::SelectableLabel::new(is_expanded, name))
+                        .add_enabled(n > 0, egui::SelectableLabel::new(highlighted, name))
                         .on_hover_text(hover);
                     if resp.clicked() {
                         if n == 1 {
                             let s = &r.sites[0];
                             pending.push((
-                                AppCommand::RevealRange {
+                                AppCommand::RevealCutSite {
+                                    key: CutSiteKey {
+                                        enzyme: r.name.clone(),
+                                        recognition_start: s.recognition_start,
+                                    },
                                     start: s.recognition_start,
                                     end: s.recognition_end,
                                 },
@@ -156,17 +185,27 @@ impl InspectorState {
                         }
                     });
                 });
-                // Per-site sub-rows for an expanded multi-site enzyme.
-                if n > 1 && is_expanded {
+                // Per-site sub-rows for an expanded / selected multi-site enzyme.
+                if show_sites {
                     for s in &r.sites {
+                        let site_selected = sel_cut.as_ref().is_some_and(|k| {
+                            k.enzyme == r.name && k.recognition_start == s.recognition_start
+                        });
                         ui.horizontal(|ui| {
                             ui.add_space(28.0);
                             if ui
-                                .small_button(format!("@ {}", s.recognition_start + 1))
+                                .add(egui::SelectableLabel::new(
+                                    site_selected,
+                                    format!("@ {}", s.recognition_start + 1),
+                                ))
                                 .clicked()
                             {
                                 pending.push((
-                                    AppCommand::RevealRange {
+                                    AppCommand::RevealCutSite {
+                                        key: CutSiteKey {
+                                            enzyme: r.name.clone(),
+                                            recognition_start: s.recognition_start,
+                                        },
                                         start: s.recognition_start,
                                         end: s.recognition_end,
                                     },

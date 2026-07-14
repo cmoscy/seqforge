@@ -258,7 +258,8 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
   `Detached` **not drawn on the sequence** (no binding) — listed in the panel as a
   floating oligo. Additional-sites → off-target count badge.
 - **Selection = highlight the oligo, not the template** (planned; see item 1.5e).
-  A primer is a single-strand *object*, so selecting it (`selected_primer`)
+  A primer is a single-strand *object*, so selecting it (now the
+  `ViewSelection::Primer(id)` variant — ROADMAP decision 17; was `selected_primer`)
   highlights **its own rendered bases on the track** — annealed body + lifted 5'
   tail, and the future overhang/internal-bulge/loop — **not** the template row at
   the footprint. Bases with no template column (tail/loop) *can only* be shown on

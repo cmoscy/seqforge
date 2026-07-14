@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use egui::{Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, Buffer, CutSite, Selection, Strand, View, ViewId, ViewerRequest,
-    mutations::apply_splice,
+    Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, Selection, Strand, View, ViewId,
+    ViewSelection, ViewerRequest, mutations::apply_splice,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -321,7 +321,7 @@ fn handle_keyboard(
     cmds: &mut Vec<PendingCommand>,
 ) {
     let vid = view.id;
-    let sel = view.selection;
+    let sel = view.selection.text_range();
     let range = sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
     let cursor = match sel {
         Some(s) if s.is_cursor() => Some(s.focus),
@@ -344,46 +344,33 @@ fn handle_keyboard(
         return;
     }
 
-    // ── Delete on a selected feature → delete the FEATURE, not the sequence ──
-    // A feature object-selection (`selected_feature` set; its range *is* the
-    // selection, per the object-vs-range invariant in `apply_set_selection`)
-    // reinterprets Delete/Backspace as feature deletion, routed to the Inspector's
-    // two-step confirm. Only when nothing is staged, so typing-then-backspace
-    // still edits the sequence. `consume_key` stops the later staging loop from
-    // also counting it. (SnapGene/Benchling convention.)
+    // ── Delete on a selected object → delete the OBJECT, not the sequence ──
+    // A feature/primer object-selection reinterprets Delete/Backspace as *object*
+    // deletion, routed to the Inspector's two-step confirm. `delete_intent`
+    // centralizes the dispatch (a new selectable noun is compiler-forced into this
+    // match). Only when nothing is staged, so typing-then-backspace still edits the
+    // sequence. `consume_key` stops the later staging loop from also counting it.
+    // (SnapGene/Benchling convention.) A primer is a reagent (not sequence), so
+    // Delete never edits bases there.
     if pending.is_none() {
-        if let Some(fid) = view.selected_feature {
+        let obj_delete = match view.selection.delete_intent() {
+            DeleteIntent::Feature(id) => Some(AppCommand::EditFeatureInInspector {
+                id,
+                arm_delete: true,
+            }),
+            DeleteIntent::Primer(id) => Some(AppCommand::EditPrimerInInspector {
+                id,
+                arm_delete: true,
+            }),
+            DeleteIntent::Sequence => None,
+        };
+        if let Some(cmd) = obj_delete {
             let del = ui.input_mut(|i| {
                 i.consume_key(Modifiers::NONE, Key::Delete)
                     || i.consume_key(Modifiers::NONE, Key::Backspace)
             });
             if del {
-                post(
-                    cmds,
-                    AppCommand::EditFeatureInInspector {
-                        id: fid,
-                        arm_delete: true,
-                    },
-                );
-                return;
-            }
-        }
-        // Delete on a selected primer *object* → route to the Inspector's staged
-        // primer delete (Phase 2.1), the sibling of the feature path. A primer is
-        // a reagent (not sequence), so Delete never edits bases here.
-        if let Some(pid) = view.selected_primer {
-            let del = ui.input_mut(|i| {
-                i.consume_key(Modifiers::NONE, Key::Delete)
-                    || i.consume_key(Modifiers::NONE, Key::Backspace)
-            });
-            if del {
-                post(
-                    cmds,
-                    AppCommand::EditPrimerInInspector {
-                        id: pid,
-                        arm_delete: true,
-                    },
-                );
+                post(cmds, cmd);
                 return;
             }
         }
@@ -426,7 +413,7 @@ fn handle_keyboard(
                 Selection::cursor(new_focus)
             };
             *pending = None;
-            cmds.push((AppCommand::SetSelection(Some(new_sel)), None));
+            cmds.push((AppCommand::Select(ViewSelection::Text(new_sel)), None));
         }
         return;
     }
@@ -484,7 +471,7 @@ fn handle_keyboard(
                     view: Some(vid),
                 },
             );
-        } else if view.selected_primer.is_some() {
+        } else if view.selection.selected_primer().is_some() {
             // A selected primer carries no template range post-1.5e; ⌘C copies the
             // authored oligo (5'→3', tail incl.). `apply_copy` keys off
             // `selected_primer` when the range is a bare cursor, so a zero range
@@ -964,9 +951,12 @@ impl SequenceView {
         let theme = &cfg.theme;
         let show_orfs = self.translation.show_orfs;
         let primer_display = self.primer_display;
-        let selection = view.selection;
-        let selected_feature = view.selected_feature;
-        let selected_primer = view.selected_primer;
+        // Derive the pieces the tracks read from the one `ViewSelection`. A
+        // `CutSite` object surfaces its recognition span via `text_range`, so the
+        // sequence track washes it just like a feature's span (map-side highlight).
+        let selection = view.selection.text_range();
+        let selected_feature = view.selection.selected_feature();
+        let selected_primer = view.selection.selected_primer();
 
         // Per-primer decomposition against the render sequence — annealed bases,
         // mismatches, and the 5' tail the Primer tracks draw (Phase 1.1). Aligned
@@ -1062,13 +1052,13 @@ impl SequenceView {
 
             let shift_held = ui.input(|i| i.modifiers.shift);
 
-            let push_sel = |cmds: &mut Vec<PendingCommand>, sel: Option<Selection>| {
-                cmds.push((AppCommand::SetSelection(sel), None));
+            // One selection setter — the whole intent (range / object) in one
+            // atomic `Select(ViewSelection)` (mutual exclusion is structural now).
+            let push_select = |cmds: &mut Vec<PendingCommand>, sel: ViewSelection| {
+                cmds.push((AppCommand::Select(sel), None));
             };
-            let push_feat = |cmds: &mut Vec<PendingCommand>,
-                             feat: Option<seqforge_core::FeatureId>| {
-                cmds.push((AppCommand::SelectFeature(feat), None));
-            };
+            // The current editable range anchor (object selections surface theirs).
+            let cur_range = view.selection.text_range();
 
             if response.clicked() {
                 if let Some(pos) = ptr {
@@ -1079,7 +1069,7 @@ impl SequenceView {
                         let over_codon = find_hit(&hits, pos, Hit::as_codon);
                         let new_sel = match (over_codon, self.translation_anchor.clone()) {
                             (Some(codon), Some(ac)) => Some(codon_extend(&ac, &codon)),
-                            (Some(codon), None) => Some(match view.selection {
+                            (Some(codon), None) => Some(match cur_range {
                                 Some(sel) => {
                                     let focus = if codon.start >= sel.anchor {
                                         codon.end
@@ -1093,7 +1083,7 @@ impl SequenceView {
                                 }
                                 None => Selection::range(codon.start, codon.end),
                             }),
-                            (None, _) => ptr_seq.map(|p| match view.selection {
+                            (None, _) => ptr_seq.map(|p| match cur_range {
                                 Some(sel) => Selection {
                                     anchor: sel.anchor,
                                     focus: p,
@@ -1102,7 +1092,7 @@ impl SequenceView {
                             }),
                         };
                         if let Some(sel) = new_sel {
-                            push_sel(cmds, Some(sel));
+                            push_select(cmds, ViewSelection::Text(sel));
                         }
                     } else {
                         // Any fresh (non-extending) click clears the codon anchor;
@@ -1113,48 +1103,57 @@ impl SequenceView {
                             .filter(|p| p.binding.is_some())
                         {
                             // Clicking a primer selects the oligo *object* (Phase
-                            // 1.5e), highlighting its own drawn bases on the track —
-                            // not a `view.selection` on the template (wrong strand
-                            // for a reverse primer; a 5' tail has no template
-                            // column). Clear any prior text selection, then set
-                            // `selected_primer` (which also drives the Inspector
-                            // highlight by id — map↔panel sync).
-                            push_sel(cmds, None);
-                            cmds.push((AppCommand::SelectPrimer(Some(primer.id)), None));
+                            // 1.5e): its own drawn bases highlight on the track, not
+                            // a template range (wrong strand for a reverse primer; a
+                            // 5' tail has no template column). Drives the Inspector
+                            // highlight by id — map↔panel sync.
+                            push_select(cmds, ViewSelection::Primer(primer.id));
                         } else if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
                                 .by_position(feat_idx)
                                 .expect("feat_idx from this frame's layout");
-                            push_sel(
+                            push_select(
                                 cmds,
-                                Some(Selection::range(feat.range.start, feat.range.end)),
+                                ViewSelection::Feature {
+                                    id: feat.id,
+                                    range: Selection::range(feat.range.start, feat.range.end),
+                                },
                             );
-                            push_feat(cmds, Some(feat.id));
                         } else if let Some(hit_idx) = find_hit(&hits, pos, Hit::as_search) {
                             let hit = &view.search_hits[hit_idx];
-                            push_sel(cmds, Some(Selection::range(hit.start, hit.end)));
-                            push_feat(cmds, None);
-                        } else if let Some(site_idx) = find_hit(&hits, pos, Hit::as_cut_site) {
-                            let site = &cut_sites[site_idx];
-                            push_sel(
+                            push_select(
                                 cmds,
-                                Some(Selection::range(
-                                    site.recognition_start,
-                                    site.recognition_end,
-                                )),
+                                ViewSelection::Text(Selection::range(hit.start, hit.end)),
                             );
-                            push_feat(cmds, None);
+                        } else if let Some(site_idx) = find_hit(&hits, pos, Hit::as_cut_site) {
+                            // Clicking a cut site selects the site *object* (its
+                            // recognition span as the range), so the Cut-sites tab
+                            // reflects it (map↔panel sync, single-site granularity).
+                            let site = &cut_sites[site_idx];
+                            push_select(
+                                cmds,
+                                ViewSelection::CutSite {
+                                    key: CutSiteKey {
+                                        enzyme: site.enzyme.clone(),
+                                        recognition_start: site.recognition_start,
+                                    },
+                                    range: Selection::range(
+                                        site.recognition_start,
+                                        site.recognition_end,
+                                    ),
+                                },
+                            );
                         } else if let Some(codon) = find_hit(&hits, pos, Hit::as_codon) {
                             // Click a residue → select its codon and anchor to it.
                             self.translation_anchor = Some(codon.clone());
-                            push_sel(cmds, Some(Selection::range(codon.start, codon.end)));
-                            push_feat(cmds, None);
+                            push_select(
+                                cmds,
+                                ViewSelection::Text(Selection::range(codon.start, codon.end)),
+                            );
                         } else if let Some(seq_pos) = ptr_seq {
-                            push_sel(cmds, Some(Selection::cursor(seq_pos)));
-                            push_feat(cmds, None);
+                            push_select(cmds, ViewSelection::Text(Selection::cursor(seq_pos)));
                         } else {
-                            push_sel(cmds, None);
-                            push_feat(cmds, None);
+                            push_select(cmds, ViewSelection::None);
                         }
                     }
                 }
@@ -1296,13 +1295,17 @@ impl SequenceView {
                 let on_site = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_cut_site).is_some());
                 if !on_annot && !on_hit && !on_site {
                     self.drag_start = ptr_seq;
-                    push_feat(cmds, None);
-                    push_sel(cmds, ptr_seq.map(Selection::cursor));
+                    push_select(
+                        cmds,
+                        ptr_seq.map_or(ViewSelection::None, |p| {
+                            ViewSelection::Text(Selection::cursor(p))
+                        }),
+                    );
                 }
             }
             if response.dragged() {
                 if let (Some(anchor), Some(focus)) = (self.drag_start, ptr_seq) {
-                    push_sel(cmds, Some(Selection { anchor, focus }));
+                    push_select(cmds, ViewSelection::Text(Selection { anchor, focus }));
                 }
             }
             if response.drag_stopped() {

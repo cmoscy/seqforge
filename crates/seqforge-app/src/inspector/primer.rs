@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::sync::OnceLock;
 
 use seqforge_bio::EnzymeSpec;
-use seqforge_core::{PrimerId, PrimerInfo, PrimerState, Strand, ViewerRequest};
+use seqforge_core::{PrimerId, PrimerInfo, PrimerState, Strand, ViewSelection, ViewerRequest};
 
 use super::row::{
     DetailLine, EditOutcome, Row, binding_label, detail_frame, row_shell, strand_flag, strand_glyph,
@@ -617,7 +617,10 @@ impl InspectorState {
         // Attached-first, floating oligos last (list mirrors the map top→bottom).
         let mut primers = self.primers().to_vec();
         primers.sort_by_key(|p| p.binding.as_ref().map_or(usize::MAX, |b| b.start));
-        let selected = self.selected_primer;
+        let selected = match &self.selected {
+            Some(super::SelectedNoun::Primer(id)) => Some(*id),
+            _ => None,
+        };
         let editing = &mut self.editing_primer;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -686,9 +689,9 @@ impl InspectorState {
             oligo,
             binding,
         ));
-        // A create draft has no selected row; clear the panel primer selection so
-        // the editor renders at the top, not under a stale row.
-        pending.push((AppCommand::SelectPrimer(None), None));
+        // A create draft has no selected row; clear the panel selection so the
+        // editor renders at the top, not under a stale row.
+        pending.push((AppCommand::Select(ViewSelection::None), None));
     }
 }
 

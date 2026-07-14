@@ -19,6 +19,7 @@ pub struct Settings {
     pub editor: EditorSettings,
     pub minimap: MinimapSettings,
     pub layout: LayoutSettings,
+    pub inspector: InspectorSettings,
     pub terminal: TerminalSettings,
 }
 
@@ -30,6 +31,7 @@ impl Default for Settings {
             editor: EditorSettings::default(),
             minimap: MinimapSettings::default(),
             layout: LayoutSettings::default(),
+            inspector: InspectorSettings::default(),
             terminal: TerminalSettings::default(),
         }
     }
@@ -158,6 +160,25 @@ impl Default for LayoutSettings {
             terminal_fraction: 0.70,
             minimap_browser_fraction: 0.62,
             inspector_fraction: 0.22,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct InspectorSettings {
+    /// When `true` (default), selecting an object on the map switches the
+    /// Inspector's active tab to follow it (properties-panel convention). The
+    /// switch fires only when the selected *object changes*, so a manual tab
+    /// switch sticks until the next selection. `false` → highlight-only (the row
+    /// lights up on its tab, but the active tab never changes).
+    pub follow_selection: bool,
+}
+
+impl Default for InspectorSettings {
+    fn default() -> Self {
+        Self {
+            follow_selection: true,
         }
     }
 }

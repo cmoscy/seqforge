@@ -241,9 +241,9 @@ impl MiniMap {
                 version: buf.version,
                 seq_len: buf.len(),
                 is_circular: buf.is_circular(),
-                cursor_pos: view.selection.map(|s| s.anchor).unwrap_or(0),
-                selection: view.selection,
-                selected_feature: view.selected_feature,
+                cursor_pos: view.selection.text_range().map(|s| s.anchor).unwrap_or(0),
+                selection: view.selection.text_range(),
+                selected_feature: view.selection.selected_feature(),
                 display_name: crate::workspace::display_name(buf),
                 visible_range: view.visible_range,
             })

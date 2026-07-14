@@ -234,7 +234,7 @@ pub fn capture_file_state(workspace: &Workspace) -> HashMap<PathBuf, FileState> 
             continue;
         };
         out.entry(path).or_insert(FileState {
-            selection: view.selection,
+            selection: view.selection.text_range(),
             scroll_pos: view.scroll_pos,
         });
     }

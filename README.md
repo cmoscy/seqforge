@@ -52,7 +52,7 @@ Open the app, then use the file browser on the left to navigate to a `.gb` or `.
 
 The viewer shows the dual-strand sequence with ATGC colouring, a position ruler, and stacked annotation bars. Click an annotation to select its range; click and drag on the strand to select a custom range.
 
-The **Inspector** pane (**Features · Cut sites · Primers** tabs) lists annotations on the active sequence. Each row expands to a read-only detail view; edit gestures open an inline confirm/cancel editor. The **Restriction Sites** panel (`⌘E`) uses the same enzyme query grammar as the CLI. Primers render as a map overlay with thermo QC (Tm/GC/self-structure) in the Inspector.
+The **Inspector** pane (**Features · Cut sites · Primers** tabs) lists annotations on the active sequence. Each row expands to a read-only detail view; edit gestures open an inline confirm/cancel editor. The **Restriction Sites** panel (`⌘E`) uses the same enzyme query grammar as the CLI. Primers render as a map overlay with thermo QC (Tm/GC/self-structure) in the Inspector. Selecting a feature, primer, or cut site on the map highlights it in the Inspector and switches to its tab; set `inspector.follow_selection = false` in the config to keep the tab fixed (highlight-only).
 
 ### Terminal (embedded)
 

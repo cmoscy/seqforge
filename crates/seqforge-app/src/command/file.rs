@@ -66,7 +66,10 @@ pub(super) fn apply_open_file<B: BioOps>(
     // OR from a prior close+reopen), apply it before the view paints.
     if let Some(fs) = state.pending_file_state.remove(&path) {
         if let Some(view) = state.workspace.view_mut(view_id) {
-            view.selection = fs.selection;
+            view.selection = fs.selection.map_or(
+                seqforge_core::ViewSelection::None,
+                seqforge_core::ViewSelection::Text,
+            );
             view.scroll_pos = fs.scroll_pos;
         }
     }
@@ -133,7 +136,7 @@ pub(super) fn apply_close_view(
                     state.pending_file_state.insert(
                         path,
                         crate::persistence::FileState {
-                            selection: view.selection,
+                            selection: view.selection.text_range(),
                             scroll_pos: view.scroll_pos,
                         },
                     );

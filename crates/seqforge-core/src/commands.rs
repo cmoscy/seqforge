@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     Annotations, Buffer, CutSite, Document, FeatureId, Primer, PrimerId, SearchHit, Strand, View,
-    ViewId,
+    ViewId, ViewSelection,
 };
 
 // ── Selection model ───────────────────────────────────────────────────────────
@@ -752,9 +752,7 @@ pub fn dispatch<B: BioOps>(
             }
             let idx = position - 1;
             view.scroll_to = Some(idx);
-            view.selection = Some(Selection::cursor(idx));
-            view.selected_feature = None;
-            view.selected_primer = None;
+            view.selection = ViewSelection::Text(Selection::cursor(idx));
             Ok(ViewerResponse::Navigated { position })
         }
 
@@ -770,7 +768,7 @@ pub fn dispatch<B: BioOps>(
                 // clean state — consistent with `Open` / `Close`.
                 // Tier 2 #10.
                 view.search_hits.clear();
-                view.selection = None;
+                view.selection = ViewSelection::None;
                 return Ok(ViewerResponse::SearchResults {
                     count: 0,
                     hits: vec![],
@@ -781,7 +779,7 @@ pub fn dispatch<B: BioOps>(
             let count = hits.len();
             if let Some(first) = hits.first() {
                 view.scroll_to = Some(first.start);
-                view.selection = Some(Selection::range(first.start, first.end));
+                view.selection = ViewSelection::Text(Selection::range(first.start, first.end));
             }
             view.search_hits = hits.clone();
             Ok(ViewerResponse::SearchResults { count, hits })
@@ -1223,7 +1221,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view.scroll_to, Some(2));
-        assert!(matches!(view.selection, Some(sel) if sel.anchor == 2 && sel.is_cursor()));
+        assert!(
+            matches!(view.selection.text_range(), Some(sel) if sel.anchor == 2 && sel.is_cursor())
+        );
         assert!(matches!(resp, ViewerResponse::Navigated { position: 3 }));
     }
 
@@ -1610,7 +1610,7 @@ mod tests {
             strand: crate::Strand::Forward,
         });
         // Pre-populate a selection so we can verify clear-on-empty behavior.
-        view.selection = Some(Selection::range(0, 4));
+        view.selection = ViewSelection::Text(Selection::range(0, 4));
         let resp = dispatch(
             &mut view,
             &buf,

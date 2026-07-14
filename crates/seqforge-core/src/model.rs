@@ -401,19 +401,123 @@ impl ViewKind {
 /// `search_hits` / `cut_sites` / `active_enzymes` and the one-shot
 /// `scroll_to` are `#[serde(skip)]`: they're transient and don't survive
 /// process restart.
+/// A specific restriction cut site, keyed **structurally** (cut sites are derived
+/// and re-scanned each version, so they carry no persistent id — the enzyme
+/// analog of decision 16's derived primer sites). `(enzyme, recognition_start)`
+/// uniquely identifies a site: one enzyme has at most one recognition per start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutSiteKey {
+    pub enzyme: String,
+    pub recognition_start: usize,
+}
+
+/// The one selection on a [`View`] — a tagged union so the mutual exclusion
+/// ("at most one object selected; the range mirrors it") is **structural**, not
+/// maintained by convention across every click/command site (ROADMAP decision 12,
+/// extended from feature ids to selection state). Object variants carry their
+/// template range so [`ViewSelection::text_range`] is self-contained: a `View`
+/// can't reach the [`Annotations`] that own feature/primer geometry.
+///
+/// The payload is the reusable "selectable item" vocabulary a future assembly
+/// workbench / plugin surface consumes (decision 11); a `Fragment` variant + the
+/// multi-select cart are deferred to the cloning track (not built here).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ViewSelection {
+    /// Nothing selected.
+    #[default]
+    None,
+    /// A bare text selection — cursor or range. The editable selection.
+    Text(Selection),
+    /// A feature object; `range` == the feature's span (what copy/edit act on).
+    Feature { id: FeatureId, range: Selection },
+    /// A primer object. Object-only: a primer has no template range (a reverse
+    /// primer sits on the bottom strand; a 5' tail has no template column —
+    /// Phase 1.5e). The highlight lands on the oligo via the PrimerTrack.
+    Primer(PrimerId),
+    /// A restriction cut site; `range` == the recognition span.
+    CutSite { key: CutSiteKey, range: Selection },
+}
+
+impl ViewSelection {
+    /// The editable / render text range, if any. `Text`/`Feature`/`CutSite` carry
+    /// one; `Primer` (object-only) and `None` do not. This is what editing, copy,
+    /// and the sequence-row highlight read.
+    pub fn text_range(&self) -> Option<Selection> {
+        match self {
+            ViewSelection::Text(s)
+            | ViewSelection::Feature { range: s, .. }
+            | ViewSelection::CutSite { range: s, .. } => Some(*s),
+            ViewSelection::Primer(_) | ViewSelection::None => None,
+        }
+    }
+
+    /// The selected feature id, if a feature object is selected.
+    pub fn selected_feature(&self) -> Option<FeatureId> {
+        match self {
+            ViewSelection::Feature { id, .. } => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The selected primer id, if a primer object is selected.
+    pub fn selected_primer(&self) -> Option<PrimerId> {
+        match self {
+            ViewSelection::Primer(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The selected cut site key, if a cut site is selected.
+    pub fn selected_cut_site(&self) -> Option<&CutSiteKey> {
+        match self {
+            ViewSelection::CutSite { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+
+    /// True when nothing is selected.
+    pub fn is_none(&self) -> bool {
+        matches!(self, ViewSelection::None)
+    }
+
+    /// What a Delete/Backspace gesture means for this selection. Centralizes the
+    /// dispatch so callers `match` once (and the compiler forces every variant to
+    /// be handled when a new selectable noun is added). A feature/primer object
+    /// reinterprets Delete as *object* deletion; everything else (`Text` /
+    /// `CutSite` / `None`) falls through to the normal sequence-delete path (which
+    /// reads [`ViewSelection::text_range`]).
+    pub fn delete_intent(&self) -> DeleteIntent {
+        match self {
+            ViewSelection::Feature { id, .. } => DeleteIntent::Feature(*id),
+            ViewSelection::Primer(id) => DeleteIntent::Primer(*id),
+            ViewSelection::Text(_) | ViewSelection::CutSite { .. } | ViewSelection::None => {
+                DeleteIntent::Sequence
+            }
+        }
+    }
+}
+
+/// The meaning of a Delete/Backspace gesture over a [`ViewSelection`] — the
+/// return of [`ViewSelection::delete_intent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteIntent {
+    /// Delete the feature object (route to the Inspector's staged feature delete).
+    Feature(FeatureId),
+    /// Delete the primer object (route to the Inspector's staged primer delete).
+    Primer(PrimerId),
+    /// Not an object selection — the normal sequence/staging delete applies.
+    Sequence,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct View {
     pub id: ViewId,
     pub buffer_id: BufferId,
     pub kind: ViewKind,
-    pub selection: Option<Selection>,
-    /// The currently selected feature, by stable id (ROADMAP decision 12).
-    /// Was a positional `usize` — which dangled after any edit that shifted or
-    /// removed features. An id is resolved to a position fresh each frame.
-    pub selected_feature: Option<FeatureId>,
-    /// The currently selected primer, by stable id (ROADMAP decision 12/14).
-    /// Mirrors `selected_feature`; resolved to a position fresh each frame.
-    pub selected_primer: Option<PrimerId>,
+    /// The one selection (range or object), replacing the former three parallel
+    /// fields. Accessors ([`ViewSelection::text_range`] /
+    /// [`ViewSelection::selected_feature`] / …) derive the pieces consumers need.
+    pub selection: ViewSelection,
     /// Last persisted scroll offset, restored on tab switch / app restart.
     pub scroll_pos: Option<f32>,
     /// One-shot scroll request, consumed by the viewer each frame.
@@ -437,9 +541,7 @@ impl View {
             id,
             buffer_id,
             kind,
-            selection: None,
-            selected_feature: None,
-            selected_primer: None,
+            selection: ViewSelection::None,
             scroll_pos: None,
             scroll_to: None,
             search_hits: Vec::new(),
@@ -452,9 +554,7 @@ impl View {
     /// Reset selection state. Used when reloading the same view onto a
     /// different buffer, or when explicit user action (e.g. Close) demands.
     pub fn clear_selection(&mut self) {
-        self.selection = None;
-        self.selected_feature = None;
-        self.selected_primer = None;
+        self.selection = ViewSelection::None;
     }
 
     /// Drop all derived results. Called when the underlying buffer changes
@@ -492,11 +592,66 @@ mod tests {
     #[test]
     fn view_clear_selection_drops_feature_too() {
         let mut v = View::new(ViewId(1), BufferId(1), ViewKind::TextView);
-        v.selection = Some(Selection::range(0, 4));
-        v.selected_feature = Some(FeatureId(1));
+        v.selection = ViewSelection::Feature {
+            id: FeatureId(1),
+            range: Selection::range(0, 4),
+        };
         v.clear_selection();
         assert!(v.selection.is_none());
-        assert!(v.selected_feature.is_none());
+        assert!(v.selection.selected_feature().is_none());
+    }
+
+    #[test]
+    fn view_selection_is_structurally_exclusive() {
+        // Setting an object selection *replaces* the whole enum — a feature and a
+        // primer can't both be selected (the invariant the old parallel fields
+        // maintained by convention is now unrepresentable).
+        let feat = ViewSelection::Feature {
+            id: FeatureId(3),
+            range: Selection::range(1, 5),
+        };
+        assert_eq!(feat.selected_feature(), Some(FeatureId(3)));
+        assert_eq!(feat.selected_primer(), None);
+        assert_eq!(feat.text_range(), Some(Selection::range(1, 5)));
+
+        // A primer selection is object-only: no template range.
+        let prim = ViewSelection::Primer(PrimerId(2));
+        assert_eq!(prim.selected_primer(), Some(PrimerId(2)));
+        assert_eq!(prim.selected_feature(), None);
+        assert_eq!(prim.text_range(), None);
+
+        // A cut site derives its recognition range.
+        let cut = ViewSelection::CutSite {
+            key: CutSiteKey {
+                enzyme: "EcoRI".into(),
+                recognition_start: 10,
+            },
+            range: Selection::range(10, 16),
+        };
+        assert_eq!(
+            cut.selected_cut_site().map(|k| k.recognition_start),
+            Some(10)
+        );
+        assert_eq!(cut.text_range(), Some(Selection::range(10, 16)));
+    }
+
+    #[test]
+    fn delete_intent_dispatches_by_kind() {
+        let feat = ViewSelection::Feature {
+            id: FeatureId(5),
+            range: Selection::range(1, 5),
+        };
+        assert_eq!(feat.delete_intent(), DeleteIntent::Feature(FeatureId(5)));
+        assert_eq!(
+            ViewSelection::Primer(PrimerId(2)).delete_intent(),
+            DeleteIntent::Primer(PrimerId(2))
+        );
+        // Text / cut-site / none all fall through to the sequence-delete path.
+        assert_eq!(
+            ViewSelection::Text(Selection::range(0, 3)).delete_intent(),
+            DeleteIntent::Sequence
+        );
+        assert_eq!(ViewSelection::None.delete_intent(), DeleteIntent::Sequence);
     }
 
     #[test]
@@ -631,9 +786,9 @@ mod tests {
     #[test]
     fn view_clear_selection_drops_primer_too() {
         let mut v = View::new(ViewId(1), BufferId(1), ViewKind::TextView);
-        v.selected_primer = Some(PrimerId(1));
+        v.selection = ViewSelection::Primer(PrimerId(1));
         v.clear_selection();
-        assert!(v.selected_primer.is_none());
+        assert!(v.selection.selected_primer().is_none());
     }
 
     #[test]

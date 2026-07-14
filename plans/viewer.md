@@ -654,27 +654,53 @@ Shipped after the MVP; recorded here so the command surface is documented.
 - **`CutSite.recognition: String`** (IUPAC pattern, display-only) populated by `site_to_cutsite`.
 - **Overlay UI** (`⌘E`, persistent; Esc closes, re-open rehydrated): scrollable list of displayed enzymes, ＋Add, per-row ✕ remove, click name → reveal (single) / expand sites (multi), per-site jump via `AppCommand::RevealRange` (selection + scroll). Isoschizomers stay as distinct rows (decision 4 in [`../ROADMAP.md`](../ROADMAP.md)).
 
-## Post-v0.1: cut-site hover + label decluttering *(Phase 16 GUI-walk findings)*
+## Post-v0.1: cut-site hover + label decluttering + selection *(Phase 16 GUI-walk findings)*
 
-Two cut-site presentation refinements surfaced while walking the editor. Both are
-**render/interaction only** — no change to `cut_sites`/`active_enzymes` (decision 4
-holds: enzymes stay distinct entities, individually hover/click-able; this only
-changes how their labels are *drawn* and how hover *feedback* reads).
+Cut-site presentation + interaction refinements surfaced while walking the editor.
+The first two are **render only** — no change to `cut_sites`/`active_enzymes`
+(decision 4 holds: enzymes stay distinct entities, individually hover/click-able;
+only how labels are *drawn* and how hover *feedback* reads changes). The third
+gives cut-sites the bidirectional selection primers/features already had.
 
-- [ ] **Hover highlights the recognition site.** Hovering an enzyme label (already
+- [x] **Hover highlights the recognition site.** Hovering an enzyme label (already
   the `hovered_cut_site` trigger for the staple reveal) also washes its
   `recognition_start..recognition_end` on **both** strands in the neutral
   `ui.hover_wash` grey — the enzyme half of the shared `BlockCtx::hover_footprint`
   path (the primer half is single-stranded; see [`primers.md`](primers.md)
   "Rendering"). Directly disambiguates a crowded MCS: point at one name, its exact
   site lights up. Ephemeral, paint-time only.
-- [ ] **Co-located labels group under one leader.** Today `build_block_layouts`
-  greedy-stacks *each* cut site independently, so isoschizomers sharing a `cut_pos`
-  (e.g. AvaI/XmaI/BsoBI/TspMI) each take a row **and** redraw a tick at the same x —
-  a pile of overlapping ticks with no "one site" signal. Fix: bucket co-located
-  sites into a **group** (keyed on `cut_pos`), stack the *groups*, and render each
-  group's names as a tight vertical stack over a **single** leader tick. Per-name
-  hit rects preserved (each enzyme stays individually addressable). Matches the
-  SnapGene idiom. *(Angled leader-line routing for near-but-distinct labels is a
-  larger layout task — deferred.)*
+- [x] **Co-located labels group under one leader.** `build_block_layouts` buckets
+  cut sites sharing a `cut_pos` (e.g. AvaI/XmaI/BsoBI/TspMI) into a **`CutGroup`**,
+  stacks the *groups*, and renders each group's names as a tight vertical stack
+  over a **single** leader tick (was: each site its own row + a redundant tick).
+  Per-name hit rects preserved (each enzyme stays individually addressable).
+  Matches the SnapGene idiom. *(Angled leader-line routing for near-but-distinct
+  labels is a larger layout task — deferred.)*
+- [x] **Bidirectional cut-site selection** *(ROADMAP decision 17).* Cut-sites join
+  the `ViewSelection` model as the `CutSite{key, range}` variant, keyed by
+  `CutSiteKey{enzyme, recognition_start}` (id-less, position-keyed — the enzyme
+  analog of decision 16's derived sites). A **map** cut-site click and an
+  **Inspector** Cut-sites row/site click both set the same object selection
+  (`RevealCutSite` from the panel); the tab highlights + auto-reveals the owning
+  enzyme's site, and the map washes the recognition span (via `text_range`). Same
+  map↔panel parity, at **single-site** granularity, that primers/features have.
+- [x] **Selection-model follow-ups** *(decision 17, same pre-v0.2 pass).*
+  - **Geometry-edit staleness guard:** `apply_update_feature` re-syncs
+    `view.selection` from the *live* annotations when the edited feature is the
+    selection — `edit_annotations` doesn't reset selection (unlike text edits), so
+    the cached `Feature{range}` would otherwise lag the new span for the sequence
+    wash / copy.
+  - **Inspector selection collapse:** the three `selected_*` fields → one
+    `selected: Option<SelectedNoun>` (mutually-exclusive projections of the one
+    `ViewSelection`); each tab derives its highlight.
+  - **Follow-selection:** selecting an object switches the Inspector's active tab
+    to follow it (`SelectedNoun::inspector_tab`), behind config
+    `inspector.follow_selection` (default `true`; `false` = highlight-only). Fires
+    only when the selected *object changes* (compare-on-change in `refresh`), so a
+    manual tab switch sticks until the next selection — no whiplash. Not
+    gesture-source-plumbed; Inspector-row clicks are within-tab no-ops and edits
+    reset to `Text` (no jump), so it reads as "follow on map click" in practice.
+  - **`delete_intent()`:** `ViewSelection::delete_intent() -> DeleteIntent`
+    centralizes the Delete-on-object dispatch; the viewer handler `match`es once
+    (new nouns are compiler-forced into it).
 

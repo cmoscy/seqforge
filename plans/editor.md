@@ -778,7 +778,7 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
 ### Phase 16 — v0.2 verification + release *(½ day)*
 
 - [ ] Manual walk: open pUC19, type bases, delete a region, RC a selection, add a feature, undo through everything, save, reload, diff against expected.
-  - Walk findings addressed: translation-lane selection had no visual feedback → **AA-track selection highlight + frame-alignment cue** (see [14e polish](#14e-polish--presentation-follow-ups) above).
+  - Walk findings addressed: translation-lane selection had no visual feedback → **AA-track selection highlight + frame-alignment cue** (see [14e polish](#14e-polish--presentation-follow-ups) above); primer/enzyme hover feedback + enzyme label grouping (see [`viewer.md`](viewer.md) Post-v0.1); **selection-model consolidation** — `View`'s three parallel selection fields folded into one `ViewSelection` sum type (mutual exclusion structural; cut-site map↔panel parity gained), landed **pre-tag** so `v0.2.0` freezes the consolidated shape (ROADMAP decision 17). Follow-ups same pass: geometry-edit staleness guard, Inspector selection-field collapse, follow-selection (config `inspector.follow_selection`), `delete_intent()` dispatch.
 - [ ] Round-trip all `tests/fixtures/` programmatically: `load → modify → undo back → save → reload → assert sequence + feature equality`.
 - [ ] CI green on Linux + macOS + Windows builds.
 - [ ] Tag `v0.2.0`.

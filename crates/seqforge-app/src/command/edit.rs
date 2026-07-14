@@ -23,7 +23,8 @@
 use std::ops::Range;
 
 use seqforge_core::{
-    DispatchError, EditKind, Feature, FeatureId, Primer, PrimerId, Strand, ViewId, ViewerResponse,
+    DispatchError, EditKind, Feature, FeatureId, Primer, PrimerId, Selection, Strand, ViewId,
+    ViewSelection, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -227,7 +228,7 @@ pub(super) fn apply_copy(
     let oligo = state
         .workspace
         .with_buffer(vid, |v, _buf, ann| {
-            let id = v.selected_primer?;
+            let id = v.selection.selected_primer()?;
             let p = ann.primer(id)?;
             let is_footprint = p
                 .binding
@@ -437,6 +438,28 @@ pub(super) fn apply_update_feature(
         }
         Ok(buf.text.len())
     })?;
+    // If this feature is the current selection, re-sync the stored range from the
+    // live annotations — `edit_annotations` doesn't reset selection (unlike text
+    // edits), so a geometry change would otherwise leave `Feature{range}` stale.
+    // Read the *actual* new range (source of truth), so this never re-denormalizes.
+    if state
+        .workspace
+        .view(vid)
+        .and_then(|v| v.selection.selected_feature())
+        == Some(id)
+    {
+        let range = state
+            .workspace
+            .with_buffer(vid, |_, _, ann| ann.get(id).map(|f| f.range.clone()))
+            .ok()
+            .flatten();
+        if let (Some(r), Some(view)) = (range, state.workspace.view_mut(vid)) {
+            view.selection = ViewSelection::Feature {
+                id,
+                range: Selection::range(r.start, r.end),
+            };
+        }
+    }
     Ok(Some(ViewerResponse::Edited { len, changed: true }))
 }
 
@@ -747,7 +770,7 @@ pub(super) fn apply_save_as(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqforge_core::{Topology, ViewKind};
+    use seqforge_core::{Topology, ViewKind, ViewSelection};
 
     /// Headless `AppState` with one active view over `seq`.
     fn state_with(seq: &[u8]) -> AppState {
@@ -881,7 +904,7 @@ mod tests {
                     strand: Strand::Reverse,
                     qualifiers: Default::default(),
                 });
-                v.selected_primer = Some(id);
+                v.selection = ViewSelection::Primer(id);
             })
             .unwrap();
 
@@ -913,7 +936,7 @@ mod tests {
                     strand: Strand::Reverse,
                     qualifiers: Default::default(),
                 });
-                v.selected_primer = Some(id);
+                v.selection = ViewSelection::Primer(id);
             })
             .unwrap();
 
@@ -938,7 +961,7 @@ mod tests {
                     strand: Strand::Forward,
                     qualifiers: Default::default(),
                 });
-                v.selected_primer = Some(id);
+                v.selection = ViewSelection::Primer(id);
             })
             .unwrap();
 
@@ -1169,6 +1192,46 @@ mod tests {
         let err = apply_update_feature(&mut s, None, id, None, None, None, Some(2), Some(99))
             .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn update_feature_resyncs_selection_range() {
+        // A geometry edit of the *selected* feature re-syncs the stored selection
+        // range (edit_annotations doesn't reset selection) so the wash/copy don't
+        // act on a stale span.
+        let mut s = state_with(b"ATGCATGCATGC");
+        let id = add_feat(&mut s, 0, 3, "sel");
+        s.workspace.active_view_mut().unwrap().selection = ViewSelection::Feature {
+            id,
+            range: Selection::range(0, 3),
+        };
+
+        apply_update_feature(&mut s, None, id, None, None, None, Some(4), Some(9)).unwrap();
+
+        let sel = &s.workspace.active_view().unwrap().selection;
+        assert_eq!(sel.selected_feature(), Some(id));
+        assert_eq!(
+            sel.text_range(),
+            Some(Selection::range(4, 9)),
+            "selection range follows the feature's new geometry"
+        );
+    }
+
+    #[test]
+    fn update_feature_leaves_other_selection_untouched() {
+        // Editing a feature that is NOT the current selection must not hijack it.
+        let mut s = state_with(b"ATGCATGCATGC");
+        let id = add_feat(&mut s, 0, 3, "a");
+        s.workspace.active_view_mut().unwrap().selection =
+            ViewSelection::Text(Selection::range(6, 10));
+
+        apply_update_feature(&mut s, None, id, None, None, None, Some(4), Some(9)).unwrap();
+
+        assert_eq!(
+            s.workspace.active_view().unwrap().selection.text_range(),
+            Some(Selection::range(6, 10)),
+            "an unrelated text selection is left intact"
+        );
     }
 
     #[test]
@@ -1544,9 +1607,11 @@ mod tests {
         assert!(is_enabled(&paste, &s));
 
         // Range selection → cut available; a bare cursor does not enable it.
-        s.workspace.active_view_mut().unwrap().selection = Some(Selection::cursor(1));
+        s.workspace.active_view_mut().unwrap().selection =
+            ViewSelection::Text(Selection::cursor(1));
         assert!(!is_enabled(&cut, &s), "cursor is not a range");
-        s.workspace.active_view_mut().unwrap().selection = Some(Selection::range(0, 2));
+        s.workspace.active_view_mut().unwrap().selection =
+            ViewSelection::Text(Selection::range(0, 2));
         assert!(is_enabled(&cut, &s));
     }
 }

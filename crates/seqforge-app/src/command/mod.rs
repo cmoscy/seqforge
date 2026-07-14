@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use seqforge_core::{
-    BioOps, DispatchError, FeatureId, Selection, ViewId, ViewerRequest, ViewerResponse, dispatch,
+    BioOps, DispatchError, FeatureId, Selection, ViewId, ViewSelection, ViewerRequest,
+    ViewerResponse, dispatch,
 };
 
 use crate::app::AppState;
@@ -109,13 +110,6 @@ pub enum AppCommand {
     RemoveEnzyme {
         name: String,
     },
-    /// Select a 0-based half-open range in the active view and scroll it into
-    /// view. Used by the enzyme overlay to jump to a cut site; generic enough
-    /// to reuse for search results / features later.
-    RevealRange {
-        start: usize,
-        end: usize,
-    },
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
@@ -129,11 +123,12 @@ pub enum AppCommand {
     ToggleInspector,
 
     // ── Selection ────────────────────────────────────────────────────
-    SetSelection(Option<Selection>),
-    SelectFeature(Option<FeatureId>),
-    /// Set `View.selected_primer` (panel highlight) without moving the map — the
-    /// map-click counterpart of `SelectFeature`. `Some` clears `selected_feature`.
-    SelectPrimer(Option<seqforge_core::PrimerId>),
+    /// Set the active view's one selection (range / cursor / feature / primer /
+    /// cut-site object). Replaces the former `SetSelection`/`SelectFeature`/
+    /// `SelectPrimer` triple — the mutual exclusion is now structural in
+    /// [`ViewSelection`], so producers set the full intent atomically instead of
+    /// choreographing a range-set plus an object-set that each clear the others.
+    Select(ViewSelection),
     /// Select a primer by id (Inspector row-click): sets `View.selected_primer`,
     /// and — when attached — selects + reveals its binding footprint.
     RevealPrimer {
@@ -143,6 +138,14 @@ pub enum AppCommand {
     /// and selects + reveals its range.
     RevealFeature {
         id: FeatureId,
+    },
+    /// Select a cut site by key (Inspector Cut-sites row-click): sets the
+    /// `CutSite` object selection (single-site granularity) + reveals its
+    /// recognition span. The map↔panel counterpart of a map cut-site click.
+    RevealCutSite {
+        key: seqforge_core::CutSiteKey,
+        start: usize,
+        end: usize,
     },
 
     // ── Feature editing (Phase 14) ───────────────────────────────────
@@ -310,7 +313,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
                 && state.workspace.active_view().is_some()
         }
-        SetSelection(_) | SelectFeature(_) | SelectPrimer(_) => true,
+        Select(_) => true,
         // New Feature (create form from the menu) needs a range selection;
         // an edit form is opened with a concrete feature so it's always valid.
         OpenFeatureForm { id, .. } => id.is_some() || has_range_selection(state),
@@ -321,7 +324,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
-        RevealRange { .. } | RevealPrimer { .. } | RevealFeature { .. } => {
+        RevealPrimer { .. } | RevealFeature { .. } | RevealCutSite { .. } => {
             state.workspace.active_view().is_some()
         }
         EditFeatureInInspector { .. } | EditPrimerInInspector { .. } => {
@@ -371,8 +374,14 @@ pub(super) fn view_tab_order(state: &AppState) -> Vec<ViewId> {
     out
 }
 
+/// The active view's **text range** (the editable range/cursor), if any. Object
+/// selections (feature/cut-site) surface their derived range; a selected primer
+/// is object-only and yields `None`. Drives Cut/Copy/Delete gating + diff events.
 pub(super) fn active_selection(state: &AppState) -> Option<Selection> {
-    state.workspace.active_view().and_then(|v| v.selection)
+    state
+        .workspace
+        .active_view()
+        .and_then(|v| v.selection.text_range())
 }
 
 // ── Editor-op enablement predicates (Phase 12f) ──────────────────────────────--
@@ -546,7 +555,6 @@ pub fn apply<B: BioOps>(
         RemoveEnzyme { name } => {
             nav::apply_enzyme_op(state, bio, name, seqforge_core::EnzymeOp::Remove)
         }
-        RevealRange { start, end } => nav::apply_reveal_range(state, start, end),
         DismissCliStatus => file::apply_dismiss_cli_status(state),
 
         // ── Focus / layout ──────────────────────────────────────────
@@ -557,11 +565,10 @@ pub fn apply<B: BioOps>(
         ToggleInspector => layout::apply_toggle_inspector(state),
 
         // ── Selection ───────────────────────────────────────────────
-        SetSelection(new_sel) => nav::apply_set_selection(state, new_sel),
-        SelectFeature(new_feat) => nav::apply_select_feature(state, new_feat),
-        SelectPrimer(new_primer) => nav::apply_select_primer(state, new_primer),
+        Select(sel) => nav::apply_select(state, sel),
         RevealPrimer { id } => nav::apply_reveal_primer(state, id),
         RevealFeature { id } => nav::apply_reveal_feature(state, id),
+        RevealCutSite { key, start, end } => nav::apply_reveal_cut_site(state, key, start, end),
         EditFeatureInInspector { id, arm_delete } => {
             nav::apply_edit_feature_in_inspector(state, id, arm_delete)
         }

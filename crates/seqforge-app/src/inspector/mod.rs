@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use seqforge_core::{CutSite, FeatureId, PrimerId, PrimerInfo, ViewId};
+use seqforge_core::{CutSite, CutSiteKey, FeatureId, PrimerId, PrimerInfo, ViewId};
 
 use crate::command::{AppCommand, PendingCommand};
 use crate::viewer::PrimerDisplay;
@@ -45,6 +45,28 @@ enum InspectorTab {
     Primers,
 }
 
+/// The active view's selected *object*, projected from `ViewSelection` (decision
+/// 17). One field replaces the former three parallel `selected_*` fields — they
+/// were mutually-exclusive projections of the one selection. Each tab derives its
+/// row highlight from this; drives follow-selection (`inspector_tab`).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SelectedNoun {
+    Feature(FeatureId),
+    Primer(PrimerId),
+    CutSite(CutSiteKey),
+}
+
+impl SelectedNoun {
+    /// The tab that owns this noun — for follow-selection tab switching.
+    fn inspector_tab(&self) -> InspectorTab {
+        match self {
+            SelectedNoun::Feature(_) => InspectorTab::Features,
+            SelectedNoun::Primer(_) => InspectorTab::Primers,
+            SelectedNoun::CutSite(_) => InspectorTab::CutSites,
+        }
+    }
+}
+
 /// Version-keyed `PrimerInfo` projection for the active view.
 struct PrimerCache {
     view: ViewId,
@@ -65,8 +87,10 @@ pub struct InspectorState {
     cut_sites: Vec<CutSite>,
     /// The active view's displayed enzyme set (Cut-sites tab manages it — 1.5b).
     active_enzymes: Vec<String>,
-    selected_primer: Option<PrimerId>,
-    selected_feature: Option<FeatureId>,
+    /// The active view's selected object (feature / primer / cut site), synced
+    /// from `ViewSelection` each frame. One field (decision 17); each tab derives
+    /// its highlight, and it drives follow-selection tab switching.
+    selected: Option<SelectedNoun>,
     /// Active inline feature edit (Phase 1.5a). Pane-local; commit emits one
     /// `UpdateFeature`. Reconciled each frame against the live feature set.
     editing: Option<FeatureDraft>,
@@ -99,7 +123,7 @@ impl InspectorState {
     /// (reuses `seqforge_bio::primer_infos` = the `ListPrimers`/CLI projection);
     /// features + cut-sites (cheap) + the panel selection every frame. Called
     /// once before the dock renders.
-    pub fn refresh(&mut self, workspace: &mut Workspace) {
+    pub fn refresh(&mut self, workspace: &mut Workspace, follow_selection: bool) {
         let Some(view_id) = workspace.active_view else {
             self.clear();
             return;
@@ -118,6 +142,7 @@ impl InspectorState {
             // Create-from-selection seed: a range selection + its template slice.
             let selection_seed = v
                 .selection
+                .text_range()
                 .filter(|s| !s.is_cursor())
                 .map(|s| s.ordered())
                 .and_then(|(a, b)| {
@@ -129,10 +154,21 @@ impl InspectorState {
                         (a..b, oligo)
                     })
                 });
+            // Project the one selection to a single object (mutually exclusive).
+            let selected = v
+                .selection
+                .selected_feature()
+                .map(SelectedNoun::Feature)
+                .or_else(|| v.selection.selected_primer().map(SelectedNoun::Primer))
+                .or_else(|| {
+                    v.selection
+                        .selected_cut_site()
+                        .cloned()
+                        .map(SelectedNoun::CutSite)
+                });
             (
                 buf.version,
-                v.selected_primer,
-                v.selected_feature,
+                selected,
                 features,
                 v.cut_sites.clone(),
                 v.active_enzymes.clone(),
@@ -142,8 +178,7 @@ impl InspectorState {
         });
         let (
             version,
-            sel_p,
-            sel_f,
+            selected,
             features,
             cut_sites,
             active_enzymes,
@@ -162,8 +197,8 @@ impl InspectorState {
         self.features = features;
         self.cut_sites = cut_sites;
         self.active_enzymes = active_enzymes;
-        self.selected_primer = sel_p;
-        self.selected_feature = sel_f;
+        self.apply_follow_selection(&selected, follow_selection);
+        self.selected = selected;
         // Drop a stale edit draft if its feature was removed (or an edit/undo
         // elsewhere deleted it) — the draft can only outlive one frame if the
         // target still exists.
@@ -219,8 +254,7 @@ impl InspectorState {
         self.features.clear();
         self.cut_sites.clear();
         self.active_enzymes.clear();
-        self.selected_primer = None;
-        self.selected_feature = None;
+        self.selected = None;
         self.editing = None;
         self.editing_primer = None;
         self.selection_seed = None;
@@ -379,6 +413,18 @@ impl InspectorState {
         }
     }
 
+    /// Follow-selection: switch the active tab when the selected *object* changes
+    /// (not every frame), so a manual tab switch sticks until the next selection.
+    /// `follow == false` → highlight-only (the tab never changes here). Compares
+    /// `new` against the still-current `self.selected` (call *before* overwriting).
+    fn apply_follow_selection(&mut self, new: &Option<SelectedNoun>, follow: bool) {
+        if follow && new.is_some() && *new != self.selected {
+            if let Some(n) = new {
+                self.tab = n.inspector_tab();
+            }
+        }
+    }
+
     fn tab_button(&mut self, ui: &mut egui::Ui, tab: InspectorTab, label: &str, count: usize) {
         let text = if count > 0 {
             format!("{label} ({count})")
@@ -409,5 +455,52 @@ mod tests {
             st.focus_enzyme_query,
             "query field should be focused next frame"
         );
+    }
+
+    #[test]
+    fn follow_selection_switches_tab_on_object_change() {
+        let mut st = InspectorState {
+            tab: InspectorTab::Features,
+            ..Default::default()
+        };
+        // Selecting a primer follows to the Primers tab.
+        st.apply_follow_selection(&Some(SelectedNoun::Primer(PrimerId(1))), true);
+        assert_eq!(st.tab, InspectorTab::Primers);
+        st.selected = Some(SelectedNoun::Primer(PrimerId(1)));
+
+        // A cut-site selection follows to Cut-sites.
+        let key = seqforge_core::CutSiteKey {
+            enzyme: "EcoRI".into(),
+            recognition_start: 4,
+        };
+        st.apply_follow_selection(&Some(SelectedNoun::CutSite(key.clone())), true);
+        assert_eq!(st.tab, InspectorTab::CutSites);
+        st.selected = Some(SelectedNoun::CutSite(key));
+    }
+
+    #[test]
+    fn follow_selection_does_not_retrap_manual_tab_switch() {
+        // Same object as last frame → no switch, so a manual tab change sticks.
+        let mut st = InspectorState {
+            tab: InspectorTab::Features, // user manually parked here
+            selected: Some(SelectedNoun::Primer(PrimerId(1))),
+            ..Default::default()
+        };
+        st.apply_follow_selection(&Some(SelectedNoun::Primer(PrimerId(1))), true);
+        assert_eq!(
+            st.tab,
+            InspectorTab::Features,
+            "unchanged object must not re-yank"
+        );
+    }
+
+    #[test]
+    fn follow_selection_off_is_highlight_only() {
+        let mut st = InspectorState {
+            tab: InspectorTab::Features,
+            ..Default::default()
+        };
+        st.apply_follow_selection(&Some(SelectedNoun::Primer(PrimerId(1))), false);
+        assert_eq!(st.tab, InspectorTab::Features, "follow off never switches");
     }
 }

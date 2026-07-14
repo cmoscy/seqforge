@@ -25,4 +25,6 @@ pub use document::{
     Strand, Topology,
 };
 pub use history::{EditKind, History, HistoryEntry};
-pub use model::{Annotations, Buffer, BufferId, View, ViewId, ViewKind};
+pub use model::{
+    Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, View, ViewId, ViewKind, ViewSelection,
+};

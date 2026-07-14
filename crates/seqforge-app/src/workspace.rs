@@ -29,7 +29,7 @@ use std::ops::Range;
 
 use seqforge_core::{
     Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Selection, View,
-    ViewId, ViewKind, mutations,
+    ViewId, ViewKind, ViewSelection, mutations,
 };
 use serde::{Deserialize, Serialize};
 
@@ -489,7 +489,7 @@ impl Workspace {
         drop(buf);
 
         if let Some(view) = self.views.get_mut(&view_id) {
-            view.selection = Some(Selection::cursor(cursor));
+            view.selection = ViewSelection::Text(Selection::cursor(cursor));
         }
         Ok(())
     }
@@ -707,7 +707,7 @@ mod tests {
             assert!(buf.dirty);
             assert_eq!(buf.version, 1);
             // cursor moved past the insert
-            assert_eq!(view.selection.unwrap().focus, 4);
+            assert_eq!(view.selection.text_range().unwrap().focus, 4);
         })
         .unwrap();
 

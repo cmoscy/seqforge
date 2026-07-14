@@ -3,8 +3,8 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, NodeIndex, Style};
 use seqforge_core::{
-    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, ViewId, ViewerRequest,
-    ViewerResponse,
+    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, ViewId, ViewSelection,
+    ViewerRequest, ViewerResponse,
 };
 
 use std::sync::Arc;
@@ -258,7 +258,9 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
                     // Restore selection / scroll if we have any.
                     if let Some(fs) = state.pending_file_state.remove(&path) {
                         if let Some(view) = state.workspace.view_mut(vid) {
-                            view.selection = fs.selection;
+                            view.selection = fs
+                                .selection
+                                .map_or(ViewSelection::None, ViewSelection::Text);
                             view.scroll_pos = fs.scroll_pos;
                         }
                     }
@@ -1040,7 +1042,11 @@ impl eframe::App for SeqForgeApp {
         // selection (not a bare cursor) feeds Cut/Copy/Delete/RC; the cursor
         // start is the paste position. `is_enabled` greys items whose operand
         // is missing, so these are only read when the action is enabled.
-        let active_sel = self.state.workspace.active_view().and_then(|v| v.selection);
+        let active_sel = self
+            .state
+            .workspace
+            .active_view()
+            .and_then(|v| v.selection.text_range());
         let sel_range = active_sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
         let paste_pos = active_sel.map(|s| s.ordered().0).unwrap_or(0);
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -1401,7 +1407,7 @@ impl eframe::App for SeqForgeApp {
                     // read-only — decision 8). Frame from `/codon_start`, strand
                     // from the feature. Other kinds translate on demand via the
                     // Translate window, not here.
-                    let cds = v.selected_feature.and_then(|fid| {
+                    let cds = v.selection.selected_feature().and_then(|fid| {
                         let f = self
                             .state
                             .workspace
@@ -1431,19 +1437,23 @@ impl eframe::App for SeqForgeApp {
                     });
                     // Tm/%GC of the selected region (Phase 0.5), derived — decision
                     // 8. Feeds the top strand 5'→3' to the NN engine.
-                    let sel_qc = v.selection.filter(|s| !s.is_cursor()).and_then(|s| {
-                        let (a, b) = s.ordered();
-                        let end = b.min(buf.text.len());
-                        if a >= end {
-                            return None;
-                        }
-                        selection_qc(&buf.text[a..end])
-                    });
+                    let sel_qc = v
+                        .selection
+                        .text_range()
+                        .filter(|s| !s.is_cursor())
+                        .and_then(|s| {
+                            let (a, b) = s.ordered();
+                            let end = b.min(buf.text.len());
+                            if a >= end {
+                                return None;
+                            }
+                            selection_qc(&buf.text[a..end])
+                        });
                     Some((
                         v.id,
                         buf.len(),
                         format!("{:?}", buf.topology),
-                        v.selection,
+                        v.selection.text_range(),
                         cds,
                         sel_qc,
                     ))
@@ -1548,7 +1558,7 @@ impl eframe::App for SeqForgeApp {
 
         // Refresh the Inspector's memoized primer projection before the dock
         // reads it (version-keyed; a no-op when nothing changed).
-        inspector.refresh(workspace);
+        inspector.refresh(workspace, config.settings.inspector.follow_selection);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(0.0))

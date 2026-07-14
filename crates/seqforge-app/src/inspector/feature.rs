@@ -253,7 +253,10 @@ impl InspectorState {
         // Local, sorted snapshot so the loop can mutate `self.editing` freely.
         let mut feats = self.features.clone();
         feats.sort_by_key(|f| f.range.start);
-        let selected = self.selected_feature;
+        let selected = match &self.selected {
+            Some(super::SelectedNoun::Feature(id)) => Some(*id),
+            _ => None,
+        };
         let editing = &mut self.editing;
 
         egui::ScrollArea::vertical().show(ui, |ui| {

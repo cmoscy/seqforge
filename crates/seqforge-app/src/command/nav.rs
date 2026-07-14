@@ -1,8 +1,8 @@
 //! Navigation, search, selection commands.
 
 use seqforge_core::{
-    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, ViewerRequest,
-    ViewerResponse,
+    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, ViewSelection,
+    ViewerRequest, ViewerResponse,
 };
 
 use super::{
@@ -146,72 +146,27 @@ pub(super) fn apply_submit_goto<B: BioOps>(
     Ok(Some(resp))
 }
 
-/// Select `start..end` (0-based, half-open) in the active view and scroll it
-/// into view. Used by Inspector row clicks (enzyme sites, cut sites) to jump the
-/// map to a location while the pane stays put.
-pub(super) fn apply_reveal_range(
+/// Set the active view's one selection (range / cursor / feature / primer /
+/// cut-site). The mutual exclusion is structural in [`ViewSelection`], so this
+/// single handler replaces the former `SetSelection`/`SelectFeature`/
+/// `SelectPrimer` triple — the object-vs-range invariant can't be violated.
+pub(super) fn apply_select(
     state: &mut AppState,
-    start: usize,
-    end: usize,
+    sel: ViewSelection,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let before = active_selection(state);
     if let Some(view) = state.workspace.active_view_mut() {
-        view.selection = Some(Selection::range(start, end));
-        view.scroll_to = Some(start);
-        view.selected_feature = None;
-    }
-    emit_selection_diff(state, before);
-    Ok(None)
-}
-
-pub(super) fn apply_set_selection(
-    state: &mut AppState,
-    new_sel: Option<Selection>,
-) -> Result<Option<ViewerResponse>, DispatchError> {
-    let before = active_selection(state);
-    if let Some(view) = state.workspace.active_view_mut() {
-        view.selection = new_sel;
-        // A fresh text selection deselects any feature *object* — this keeps the
-        // object-vs-range invariant: `selected_feature.is_some()` ⟺ the feature's
-        // range is the current selection. Delete-on-feature relies on it. A
-        // feature click re-sets it (its `SelectFeature` applies after this).
-        view.selected_feature = None;
-        // Keep the moving end (focus) on screen. Fires only when the focus is
-        // outside the last-rendered visible range — a no-op for clicks (always
-        // within view), so this just serves off-screen moves like arrow-key nav.
-        if let (Some(sel), Some((start, end))) = (new_sel, view.visible_range) {
-            if sel.focus < start || sel.focus >= end {
-                view.scroll_to = Some(sel.focus);
+        // Keep the moving end (focus) of a text range on screen. Fires only when
+        // the focus is outside the last-rendered visible range — a no-op for
+        // clicks (always in view); serves off-screen moves like arrow-key nav.
+        if let (Some(s), Some((start, end))) = (sel.text_range(), view.visible_range) {
+            if s.focus < start || s.focus >= end {
+                view.scroll_to = Some(s.focus);
             }
         }
+        view.selection = sel;
     }
     emit_selection_diff(state, before);
-    Ok(None)
-}
-
-pub(super) fn apply_select_feature(
-    state: &mut AppState,
-    new_feat: Option<FeatureId>,
-) -> Result<Option<ViewerResponse>, DispatchError> {
-    if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_feature = new_feat;
-    }
-    Ok(None)
-}
-
-/// Set `selected_primer` (panel highlight) without moving the map — the
-/// map-click counterpart of [`apply_select_feature`]. Selecting a primer clears
-/// the feature selection (mutually exclusive).
-pub(super) fn apply_select_primer(
-    state: &mut AppState,
-    new_primer: Option<PrimerId>,
-) -> Result<Option<ViewerResponse>, DispatchError> {
-    if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_primer = new_primer;
-        if new_primer.is_some() {
-            view.selected_feature = None;
-        }
-    }
     Ok(None)
 }
 
@@ -234,11 +189,9 @@ pub(super) fn apply_reveal_primer(
         .ok()
         .flatten();
     if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_primer = Some(id);
-        view.selected_feature = None;
-        // Object selection, not a range: drop any prior text selection so the map
-        // shows only the oligo highlight (the PrimerTrack draws it by id).
-        view.selection = None;
+        // Object selection, not a range: the map shows only the oligo highlight
+        // (the PrimerTrack draws it by id). `Primer` carries no template range.
+        view.selection = ViewSelection::Primer(id);
         if let Some(b) = &binding {
             view.scroll_to = Some(b.start);
         }
@@ -247,9 +200,8 @@ pub(super) fn apply_reveal_primer(
     Ok(None)
 }
 
-/// Select a feature by id (Inspector row-click): sets `selected_feature`, clears
-/// `selected_primer`, and selects + reveals its range. Mirror of
-/// [`apply_reveal_primer`].
+/// Select a feature by id (Inspector row-click): sets the `Feature` object
+/// selection (id + span) and reveals its range. Mirror of [`apply_reveal_primer`].
 pub(super) fn apply_reveal_feature(
     state: &mut AppState,
     id: FeatureId,
@@ -260,13 +212,34 @@ pub(super) fn apply_reveal_feature(
         .with_active_buffer(|_v, _b, ann| ann.get(id).map(|f| f.range.clone()))
         .ok()
         .flatten();
+    if let (Some(view), Some(r)) = (state.workspace.active_view_mut(), range) {
+        view.selection = ViewSelection::Feature {
+            id,
+            range: Selection::range(r.start, r.end),
+        };
+        view.scroll_to = Some(r.start);
+    }
+    emit_selection_diff(state, before);
+    Ok(None)
+}
+
+/// Select a cut site by key (Inspector Cut-sites row-click): sets the `CutSite`
+/// object selection (its recognition span as the range) and reveals it. The
+/// panel→map counterpart of a map cut-site click. Mirror of
+/// [`apply_reveal_feature`].
+pub(super) fn apply_reveal_cut_site(
+    state: &mut AppState,
+    key: seqforge_core::CutSiteKey,
+    start: usize,
+    end: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let before = active_selection(state);
     if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_feature = Some(id);
-        view.selected_primer = None;
-        if let Some(r) = &range {
-            view.selection = Some(Selection::range(r.start, r.end));
-            view.scroll_to = Some(r.start);
-        }
+        view.selection = ViewSelection::CutSite {
+            key,
+            range: Selection::range(start, end),
+        };
+        view.scroll_to = Some(start);
     }
     emit_selection_diff(state, before);
     Ok(None)
@@ -313,9 +286,10 @@ pub(super) fn apply_edit_feature_in_inspector(
         .inspector
         .begin_feature_edit(id, label, kind, strand, start, end, arm_delete);
     if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_feature = Some(id);
-        view.selected_primer = None;
-        view.selection = Some(Selection::range(start, end));
+        view.selection = ViewSelection::Feature {
+            id,
+            range: Selection::range(start, end),
+        };
         view.scroll_to = Some(start);
     }
     emit_selection_diff(state, before);
@@ -368,9 +342,7 @@ pub(super) fn apply_edit_primer_in_inspector(
         .inspector
         .begin_primer_edit(id, name, sequence, strand, binding, arm_delete);
     if let Some(view) = state.workspace.active_view_mut() {
-        view.selected_primer = Some(id);
-        view.selected_feature = None;
-        view.selection = None;
+        view.selection = ViewSelection::Primer(id);
         if let Some(s) = scroll {
             view.scroll_to = Some(s);
         }
@@ -516,15 +488,26 @@ mod tests {
         // (the highlight lands on the oligo via the PrimerTrack, not the template).
         let (mut state, id) = open_with_primer(Some(2..8), "attached");
         let v0 = state.workspace.active_view_mut().unwrap();
-        v0.selected_feature = Some(FeatureId(9));
-        v0.selection = Some(Selection::range(0, 4)); // a stale text selection
+        // A stale feature object-selection that reveal must replace.
+        v0.selection = ViewSelection::Feature {
+            id: FeatureId(9),
+            range: Selection::range(0, 4),
+        };
 
         apply_reveal_primer(&mut state, id).unwrap();
 
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_primer, Some(id));
-        assert_eq!(v.selected_feature, None, "primer selection clears feature");
-        assert_eq!(v.selection, None, "object selection, not a template range");
+        assert_eq!(v.selection.selected_primer(), Some(id));
+        assert_eq!(
+            v.selection.selected_feature(),
+            None,
+            "primer selection clears feature"
+        );
+        assert_eq!(
+            v.selection.text_range(),
+            None,
+            "object selection, not a template range"
+        );
         assert_eq!(
             v.scroll_to,
             Some(2),
@@ -539,21 +522,25 @@ mod tests {
         apply_reveal_primer(&mut state, id).unwrap();
 
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.selection.selected_primer(), Some(id));
         assert_eq!(v.scroll_to, None, "detached primer must not move the map");
     }
 
     #[test]
     fn select_primer_highlights_without_moving_map() {
         let (mut state, id) = open_with_primer(Some(2..8), "selp");
-        state.workspace.active_view_mut().unwrap().selected_feature = Some(FeatureId(9));
+        state.workspace.active_view_mut().unwrap().selection = ViewSelection::Feature {
+            id: FeatureId(9),
+            range: Selection::range(0, 4),
+        };
 
-        apply_select_primer(&mut state, Some(id)).unwrap();
+        apply_select(&mut state, ViewSelection::Primer(id)).unwrap();
 
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_primer, Some(id));
+        assert_eq!(v.selection.selected_primer(), Some(id));
         assert_eq!(
-            v.selected_feature, None,
+            v.selection.selected_feature(),
+            None,
             "selecting a primer clears feature"
         );
         assert_eq!(v.scroll_to, None, "select (vs reveal) must not scroll");
@@ -582,15 +569,19 @@ mod tests {
                 })
             })
             .unwrap();
-        state.workspace.active_view_mut().unwrap().selected_primer = Some(PrimerId(7));
+        state.workspace.active_view_mut().unwrap().selection = ViewSelection::Primer(PrimerId(7));
         let _ = std::fs::remove_file(&path);
 
         apply_reveal_feature(&mut state, fid).unwrap();
 
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_feature, Some(fid));
-        assert_eq!(v.selected_primer, None, "selecting a feature clears primer");
-        assert_eq!(v.selection, Some(Selection::range(1, 5)));
+        assert_eq!(v.selection.selected_feature(), Some(fid));
+        assert_eq!(
+            v.selection.selected_primer(),
+            None,
+            "selecting a feature clears primer"
+        );
+        assert_eq!(v.selection.text_range(), Some(Selection::range(1, 5)));
         assert_eq!(v.scroll_to, Some(1));
     }
 
@@ -630,12 +621,21 @@ mod tests {
     #[test]
     fn set_selection_clears_the_feature_object_selection() {
         // The object-vs-range invariant Delete-on-feature relies on: a fresh text
-        // selection deselects the feature object.
+        // selection deselects the feature object. Now structural — a `Text`
+        // selection simply replaces the `Feature` variant.
         let (mut state, fid) = open_with_feature();
-        state.workspace.active_view_mut().unwrap().selected_feature = Some(fid);
-        apply_set_selection(&mut state, Some(Selection::range(0, 3))).unwrap();
+        state.workspace.active_view_mut().unwrap().selection = ViewSelection::Feature {
+            id: fid,
+            range: Selection::range(2, 8),
+        };
+        apply_select(&mut state, ViewSelection::Text(Selection::range(0, 3))).unwrap();
         assert_eq!(
-            state.workspace.active_view().unwrap().selected_feature,
+            state
+                .workspace
+                .active_view()
+                .unwrap()
+                .selection
+                .selected_feature(),
             None
         );
     }
@@ -649,8 +649,8 @@ mod tests {
             "inline editor should be armed"
         );
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_feature, Some(fid));
-        assert_eq!(v.selection, Some(Selection::range(2, 8)));
+        assert_eq!(v.selection.selected_feature(), Some(fid));
+        assert_eq!(v.selection.text_range(), Some(Selection::range(2, 8)));
         assert_eq!(state.focus.scope, FocusScope::Inspector);
     }
 
@@ -670,9 +670,13 @@ mod tests {
         apply_edit_primer_in_inspector(&mut state, id, true).unwrap();
         assert!(state.inspector.is_editing(), "inline primer editor armed");
         let v = state.workspace.active_view().unwrap();
-        assert_eq!(v.selected_primer, Some(id));
-        assert_eq!(v.selected_feature, None);
-        assert_eq!(v.selection, None, "object selection, not a template range");
+        assert_eq!(v.selection.selected_primer(), Some(id));
+        assert_eq!(v.selection.selected_feature(), None);
+        assert_eq!(
+            v.selection.text_range(),
+            None,
+            "object selection, not a template range"
+        );
         assert_eq!(v.scroll_to, Some(2));
         assert_eq!(state.focus.scope, FocusScope::Inspector);
     }
@@ -682,5 +686,26 @@ mod tests {
         let (mut state, _id) = open_with_primer(Some(2..8), "missp");
         apply_edit_primer_in_inspector(&mut state, PrimerId(9999), false).unwrap();
         assert!(!state.inspector.is_editing());
+    }
+
+    #[test]
+    fn reveal_cut_site_selects_object_and_reveals_range() {
+        // Panel→map: an Inspector cut-site row click sets the `CutSite` object
+        // (single-site key) + reveals its recognition span, clearing any prior
+        // object selection (structural exclusion).
+        let (mut state, _id) = open_with_primer(Some(2..8), "cut");
+        state.workspace.active_view_mut().unwrap().selection = ViewSelection::Primer(PrimerId(3));
+        let key = seqforge_core::CutSiteKey {
+            enzyme: "EcoRI".into(),
+            recognition_start: 4,
+        };
+
+        apply_reveal_cut_site(&mut state, key.clone(), 4, 10).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selection.selected_cut_site(), Some(&key));
+        assert_eq!(v.selection.selected_primer(), None, "clears prior primer");
+        assert_eq!(v.selection.text_range(), Some(Selection::range(4, 10)));
+        assert_eq!(v.scroll_to, Some(4));
     }
 }
