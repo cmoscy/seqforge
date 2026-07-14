@@ -76,6 +76,13 @@ impl Track for TranslationTrack {
         let seq_x0 = geom.seq_x0;
         let trans_y = geom.y0;
         let show_orfs = ctx.show_orfs;
+        // Ordered selection range (suppressed while staging / at a bare cursor),
+        // washed behind any residue whose codon overlaps it.
+        let sel = ctx
+            .selection
+            .filter(|_| !ctx.staging)
+            .filter(|s| !s.is_cursor())
+            .map(|s| s.ordered());
 
         for (lane_i, lane) in tc.frame_lanes.iter().enumerate() {
             let lane_y = trans_y + lane_i as f32 * aa_row_h;
@@ -115,6 +122,7 @@ impl Track for TranslationTrack {
                 lane_y,
                 &lane.glyphs,
                 show_orfs,
+                sel,
             );
         }
     }

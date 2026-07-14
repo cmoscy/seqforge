@@ -836,6 +836,20 @@ pub(crate) fn paint_feature_label(
 /// Paint one AA lane's codon outlines + centred residue glyphs at `lane_y`.
 /// Shared by the Translation track (global frame lanes) and the Features track
 /// (per-CDS sub-rows). ORF wash + lane labels are the caller's concern.
+///
+/// `sel` is the ordered, non-cursor selection nt-range (caller-filtered for
+/// staging). Three tiers, keyed only on how the codon sits in the range
+/// (source-agnostic — bases vs. residue click render identically):
+/// - **fully inside** → full wash + full-strength glyph + brighter outline
+///   ("cleanly selected, in frame"). Wash + glyph reinforce rather than a faint
+///   letter on a faint wash.
+/// - **partially inside** → faded wash, glyph/outline unchanged ("edge —
+///   carrying part of an adjacent codon"). At most two per selection (the ragged
+///   ends), so it doubles as a frame-alignment cue.
+/// - **untouched** → nothing.
+///
+/// The glyph stays a clean binary — bright ⟺ the whole residue is captured — so
+/// brightness reads as "in frame" independent of the wash's "touched".
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_aa_lane(
     painter: &Painter,
@@ -846,6 +860,7 @@ pub(crate) fn paint_aa_lane(
     lane_y: f32,
     glyphs: &[AaGlyph],
     show_orfs: bool,
+    sel: Option<(usize, usize)>,
 ) {
     let text_color = style.text_color;
     let aa_normal = text_color.gamma_multiply(0.72);
@@ -855,27 +870,58 @@ pub(crate) fn paint_aa_lane(
         if g.pos < block_start || g.pos >= block_end {
             continue;
         }
+        // Full codon nt span (`g.pos` is the middle base) for the containment
+        // test; the block-clamped span (`ncs..nce`) for drawing at a wrap.
+        let codon_s = g.pos.saturating_sub(1);
+        let codon_e = g.pos + 2;
+        let ncs = codon_s.max(block_start);
+        let nce = codon_e.min(block_end);
+        // Selected ⟺ the whole codon is inside the range; partial ⟺ it overlaps
+        // but isn't wholly contained (a ragged / out-of-frame edge).
+        let selected = sel.is_some_and(|(s, e)| s <= codon_s && codon_e <= e);
+        let partial = !selected && sel.is_some_and(|(s, e)| codon_s < e && s < codon_e);
+        // Selection wash behind the residue — full when contained, faded when
+        // only partially in.
+        if (selected || partial) && ncs < nce {
+            let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
+            let cw = (nce - ncs) as f32 * char_width;
+            let wash = if selected {
+                style.selection_color
+            } else {
+                style.selection_color.gamma_multiply(0.35)
+            };
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(cx, lane_y), Vec2::new(cw, aa_row_h)),
+                2.0,
+                wash,
+            );
+        }
+        // Residue color: full strength when selected (reinforces the wash),
+        // dimmed otherwise. ORF start/stop keep their semantic hue either way.
         let color = if show_orfs {
             match g.kind {
                 AaKind::Stop => style.aa_stop,
                 AaKind::Start => style.aa_start,
+                AaKind::Normal if selected => text_color,
                 AaKind::Normal => aa_normal,
             }
+        } else if selected {
+            text_color
         } else {
             aa_normal
         };
         // Codon cell spanning the residue's 3 nucleotides (clamped to the block
-        // at a wrap). The faint outline groups the codon and marks the click
-        // target (hit-rect emitted by `aa_codon_hits`).
-        let ncs = g.pos.saturating_sub(1).max(block_start);
-        let nce = (g.pos + 2).min(block_end);
+        // at a wrap). The outline groups the codon and marks the click target
+        // (hit-rect emitted by `aa_codon_hits`); brighter on a selected cell so
+        // it reads as a discrete block.
         if ncs < nce {
             let cx = seq_x0 + (ncs - block_start) as f32 * char_width;
             let cw = (nce - ncs) as f32 * char_width;
+            let outline = if selected { 0.5 } else { 0.16 };
             painter.rect_stroke(
                 Rect::from_min_size(Pos2::new(cx, lane_y), Vec2::new(cw, aa_row_h)),
                 2.0,
-                Stroke::new(1.0, text_color.gamma_multiply(0.16)),
+                Stroke::new(1.0, text_color.gamma_multiply(outline)),
                 egui::StrokeKind::Inside,
             );
         }

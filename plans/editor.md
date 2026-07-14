@@ -732,6 +732,21 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
   T3: one owner does height+paint+hit, feature stack rows grow to fit the CDS sub-row, and
   `TranslationCache` stores per-feature `feature_glyphs` instead of packed band lanes.
   Global frame translation stays a position-owned track; `cds_glyphs` reused unchanged.
+- [x] **AA-track selection highlight + frame-alignment cue** *(Phase 16 GUI-walk finding.)*
+  Selection was painted only on the sequence rows, never the translation lanes, so
+  selecting a residue (or a range over a gene) gave no feedback on the AA track. Added a
+  selection wash to the shared `paint_aa_lane` (`viewer/track.rs`), threaded from both the
+  global-frame (`tracks/translation.rs`) and per-CDS (`tracks/features.rs`) callers. Three
+  tiers, keyed **only on how each codon sits in the selection range** (source-agnostic — a
+  base drag and a residue click render identically; no dependence on `translation_anchor`,
+  keeping render a pure function of the selection, per decisions 8/12): **fully-contained**
+  codon → full wash + full-strength glyph + brighter (`×0.5`) outline; **partially-contained**
+  → faded (`selection_color ×0.35`) wash, glyph/outline unchanged; **untouched** → nothing.
+  Strict full-codon containment (not overlap) + the glyph's bright/dim binary make the lane
+  double as a **reading-frame cue** — a clean in-frame selection is a solid bright block with
+  no faded caps, while spillover bases surface as one/two faded edge codons (≤2 possible).
+  Suppressed while staging. Matches the SnapGene convention while adding the partial-codon
+  signal it lacks.
 
 **Done when:** ✅ (code; 202 workspace tests + clippy + fmt green) Toggle any of the 6 frames and see AA lanes under the sequence; a CDS shows its protein in-canvas; ORFs highlight and one can be annotated; double-click a feature and change type + range + strand (undoable); `seqforge orfs`/`update-feature` work from the CLI. *Interactive GUI walk (band layout / menu / double-click / right-click promote) pending manual confirmation.*
 
@@ -763,6 +778,7 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
 ### Phase 16 — v0.2 verification + release *(½ day)*
 
 - [ ] Manual walk: open pUC19, type bases, delete a region, RC a selection, add a feature, undo through everything, save, reload, diff against expected.
+  - Walk findings addressed: translation-lane selection had no visual feedback → **AA-track selection highlight + frame-alignment cue** (see [14e polish](#14e-polish--presentation-follow-ups) above).
 - [ ] Round-trip all `tests/fixtures/` programmatically: `load → modify → undo back → save → reload → assert sequence + feature equality`.
 - [ ] CI green on Linux + macOS + Windows builds.
 - [ ] Tag `v0.2.0`.

@@ -64,6 +64,13 @@ impl Track for FeaturesTrack {
 
     fn paint(&self, ctx: &BlockCtx, geom: &BlockGeom, painter: &Painter) {
         let style = ctx.style;
+        // Ordered selection range (suppressed while staging / at a bare cursor),
+        // washed behind any CDS residue whose codon overlaps it.
+        let sel = ctx
+            .selection
+            .filter(|_| !ctx.staging)
+            .filter(|s| !s.is_cursor())
+            .map(|s| s.ordered());
         for &(feat_idx, row) in &ctx.layout.feat_rows {
             let feat = ctx
                 .render_ann
@@ -87,6 +94,7 @@ impl Track for FeaturesTrack {
                     bar_row_y + style.annot_row_h,
                     glyphs,
                     ctx.show_orfs,
+                    sel,
                 );
             }
 
