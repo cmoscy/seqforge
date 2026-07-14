@@ -166,6 +166,11 @@ pub struct UiColors {
     /// Amber accent for a primer's mismatched annealed columns (the visual
     /// counterpart of the `Drifted` state; Phase 1.1).
     pub mismatch: HexColor,
+    /// Neutral, semi-transparent grey washed over a hovered primer's annealed
+    /// footprint / a hovered enzyme's recognition site. Deliberately *achromatic*
+    /// so it reads as a transient "here it sits" cue, distinct from the chromatic
+    /// (blue) `selection` — hue, not just alpha, separates the two states.
+    pub hover_wash: HexColor,
 }
 
 impl Default for UiColors {
@@ -178,6 +183,7 @@ impl Default for UiColors {
             label_text_alt: HexColor(Color32::from_rgb(20, 20, 20)),
             ruler_text: HexColor(Color32::from_rgb(160, 160, 160)),
             mismatch: HexColor(Color32::from_rgb(235, 155, 40)),
+            hover_wash: HexColor(Color32::from_rgba_unmultiplied(150, 155, 165, 64)),
         }
     }
 }

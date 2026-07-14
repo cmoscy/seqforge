@@ -15,24 +15,29 @@ pub(crate) struct CutSitesTrack;
 
 impl Track for CutSitesTrack {
     fn block_height(&self, ctx: &BlockCtx) -> f32 {
-        ctx.layout.n_cut_rows as f32 * ctx.style.cut_label_row_h
+        ctx.layout.cut_band_lines as f32 * ctx.style.cut_label_row_h
     }
 
     fn hit_rects(&self, ctx: &BlockCtx, geom: &BlockGeom, hits: &mut Vec<(Rect, Hit)>) {
-        // Click target is the label only — not the staple line through the
-        // strands. (`cut_sites` is empty while staging, so this is inert then.)
+        // Click target is each label only — not the staple line through the
+        // strands. Co-located members keep individual hit rects (one per name
+        // line) so each enzyme stays addressable. (`cut_sites` is empty while
+        // staging, so this is inert then.)
         let style = ctx.style;
-        for &(site_idx, row) in &ctx.layout.cut_rows {
-            let site = &ctx.cut_sites[site_idx];
-            let cx = geom.seq_x0 + (site.cut_pos - ctx.block_start) as f32 * style.char_width;
-            let label_w = site.enzyme.len() as f32 * style.label_char_w + 8.0;
-            hits.push((
-                Rect::from_center_size(
-                    Pos2::new(cx, geom.y0 + (row as f32 + 0.5) * style.cut_label_row_h),
-                    Vec2::new(label_w, style.cut_label_row_h),
-                ),
-                Hit::CutSite(site_idx),
-            ));
+        for group in &ctx.layout.cut_groups {
+            let cx = geom.seq_x0 + (group.cut_pos - ctx.block_start) as f32 * style.char_width;
+            for (k, &site_idx) in group.members.iter().enumerate() {
+                let site = &ctx.cut_sites[site_idx];
+                let line = group.base_line + k;
+                let label_w = site.enzyme.len() as f32 * style.label_char_w + 8.0;
+                hits.push((
+                    Rect::from_center_size(
+                        Pos2::new(cx, geom.y0 + (line as f32 + 0.5) * style.cut_label_row_h),
+                        Vec2::new(label_w, style.cut_label_row_h),
+                    ),
+                    Hit::CutSite(site_idx),
+                ));
+            }
         }
     }
 
@@ -46,25 +51,30 @@ impl Track for CutSitesTrack {
         let block_y = geom.y0;
         let cut_site_color = style.cut_site_color;
         // Bottom of this block's cut-label band == top of the ruler.
-        let ruler_y = block_y + ctx.layout.n_cut_rows as f32 * cut_label_row_h;
+        let ruler_y = block_y + ctx.layout.cut_band_lines as f32 * cut_label_row_h;
 
-        // ── Resting state: label + short tick descending toward the ruler ──
-        for &(site_idx, row) in &ctx.layout.cut_rows {
-            let site = &ctx.cut_sites[site_idx];
-            let top_cut = site.cut_pos;
-            let tcx = seq_x0 + (top_cut - block_start) as f32 * char_width;
-            let label_y = block_y + row as f32 * cut_label_row_h;
-            painter.text(
-                Pos2::new(tcx, label_y),
-                Align2::CENTER_TOP,
-                &site.enzyme,
-                style.small_font.clone(),
-                cut_site_color,
-            );
-            let tick_top = block_y + (row + 1) as f32 * cut_label_row_h;
-            let tick_bot = (tick_top + cut_label_row_h * 0.6).min(ruler_y);
+        // ── Resting state: each group's names stacked over a single leader ──
+        // Co-located enzymes share one tick (deduped) that descends from just
+        // below the group's lowest name toward the ruler — the "one site, many
+        // isoschizomers" cue.
+        for group in &ctx.layout.cut_groups {
+            let tcx = seq_x0 + (group.cut_pos - block_start) as f32 * char_width;
+            for (k, &site_idx) in group.members.iter().enumerate() {
+                let line = group.base_line + k;
+                let label_y = block_y + line as f32 * cut_label_row_h;
+                painter.text(
+                    Pos2::new(tcx, label_y),
+                    Align2::CENTER_TOP,
+                    &ctx.cut_sites[site_idx].enzyme,
+                    style.small_font.clone(),
+                    cut_site_color,
+                );
+            }
+            // One leader tick per group, from below the last name to the ruler.
+            let tick_top =
+                block_y + (group.base_line + group.members.len()) as f32 * cut_label_row_h;
             painter.line_segment(
-                [Pos2::new(tcx, tick_top), Pos2::new(tcx, tick_bot)],
+                [Pos2::new(tcx, tick_top), Pos2::new(tcx, ruler_y)],
                 Stroke::new(1.0, cut_site_color),
             );
         }
@@ -75,16 +85,19 @@ impl Track for CutSitesTrack {
         let Some(idx) = ctx.hovered_cut_site else {
             return;
         };
-        let row_in_block = ctx
-            .layout
-            .cut_rows
-            .iter()
-            .find(|(i, _)| *i == idx)
-            .map(|(_, r)| *r);
         let site = &ctx.cut_sites[idx];
         let top_cut = site.cut_pos;
         let bot_cut = site.bottom_cut_pos;
-        let Some(row) = row_in_block.filter(|_| top_cut >= block_start && top_cut <= block_end)
+        // Descender starts at the hovered site's group leader (below its names),
+        // so the staple connects to the same tick shown at rest.
+        let group_bottom_line = ctx
+            .layout
+            .cut_groups
+            .iter()
+            .find(|g| g.members.contains(&idx))
+            .map(|g| g.base_line + g.members.len());
+        let Some(bottom_line) =
+            group_bottom_line.filter(|_| top_cut >= block_start && top_cut <= block_end)
         else {
             return;
         };
@@ -94,7 +107,7 @@ impl Track for CutSitesTrack {
         let top_y = geom.strand_top_y;
         let tcx = seq_x0 + (top_cut - block_start) as f32 * char_width;
         let stroke = Stroke::new(1.5, cut_site_color);
-        let line_top = block_y + (row + 1) as f32 * cut_label_row_h;
+        let line_top = block_y + bottom_line as f32 * cut_label_row_h;
 
         // Descender from label row through the top strand.
         painter.line_segment([Pos2::new(tcx, line_top), Pos2::new(tcx, bot_y)], stroke);

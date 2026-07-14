@@ -264,6 +264,17 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
   the footprint. Bases with no template column (tail/loop) *can only* be shown on
   the track, so the track must own the highlight. This is the visual counterpart
   of 1.5c's oligo-copy: **object-selection is authoritative** for both.
+- **Hover = single-strand footprint wash on the template** *(Phase 16 GUI-walk
+  finding).* Distinct from selection: hovering a primer arrow washes its annealed
+  footprint on the template in the neutral `ui.hover_wash` grey (achromatic — set
+  apart from the blue `selection` by hue, not just alpha). The wash is
+  **single-stranded**, matching the primer's own band: **Forward** → top strand,
+  **Reverse** → bottom strand (`binding` is a top-strand range; a reverse
+  primer's bases are the revcomp — [`document.rs`] `Primer.strand`). Reuses the
+  `matches!(strand, Reverse)` band predicate `stack_primers` already uses. Enzyme
+  hover washes the recognition site on **both** strands (genuinely double-stranded)
+  — one shared `BlockCtx::hover_footprint = (range, FootprintStrands)` path serves
+  both nouns. Paint-time only, ephemeral (no `Selection`, no command, no undo).
 - **Track trait:** `block_height` reserves the arrow row (+ a sliver for a
   floating tail); `paint` draws annealed body + tail ribbon + mismatch marks (and
   a selected-emphasis pass keyed on `selected_primer`); `hit_test` returns

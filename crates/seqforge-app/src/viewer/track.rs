@@ -95,6 +95,24 @@ impl Hit {
     }
 }
 
+/// Which strand row(s) a hover footprint wash covers. A primer represents one
+/// strand (its arrow band); an enzyme recognition site spans both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FootprintStrands {
+    Top,
+    Bottom,
+    Both,
+}
+
+impl FootprintStrands {
+    pub fn top(self) -> bool {
+        matches!(self, Self::Top | Self::Both)
+    }
+    pub fn bottom(self) -> bool {
+        matches!(self, Self::Bottom | Self::Both)
+    }
+}
+
 /// First hit whose rect contains `pos` and matches `extract`, in collection
 /// order. Callers query by variant in priority order (feature → search → cut →
 /// codon → seqpos), preserving the pre-unification resolution semantics.
@@ -146,6 +164,18 @@ pub(crate) fn greedy_stack(ranges: &[(usize, usize)]) -> (Vec<usize>, usize) {
 // *per block* rather than across the whole document, so a section with one
 // enzyme doesn't leave blank space matching the heaviest stack elsewhere.
 
+/// One cut-label group: co-located restriction sites (shared `cut_pos`) that
+/// share a single leader tick and stack their names vertically. `members` are
+/// indices into `cut_sites`, kept individually addressable (hover/click) even
+/// though they render as a set. `base_line` is the group's first label line
+/// within the cut band (line 0 = topmost).
+#[derive(Debug, Clone)]
+pub(crate) struct CutGroup {
+    pub cut_pos: usize,
+    pub members: Vec<usize>,
+    pub base_line: usize,
+}
+
 /// Layout decisions for one block.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct BlockLayout {
@@ -158,10 +188,13 @@ pub(crate) struct BlockLayout {
     /// Total feature-band height (Σ row heights); the Features track's
     /// `block_height`.
     pub feat_band_h: f32,
-    /// `(site_idx, row_in_block)` for cut sites whose `cut_pos` lies in
-    /// `[block_start, block_end]`.
-    pub cut_rows: Vec<(usize, usize)>,
-    pub n_cut_rows: usize,
+    /// Cut-label groups whose `cut_pos` lies in `[block_start, block_end]`.
+    /// Co-located sites (isoschizomers sharing a `cut_pos`) are one group —
+    /// their names stack vertically under a single leader tick instead of each
+    /// taking its own scattered row.
+    pub cut_groups: Vec<CutGroup>,
+    /// Total label lines across all groups (the cut-band height, in rows).
+    pub cut_band_lines: usize,
     /// `(primer_idx, row_in_block)` for **forward** primers overlapping this
     /// block (band above the top strand). `primer_idx` is a within-frame
     /// positional index into `Annotations::primers()`.
@@ -246,21 +279,56 @@ pub(crate) fn build_block_layouts(
         }
         let feat_band_h = fy;
 
-        // Cut sites whose top-strand cut sits in this block. Stacking
-        // intervals use label half-width converted to base columns so
-        // adjacent labels collide as the user expects.
-        let mut cut_idx_list: Vec<usize> = Vec::new();
-        let mut cut_ranges: Vec<(usize, usize)> = Vec::new();
+        // Cut sites whose top-strand cut sits in this block, **grouped by
+        // `cut_pos`**: isoschizomers at one position become a single group that
+        // stacks its names under one leader (decision 4 still holds — each stays
+        // a distinct, individually-addressable entity). Groups are stacked
+        // horizontally by their widest member's label width; a row's height is
+        // its tallest group, and line offsets are the prefix sum of row heights.
+        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
         for (i, s) in cut_sites.iter().enumerate() {
             if s.cut_pos >= block_start && s.cut_pos <= block_end {
-                cut_idx_list.push(i);
-                let half_px = s.enzyme.len() as f32 * style.label_char_w * 0.5 + 4.0;
-                let half_bases = (half_px / style.char_width).ceil() as usize + 1;
-                cut_ranges.push((s.cut_pos.saturating_sub(half_bases), s.cut_pos + half_bases));
+                match groups.iter_mut().find(|(pos, _)| *pos == s.cut_pos) {
+                    Some((_, members)) => members.push(i),
+                    None => groups.push((s.cut_pos, vec![i])),
+                }
             }
         }
-        let (cut_local_rows, n_cut_rows) = greedy_stack(&cut_ranges);
-        let cut_rows: Vec<(usize, usize)> = cut_idx_list.into_iter().zip(cut_local_rows).collect();
+        let group_ranges: Vec<(usize, usize)> = groups
+            .iter()
+            .map(|(pos, members)| {
+                let widest = members
+                    .iter()
+                    .map(|&i| cut_sites[i].enzyme.len())
+                    .max()
+                    .unwrap_or(0);
+                let half_px = widest as f32 * style.label_char_w * 0.5 + 4.0;
+                let half_bases = (half_px / style.char_width).ceil() as usize + 1;
+                (pos.saturating_sub(half_bases), pos + half_bases)
+            })
+            .collect();
+        let (group_rows, n_group_rows) = greedy_stack(&group_ranges);
+        // Per-row height = tallest group in that row; line offset = prefix sum.
+        let mut row_heights = vec![0usize; n_group_rows];
+        for (gi, &row) in group_rows.iter().enumerate() {
+            row_heights[row] = row_heights[row].max(groups[gi].1.len());
+        }
+        let mut row_line_offset = vec![0usize; n_group_rows];
+        let mut acc = 0usize;
+        for (r, h) in row_heights.iter().enumerate() {
+            row_line_offset[r] = acc;
+            acc += h;
+        }
+        let cut_band_lines = acc;
+        let cut_groups: Vec<CutGroup> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(gi, (cut_pos, members))| CutGroup {
+                cut_pos,
+                members,
+                base_line: row_line_offset[group_rows[gi]],
+            })
+            .collect();
 
         // Primers overlapping this block, stacked **per strand** into their own
         // band: forward above the top strand, reverse below the bottom strand.
@@ -273,7 +341,7 @@ pub(crate) fn build_block_layouts(
         let primer_fwd_band_h = n_fwd_rows as f32 * style.primer_row_h;
         let primer_rev_band_h = n_rev_rows as f32 * style.primer_row_h;
 
-        let cut_label_h = n_cut_rows as f32 * style.cut_label_row_h;
+        let cut_label_h = cut_band_lines as f32 * style.cut_label_row_h;
         let height = cut_label_h
             + style.ruler_h
             + primer_fwd_band_h
@@ -288,8 +356,8 @@ pub(crate) fn build_block_layouts(
             feat_rows,
             feat_row_offsets,
             feat_band_h,
-            cut_rows,
-            n_cut_rows,
+            cut_groups,
+            cut_band_lines,
             primer_fwd_rows,
             primer_fwd_band_h,
             primer_rev_rows,
@@ -504,6 +572,9 @@ pub(crate) struct Style {
     // colours
     pub text_color: Color32,
     pub selection_color: Color32,
+    /// Neutral grey wash for a hovered primer/enzyme footprint (see
+    /// `UiColors::hover_wash`); distinct from `selection_color` by hue.
+    pub hover_wash: Color32,
     pub cursor_color: Color32,
     pub cut_site_color: Color32,
     pub label_text_light: Color32,
@@ -562,6 +633,15 @@ pub(crate) struct BlockCtx<'a> {
     pub blink_on: bool,
     /// Cut site the pointer is hovering (full staple reveals), if any.
     pub hovered_cut_site: Option<usize>,
+    /// Ordered template nt-range to wash on hover — a hovered primer's annealed
+    /// footprint or a hovered enzyme's recognition site — plus which strand
+    /// row(s) to wash. Paint-time only, ephemeral (no `Selection`, no command,
+    /// no undo); the Sequence track washes it in the neutral `style.hover_wash`
+    /// grey, behind the strand glyphs and any real selection. A primer is
+    /// single-stranded (`Top` for Forward, `Bottom` for Reverse — matching its
+    /// arrow band); an enzyme recognition site is genuinely double-stranded
+    /// (`Both`). One wash path serves both nouns.
+    pub hover_footprint: Option<(usize, usize, FootprintStrands)>,
     /// Per-block stacking decisions (feature rows / cut rows).
     pub layout: &'a BlockLayout,
 }
@@ -1085,6 +1165,7 @@ mod tests {
             ruler_font: FontId::proportional(9.0),
             text_color: c,
             selection_color: c,
+            hover_wash: c,
             cursor_color: c,
             cut_site_color: c,
             label_text_light: c,
@@ -1148,6 +1229,7 @@ mod tests {
             selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
+            hover_footprint: None,
             layout: &layout,
         };
         let geom = BlockGeom {
@@ -1218,6 +1300,7 @@ mod tests {
             selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
+            hover_footprint: None,
             layout,
         }
     }
@@ -1323,6 +1406,7 @@ mod tests {
             selected_primer: None,
             blink_on: false,
             hovered_cut_site: None,
+            hover_footprint: None,
             layout,
         };
         let tracks: Vec<Box<dyn Track>> = vec![

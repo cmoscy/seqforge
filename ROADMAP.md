@@ -100,8 +100,8 @@ flowchart LR
 
     classDef done fill:#1f5,stroke:#093,color:#000;
     classDef next fill:#fd5,stroke:#a80,color:#000;
-    class V,R1,R25,T1,E10,E11,E12,E13,E14 done;
-    class E15 next;
+    class V,R1,R25,T1,E10,E11,E12,E13,E14,E15 done;
+    class E16 next;
 ```
 
 **Reading it:** the editor (v0.2) is the critical path and depends only on the

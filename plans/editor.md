@@ -762,16 +762,16 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
 > offers `Close ⌘W` for the active view); it routes through the same dirty-quit
 > intercept, never a direct exit.
 
-- [ ] Title bar `*name` when the active buffer is dirty.
-- [ ] `Overlay::DirtyCloseConfirm { view_id }` modal (`Save / Discard / Cancel`); wired to `AppCommand::CloseTab` and the window-close intercept (modern egui: `viewport().close_requested()` + `ViewportCommand::CancelClose`, replacing the old `on_close_event`).
-- [ ] `Cmd/Ctrl+S` accelerator registered at the menu level (fires regardless of focus).
-- [ ] `File → Quit  ⌘Q` — requests window close via `ViewportCommand::Close`, flowing through the same dirty-quit intercept (no direct `process::exit`; one quit path).
-- [ ] Toast on save success/failure (egui-notify, pull forward from Phase 8 polish if not already landed).
-- [ ] **Reset to file** (`File → Revert`): reloads from disk, discarding buffer + annotations + history and picking up external changes. Distinct from undo-all (which walks the in-session stack). Confirm dialog; enabled only when `source_path` is `Some`; routes through the single path (Open-onto-self).
-- [ ] **External-change guard:** store a content hash of the file as loaded (in memory on the buffer — no format involvement). On save, re-read disk and compare; if changed → GUI modal `Overwrite / Reload / Cancel`. For socket/CLI `Save`, return a structured **conflict** error unless `--force` (non-interactive override, so automation isn't blocked by a prompt). Doesn't impede the normal CLI/agent path — that mutates the in-memory buffer through the app, not the file on disk; the guard only fires on a genuine *external* change.
+- [x] Title bar `*name` when the active buffer is dirty. *(`app.rs` `last_title` + `ViewportCommand::Title`.)*
+- [x] `Overlay::DirtyCloseConfirm { view_id }` modal (`Save / Discard / Cancel`); wired to `AppCommand::CloseTab` and the window-close intercept (modern egui: `viewport().close_requested()` + `ViewportCommand::CancelClose`, replacing the old `on_close_event`). *(`overlay.rs:254`, `app.rs:663`.)*
+- [x] `Cmd/Ctrl+S` accelerator registered at the menu level (fires regardless of focus). *(`keymap.rs:74`, workspace-scoped.)*
+- [x] `File → Quit  ⌘Q` — requests window close via `ViewportCommand::Close`, flowing through the same dirty-quit intercept (no direct `process::exit`; one quit path). *(`keymap.rs:91` `AppCommand::Quit`.)*
+- [x] Toast on save success/failure (egui-notify, pull forward from Phase 8 polish if not already landed). *(`app.rs:131` `egui_notify::Toasts`.)*
+- [x] **Reset to file** (`File → Revert`): reloads from disk, discarding buffer + annotations + history and picking up external changes. Distinct from undo-all (which walks the in-session stack). Confirm dialog; enabled only when `source_path` is `Some`; routes through the single path (Open-onto-self). *(`overlay.rs:265` `ConfirmRevert`, `workspace.rs:280` `revert_from_disk`.)*
+- [x] **External-change guard:** store a content hash of the file as loaded (in memory on the buffer — no format involvement). On save, re-read disk and compare; if changed → GUI modal `Overwrite / Reload / Cancel`. For socket/CLI `Save`, return a structured **conflict** error unless `--force` (non-interactive override, so automation isn't blocked by a prompt). Doesn't impede the normal CLI/agent path — that mutates the in-memory buffer through the app, not the file on disk; the guard only fires on a genuine *external* change. *(`workspace.rs:150` `loaded_hash = hash_file_bytes`, `app.rs:712` Overwrite / `:738` Reload.)*
 - [ ] *(Optional polish)* once-per-buffer-per-session "undo history limit reached → Settings" toast when a buffer first hits its byte budget (see §3). Low priority; eviction itself stays silent.
 
-**Done when:** Can't accidentally lose work by closing the window; can't silently clobber an externally-changed file; can revert to disk state.
+**Done when:** ✅ (code + interactive GUI walk confirmed) Can't accidentally lose work by closing the window; can't silently clobber an externally-changed file; can revert to disk state. *(Optional undo-budget toast above remains deferred.)*
 
 ---
 

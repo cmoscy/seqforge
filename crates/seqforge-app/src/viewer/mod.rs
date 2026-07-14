@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use egui::{Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, Buffer, CutSite, Selection, View, ViewId, ViewerRequest, mutations::apply_splice,
+    Annotations, Buffer, CutSite, Selection, Strand, View, ViewId, ViewerRequest,
+    mutations::apply_splice,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -26,8 +27,8 @@ use crate::config::Config;
 
 use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
 use track::{
-    BlockCtx, FeatureContext, Hit, LayoutCache, LayoutKey, Style, TrackStack, build_block_layouts,
-    find_hit, open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
+    BlockCtx, FeatureContext, FootprintStrands, Hit, LayoutCache, LayoutKey, Style, TrackStack,
+    build_block_layouts, find_hit, open_edit_feature_cmd, screen_to_seq, strand_flag, y_to_block,
 };
 use translation::{OrfPromote, TranslationCache, build_translation_cache, codon_extend};
 
@@ -876,6 +877,7 @@ impl SequenceView {
             ruler_font: ruler_font.clone(),
             text_color: ui.visuals().text_color(),
             selection_color: cfg.theme.ui.selection.0,
+            hover_wash: cfg.theme.ui.hover_wash.0,
             cursor_color: cfg.theme.ui.cursor.0,
             cut_site_color: cfg.theme.ui.cut_site.0,
             label_text_light: cfg.theme.ui.label_text.0,
@@ -995,32 +997,39 @@ impl SequenceView {
 
             // Build the read-only per-block context. `blink_on` / `hovered` are
             // only used at paint time; hit collection passes placeholders.
-            let make_ctx = |block_idx: usize, blink_on: bool, hovered: Option<usize>| BlockCtx {
-                block_idx,
-                block_start: block_idx * line_width,
-                block_end: ((block_idx + 1) * line_width).min(seq_len),
-                seq,
-                seq_len,
-                render_ann,
-                primer_decomps: &primer_decomps,
-                primer_states,
-                primer_display,
-                cut_sites,
-                search_hits: &view.search_hits,
-                trans_cache: trans_cache.as_ref(),
-                show_orfs,
-                theme,
-                style: &style,
-                staging,
-                added: diff_added,
-                deleted: diff_deleted,
-                selection,
-                selected_feature,
-                selected_primer,
-                blink_on,
-                hovered_cut_site: hovered,
-                layout: &block_layouts[block_idx],
-            };
+            let make_ctx =
+                |block_idx: usize,
+                 blink_on: bool,
+                 hovered: Option<usize>,
+                 hover_footprint: Option<(usize, usize, FootprintStrands)>| {
+                    BlockCtx {
+                        block_idx,
+                        block_start: block_idx * line_width,
+                        block_end: ((block_idx + 1) * line_width).min(seq_len),
+                        seq,
+                        seq_len,
+                        render_ann,
+                        primer_decomps: &primer_decomps,
+                        primer_states,
+                        primer_display,
+                        cut_sites,
+                        search_hits: &view.search_hits,
+                        trans_cache: trans_cache.as_ref(),
+                        show_orfs,
+                        theme,
+                        style: &style,
+                        staging,
+                        added: diff_added,
+                        deleted: diff_deleted,
+                        selection,
+                        selected_feature,
+                        selected_primer,
+                        blink_on,
+                        hovered_cut_site: hovered,
+                        hover_footprint,
+                        layout: &block_layouts[block_idx],
+                    }
+                };
 
             // ── Pass 1: collect interactive rects across every visible block ──
             let mut hits: Vec<(Rect, Hit)> = Vec::new();
@@ -1033,7 +1042,7 @@ impl SequenceView {
                 if block_y > clip.max.y {
                     break;
                 }
-                let ctx = make_ctx(block_idx, false, None);
+                let ctx = make_ctx(block_idx, false, None, None);
                 stack.hit_block(&ctx, block_y, seq_x0, rect.min.x, &mut hits);
             }
 
@@ -1309,9 +1318,37 @@ impl SequenceView {
             let blink_on =
                 !focused || (ui.input(|i| i.time) * 1000.0 / BLINK_MS as f64) as i64 % 2 == 0;
             // The hovered cut site promotes its full staple (paint-time only).
-            let hovered_site_idx = response
-                .hover_pos()
-                .and_then(|p| find_hit(&hits, p, Hit::as_cut_site));
+            let hover_pos = response.hover_pos();
+            let hovered_site_idx = hover_pos.and_then(|p| find_hit(&hits, p, Hit::as_cut_site));
+            // Hovered primer/enzyme footprint → a neutral wash on the template
+            // (paint-time only, ephemeral). A primer under the pointer takes
+            // priority (the more specific object): its annealed `binding` range,
+            // washed **single-stranded** on its own band (Forward→top,
+            // Reverse→bottom — the same predicate `stack_primers` uses). Else the
+            // hovered enzyme's recognition site, washed on **both** strands (a
+            // recognition site is genuinely double-stranded). See
+            // `BlockCtx::hover_footprint`.
+            let hover_footprint = hover_pos
+                .and_then(|p| find_hit(&hits, p, Hit::as_primer))
+                .and_then(|id| render_ann.primer(id))
+                .and_then(|pr| pr.binding.clone().map(|b| (b, pr.strand)))
+                .map(|(b, strand)| {
+                    let strands = if matches!(strand, Strand::Reverse) {
+                        FootprintStrands::Bottom
+                    } else {
+                        FootprintStrands::Top
+                    };
+                    (b.start, b.end, strands)
+                })
+                .or_else(|| {
+                    hovered_site_idx.map(|i| {
+                        (
+                            cut_sites[i].recognition_start,
+                            cut_sites[i].recognition_end,
+                            FootprintStrands::Both,
+                        )
+                    })
+                });
 
             // ── Pass 2: paint every visible block via the track stack ─────
             for block_idx in 0..n_blocks {
@@ -1323,7 +1360,7 @@ impl SequenceView {
                 if block_y > clip.max.y {
                     break;
                 }
-                let ctx = make_ctx(block_idx, blink_on, hovered_site_idx);
+                let ctx = make_ctx(block_idx, blink_on, hovered_site_idx, hover_footprint);
                 stack.paint_block(&ctx, block_y, seq_x0, rect.min.x, &painter);
 
                 // Block separator (stack chrome).

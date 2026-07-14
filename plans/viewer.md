@@ -654,3 +654,27 @@ Shipped after the MVP; recorded here so the command surface is documented.
 - **`CutSite.recognition: String`** (IUPAC pattern, display-only) populated by `site_to_cutsite`.
 - **Overlay UI** (`⌘E`, persistent; Esc closes, re-open rehydrated): scrollable list of displayed enzymes, ＋Add, per-row ✕ remove, click name → reveal (single) / expand sites (multi), per-site jump via `AppCommand::RevealRange` (selection + scroll). Isoschizomers stay as distinct rows (decision 4 in [`../ROADMAP.md`](../ROADMAP.md)).
 
+## Post-v0.1: cut-site hover + label decluttering *(Phase 16 GUI-walk findings)*
+
+Two cut-site presentation refinements surfaced while walking the editor. Both are
+**render/interaction only** — no change to `cut_sites`/`active_enzymes` (decision 4
+holds: enzymes stay distinct entities, individually hover/click-able; this only
+changes how their labels are *drawn* and how hover *feedback* reads).
+
+- [ ] **Hover highlights the recognition site.** Hovering an enzyme label (already
+  the `hovered_cut_site` trigger for the staple reveal) also washes its
+  `recognition_start..recognition_end` on **both** strands in the neutral
+  `ui.hover_wash` grey — the enzyme half of the shared `BlockCtx::hover_footprint`
+  path (the primer half is single-stranded; see [`primers.md`](primers.md)
+  "Rendering"). Directly disambiguates a crowded MCS: point at one name, its exact
+  site lights up. Ephemeral, paint-time only.
+- [ ] **Co-located labels group under one leader.** Today `build_block_layouts`
+  greedy-stacks *each* cut site independently, so isoschizomers sharing a `cut_pos`
+  (e.g. AvaI/XmaI/BsoBI/TspMI) each take a row **and** redraw a tick at the same x —
+  a pile of overlapping ticks with no "one site" signal. Fix: bucket co-located
+  sites into a **group** (keyed on `cut_pos`), stack the *groups*, and render each
+  group's names as a tight vertical stack over a **single** leader tick. Per-name
+  hit rects preserved (each enzyme stays individually addressable). Matches the
+  SnapGene idiom. *(Angled leader-line routing for near-but-distinct labels is a
+  larger layout task — deferred.)*
+

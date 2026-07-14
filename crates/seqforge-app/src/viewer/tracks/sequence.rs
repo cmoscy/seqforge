@@ -88,6 +88,33 @@ impl Track for SequenceTrack {
             }
         }
 
+        // ── Hover footprint wash (behind selection and text) ──────
+        // A hovered primer's annealed range (single-stranded, on its own band)
+        // or enzyme's recognition site (both strands), in the neutral
+        // `hover_wash` grey — ephemeral, paint-time only. Drawn under the
+        // selection so a real selection still dominates.
+        if let Some((hs, he, strands)) = ctx.hover_footprint.filter(|_| !ctx.staging) {
+            let vis_s = hs.max(block_start);
+            let vis_e = he.min(block_end);
+            if vis_s < vis_e {
+                let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                let sw = (vis_e - vis_s) as f32 * char_width;
+                let wash = |y: f32| {
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(sx, y), Vec2::new(sw, char_height)),
+                        2.0,
+                        style.hover_wash,
+                    );
+                };
+                if strands.top() {
+                    wash(top_y);
+                }
+                if strands.bottom() {
+                    wash(bot_y);
+                }
+            }
+        }
+
         // ── Selection highlight / cursor (behind text) ────────────
         // Suppressed while staging — the realized diff wash (below) is
         // the active visual; selection coords are committed-space and
