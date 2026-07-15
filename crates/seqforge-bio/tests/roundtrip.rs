@@ -57,6 +57,38 @@ fn assert_features_eq(a: &[Feature], b: &[Feature]) {
     }
 }
 
+/// Collapse internal whitespace runs (incl. newlines) in a qualifier value.
+fn normalize_ws(v: &Option<String>) -> Option<String> {
+    v.as_ref()
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Like [`assert_features_eq`] but compares free-text qualifier *values* with
+/// whitespace normalized. Real GenBank files (e.g. NEB pUC19) hand-wrap `/note`
+/// text across lines; gb-io reflows that on write, so byte-exact value equality
+/// is a third-party formatting artifact, not a model change. Keys, ranges,
+/// kinds, strands, labels, and provenance are still asserted exactly.
+fn assert_features_eq_reflow_tolerant(a: &[Feature], b: &[Feature]) {
+    assert_eq!(a.len(), b.len(), "feature count differs");
+    for (x, y) in a.iter().zip(b) {
+        assert_eq!(x.range, y.range, "range");
+        assert_eq!(x.raw_kind, y.raw_kind, "raw_kind");
+        assert_eq!(x.strand, y.strand, "strand");
+        assert_eq!(x.label, y.label, "label");
+        assert_eq!(x.provenance, y.provenance, "provenance");
+        let keys_a: Vec<&String> = x.qualifiers.keys().collect();
+        let keys_b: Vec<&String> = y.qualifiers.keys().collect();
+        assert_eq!(keys_a, keys_b, "qualifier keys");
+        for (k, va) in &x.qualifiers {
+            assert_eq!(
+                normalize_ws(va),
+                normalize_ws(&y.qualifiers[k]),
+                "qualifier `{k}` value (whitespace-normalized)"
+            );
+        }
+    }
+}
+
 /// load fixture → save .gb → reload; sequence + features must be stable.
 fn roundtrip_gb(name: &str) {
     let doc1 = load(&fixture(name)).expect("load fixture");
@@ -78,6 +110,22 @@ fn roundtrip_circular_plasmid() {
 #[test]
 fn roundtrip_multi_feature() {
     roundtrip_gb("multi_feature.gb");
+}
+
+#[test]
+fn roundtrip_puc19() {
+    // Real NEB pUC19 — circular, feature-rich; the strongest fidelity anchor.
+    // Uses the reflow-tolerant comparison: gb-io re-wraps hand-wrapped /note
+    // text on write, so free-text values round-trip whitespace-normalized, not
+    // byte-exact (a known GenBank limitation — see B follow-up in the roadmap).
+    let doc1 = load(&fixture("pUC19.gbk")).expect("load pUC19");
+    let (buf, ann) = shell(doc1);
+    let out = TempOut::new("pUC19", "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+    let doc2 = load(out.path()).expect("reload gb");
+    assert_eq!(buf.text, doc2.sequence, "sequence changed on round-trip");
+    assert_eq!(buf.topology, doc2.topology, "topology changed");
+    assert_features_eq_reflow_tolerant(&ann.iter().cloned().collect::<Vec<_>>(), &doc2.features);
 }
 
 #[test]

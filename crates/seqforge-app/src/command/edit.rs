@@ -770,7 +770,7 @@ pub(super) fn apply_save_as(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqforge_core::{Topology, ViewKind, ViewSelection};
+    use seqforge_core::{BioOps, Feature, Primer, Topology, ViewKind, ViewSelection};
 
     /// Headless `AppState` with one active view over `seq`.
     fn state_with(seq: &[u8]) -> AppState {
@@ -1122,6 +1122,186 @@ mod tests {
         s.workspace.redo(vid).unwrap();
         assert_eq!(feature_count(&mut s), 1);
         assert_eq!(first_label(&mut s), "orig");
+    }
+
+    /// Minimal `BioOps` whose `load` uses the real parser; the rest is inert
+    /// (the edit/undo path never calls them).
+    struct LoadBio;
+    impl BioOps for LoadBio {
+        fn load(&self, path: &std::path::Path) -> Result<seqforge_core::Document, String> {
+            seqforge_bio::load(path).map_err(|e| e.to_string())
+        }
+        fn find_matches(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u8,
+            _: bool,
+        ) -> Vec<seqforge_core::SearchHit> {
+            vec![]
+        }
+        fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
+            vec![]
+        }
+        fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn primer_infos(&self, _: &[u8], _: &[&Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
+            vec![]
+        }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[seqforge_core::CutSite],
+            _: &[u8],
+            _: &seqforge_core::MethylContext,
+        ) -> Vec<seqforge_core::MethylState> {
+            vec![seqforge_core::MethylState::Cuttable; sites.len()]
+        }
+    }
+
+    /// Editor history-correctness property (Phase 16): loading a real circular
+    /// plasmid, applying a mixed edit script (insert / delete / replace /
+    /// reverse-complement / feature add·update·remove), then undoing everything
+    /// must restore a **byte-for-byte identical** buffer + annotation model. This
+    /// exercises the snapshot-based undo (decision 1) over a feature-rich,
+    /// origin-topology fixture — the regression net for silent undo/shift bugs.
+    #[test]
+    fn puc19_mixed_edit_script_undoes_to_identical_model() {
+        // `Feature`/`Primer` aren't `PartialEq`; project to comparable tuples.
+        type FeatProj = (
+            std::ops::Range<usize>,
+            String,
+            String,
+            Strand,
+            std::collections::BTreeMap<String, Option<String>>,
+            Option<seqforge_core::Provenance>,
+        );
+        fn proj_feats(fs: &[Feature]) -> Vec<FeatProj> {
+            fs.iter()
+                .map(|f| {
+                    (
+                        f.range.clone(),
+                        f.raw_kind.clone(),
+                        f.label.clone(),
+                        f.strand,
+                        f.qualifiers.clone(),
+                        f.provenance.clone(),
+                    )
+                })
+                .collect()
+        }
+        type PrimerProj = (
+            String,
+            String,
+            Option<std::ops::Range<usize>>,
+            Strand,
+            std::collections::BTreeMap<String, Option<String>>,
+        );
+        fn proj_primers(ps: &[Primer]) -> Vec<PrimerProj> {
+            ps.iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.sequence.clone(),
+                        p.binding.clone(),
+                        p.strand,
+                        p.qualifiers.clone(),
+                    )
+                })
+                .collect()
+        }
+
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/pUC19.gbk");
+        let mut s = AppState::default();
+        let vid = s
+            .workspace
+            .open_path(&path, &LoadBio)
+            .expect("load pUC19 fixture");
+        s.workspace.focus_view(vid);
+
+        let snapshot = |s: &mut AppState| {
+            s.workspace
+                .with_active_buffer(|_, buf, ann| {
+                    (
+                        buf.text.clone(),
+                        buf.topology,
+                        ann.iter().cloned().collect::<Vec<Feature>>(),
+                        ann.primers().cloned().collect::<Vec<Primer>>(),
+                    )
+                })
+                .unwrap()
+        };
+        let original = snapshot(&mut s);
+        assert_eq!(original.0.len(), 2686, "pUC19 is 2686 bp");
+        assert_eq!(original.1, Topology::Circular);
+        assert!(!original.2.is_empty(), "pUC19 has features to exercise");
+
+        // Fixed, mixed edit script — positions stay valid across prior edits.
+        let mut ops = 0;
+        apply_insert(&mut s, None, 100, "ATGCATGC".into()).unwrap();
+        ops += 1;
+        apply_delete(&mut s, None, 500, 520).unwrap();
+        ops += 1;
+        apply_replace(&mut s, None, 200, 210, "TTTTAAAA".into()).unwrap();
+        ops += 1;
+        apply_reverse_complement(&mut s, None, 1000, 1040).unwrap();
+        ops += 1;
+        let fid = match apply_add_feature(
+            &mut s,
+            None,
+            50,
+            80,
+            "misc_feature".into(),
+            "scratch".into(),
+            "+".into(),
+        )
+        .unwrap()
+        {
+            Some(ViewerResponse::FeatureAdded { id, .. }) => id,
+            other => panic!("expected FeatureAdded, got {other:?}"),
+        };
+        ops += 1;
+        apply_update_feature(
+            &mut s,
+            None,
+            fid,
+            Some("CDS".into()),
+            Some("renamed".into()),
+            Some("-".into()),
+            Some(55),
+            Some(85),
+        )
+        .unwrap();
+        ops += 1;
+        apply_remove_feature(&mut s, None, fid).unwrap();
+        ops += 1;
+
+        // Sanity: the script actually changed the buffer.
+        assert_ne!(
+            snapshot(&mut s).0,
+            original.0,
+            "edits should mutate the buffer"
+        );
+
+        // Undo everything (LIFO).
+        for _ in 0..ops {
+            s.workspace.undo(vid).unwrap();
+        }
+
+        let restored = snapshot(&mut s);
+        assert_eq!(restored.0, original.0, "sequence not restored by undo");
+        assert_eq!(restored.1, original.1, "topology not restored by undo");
+        assert_eq!(
+            proj_feats(&restored.2),
+            proj_feats(&original.2),
+            "features not restored by undo"
+        );
+        assert_eq!(
+            proj_primers(&restored.3),
+            proj_primers(&original.3),
+            "primers not restored by undo"
+        );
     }
 
     #[test]

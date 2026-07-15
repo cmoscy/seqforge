@@ -315,6 +315,17 @@ Dispatches on extension to `genbank::write` or `fasta::write`. No `Document` rou
 
 This is a `seqforge-core::document.rs` change. `viewer.rs` calls `feature_color(feature)` — the call site changes from `feature.kind` to `classify(&feature.raw_kind)`.
 
+> **Known limitation — free-text qualifier reflow (not fixed; cosmetic).** The
+> above makes *which* qualifiers and values survive lossless. It does **not**
+> make byte-exact the *internal whitespace* of a long free-text value: `gb-io`
+> re-wraps hand-wrapped `/note` text on write, so a value like `"…presence \nof
+> cAMP."` reloads as `"…presence\n\nof cAMP."` (same words, re-folded). Rooted in
+> `gb-io`'s line folding, not our writer (we pass values through untouched).
+> Surfaced by the `roundtrip_puc19` test, which therefore compares free-text
+> values whitespace-normalized. Deferred as cosmetic; byte-exact fidelity would
+> require normalizing note whitespace on *load* (changes ingest semantics) —
+> out of scope for v0.2.
+
 **Save side-effect flow:**
 
 `edit::apply_save` and `edit::apply_save_as` emit `AppCommand::SaveDocument { path }` (a new variant) rather than calling `seqforge-bio::save` directly. The `apply` dispatcher processes it in the next submodule (or directly in `file.rs`), calls `seqforge-bio::save`, clears `buf.dirty`, and emits a toast. This keeps the IO off the command arm that originated from a socket connection (which may be on a different thread in the future).
