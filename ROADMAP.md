@@ -19,8 +19,8 @@ architecture contracts live under [`docs/`](docs/).
 | Milestone | Theme | State |
 |---|---|---|
 | **v0.1** | Read-only viewer + embedded terminal + single command layer | ✅ shipped (no tag — see Tagging policy) |
-| **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ⏳ next |
-| **(v0.2 gate)** | Methylation-aware cut sites (Dam/Dcm/CpG) — cloning correctness | ⏳ next — one feature before the tag |
+| **v0.2** | Editor — insert/delete/replace, undo, save, feature editing | ✅ shipped — tagged `v0.2.0` |
+| **(v0.2 gate)** | Methylation-aware cut sites (Dam/Dcm/CpG) — cloning correctness | ✅ done (in the tag) |
 | **(parallel)** | Restriction cloning depth (digest → ligation → Golden Gate) | 🟡 Tier 1 done |
 | **(parallel)** | Primers + thermodynamics (Tm/GC → display → design) | 🟡 Phases 1, 1.5, 2.1, 2.1b, 2.2a complete; 2.2b (generative package: random oligos, barcode/overhang sets) deferred |
 
@@ -32,12 +32,16 @@ claim. We only tag when the tag has a consumer:
 
 - **No retroactive `v0.1.0` tag.** Nothing external pins it, so a backdated tag
   buys nothing. v0.1 is simply "done."
-- **Tag `v0.2.0` at Phase 16** — once the editor milestone is done *and* verified —
-  as a durable "editor-complete" reference (bisect anchor / known-good state).
-  The tag additionally gates on the **methylation-aware cut-sites** correctness
-  feature ([`plans/methylation.md`](plans/methylation.md), decision 18): showing a
-  methylation-blocked enzyme as cuttable is a silent wrong answer, so the pin
-  shouldn't freeze without it.
+- **`v0.2.0` — tagged.** Marks the **viewer + editor foundation** as complete and
+  frozen: read a sequence, edit it losslessly (insert/delete/replace/RC, undo,
+  save, feature editing), with methylation-aware cut sites for cloning correctness
+  (decision 18). It is a milestone bookmark / bisect anchor and the **gate to the
+  generative/assembly track** (PCR, restriction digest → fragments, ligation,
+  Golden Gate) — not a release claim. Verification bar was deliberately modest to
+  match that role: editor GUI walk confirmed + the programmatic round-trip / undo-
+  inverse tests green on Linux CI. **Cross-platform (macOS/Windows) CI was
+  descoped** from the gate — it belongs to an eventual release milestone, not a
+  foundation-freeze bookmark.
 - The durable habit is **CHANGELOG discipline at milestone boundaries**, not the
   tag itself. Real version discipline starts when `seqforge-restriction` is
   extracted to crates.io (Restriction Tier 4).
@@ -52,10 +56,10 @@ Legend: ✅ done · 🟡 partial · ⏳ next · 📋 queued · ❌ removed
 |---|---|---|---|
 | **Viewer (v0.1)** | [`plans/viewer.md`](plans/viewer.md) | ✅ Phases 0–9.5 | (complete — no retroactive tag, see Tagging policy) |
 | **Model-split refactor** | [`plans/refactor.md`](plans/refactor.md) | ✅ Tier 1 / 2-light / 2.5 · 🟡 3a | (folds into editor) |
-| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | 🟡 Stage 2.6 + Phases 10–15 done (14e; Phase 15 dirty/save UX; 14e ORF-colours→theme); GUI walk pending | Phase 16 — v0.2 verify |
+| **Editor (v0.2)** | [`plans/editor.md`](plans/editor.md) | ✅ Phases 10–16 done — GUI walk confirmed, round-trip + undo-inverse tests green; **tagged `v0.2.0`** | (foundation complete — generative/assembly track next) |
 | **Render tracks** | [`plans/render-tracks.md`](plans/render-tracks.md) | ✅ complete — T0–T4 (Track/TrackStack, composite Features track w/ 14e C2, layout memoization); minimap reuse dropped | — (primers build on the trait) |
 | **Restriction** | [`plans/restriction.md`](plans/restriction.md) | 🟡 Tier 1 done | Tier 2 — digest + fragments |
-| **Methylation** | [`plans/methylation.md`](plans/methylation.md) | 🟡 data pipeline + evaluator + integration done (`MethylContext` threaded through bio/core/app; Cut-sites tab toggles + blocked/impaired rendering) | GUI verification + real `ms_scrape` refresh |
+| **Methylation** | [`plans/methylation.md`](plans/methylation.md) | ✅ done — pipeline + evaluator + integration + GUI-confirmed (in `v0.2.0`) | (correctness gate met; EcoBI/EcoKI additive later) |
 | **Primers + thermo** | [`plans/primers.md`](plans/primers.md) | 🟡 Phases 1, 1.5, 2.1, 2.1b, 2.2a complete (thermo QC; Inspector unified viewer/detail/**inline-editor**; 1.5e oligo-highlight; enzyme-in-pane; CLI list/find + add/update/remove/rescan/add-site-primer; 2.1b binding-site listing + rescan/attach/detach + anneal-Tm; **2.2a restriction-site tail composition** — `restriction_tail` builder + Insert-tool UI + `AddPrimerSite`) | 2.2b generative package (random oligos, barcode/overhang **sets**) — deferred, needs RNG |
 
 ---

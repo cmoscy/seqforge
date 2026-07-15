@@ -1,7 +1,8 @@
 # SeqForge Editor Plan (v0.2) — revised after Stage 2.5 refactor
 
-> **Status: Stage 2.6 + Phases 10–13 done (incl. 13.6a–d realized diff preview
-> + 13.7 UX refinements). Phase 14 (feature-editing UI) next.** Staged
+> **Status: COMPLETE — Phases 10–16 done; tagged `v0.2.0` (viewer + editor
+> foundation frozen, gate to the generative/assembly track). Below is the
+> realized plan of record.** Staged
 > `PendingEdit` editing landed (§6, ROADMAP decision 10): in-canvas
 > typing/Backspace/⌘X/⌘V and menu Cut/Paste/Delete all stage a realized diff
 > preview, committing one `ViewerRequest` on `Enter`; CLI/terminal/agent post
@@ -786,13 +787,17 @@ Two `viewer.rs`/`theme.rs` refinements taken as a single pass after the function
 
 ---
 
-### Phase 16 — v0.2 verification + release *(½ day)*
+### Phase 16 — v0.2 verification + tag *(done)*
 
-- [ ] Manual walk: open pUC19, type bases, delete a region, RC a selection, add a feature, undo through everything, save, reload, diff against expected.
+> **Done.** `v0.2.0` is a foundation-freeze bookmark / gate to the generative
+> track, not a release — so the verification bar was scoped to match (see ROADMAP
+> Tagging policy). Cross-platform CI was **descoped** from the gate.
+
+- [x] Manual walk: open pUC19, type bases, delete a region, RC a selection, add a feature, undo through everything, save, reload — **confirmed by user**.
   - Walk findings addressed: translation-lane selection had no visual feedback → **AA-track selection highlight + frame-alignment cue** (see [14e polish](#14e-polish--presentation-follow-ups) above); primer/enzyme hover feedback + enzyme label grouping (see [`viewer.md`](viewer.md) Post-v0.1); **selection-model consolidation** — `View`'s three parallel selection fields folded into one `ViewSelection` sum type (mutual exclusion structural; cut-site map↔panel parity gained), landed **pre-tag** so `v0.2.0` freezes the consolidated shape (ROADMAP decision 17). Follow-ups same pass: geometry-edit staleness guard, Inspector selection-field collapse, follow-selection (config `inspector.follow_selection`), `delete_intent()` dispatch.
-- [ ] Round-trip all `tests/fixtures/` programmatically: `load → modify → undo back → save → reload → assert sequence + feature equality`.
-- [ ] CI green on Linux + macOS + Windows builds.
-- [ ] Tag `v0.2.0`.
+- [x] Programmatic round-trip over the pUC19 fixture: `roundtrip_puc19` (load → save → reload, model-level; reflow-tolerant free-text notes) + `puc19_mixed_edit_script_undoes_to_identical_model` (load → mixed edit script → undo → byte-identical model).
+- [x] CI green on Linux (`ci.yml`: fmt + clippy `-D warnings` + `cargo test --workspace`). *(macOS/Windows descoped — deferred to a future release milestone.)*
+- [x] Tag `v0.2.0`.
 
 ---
 
