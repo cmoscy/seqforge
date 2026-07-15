@@ -36,7 +36,28 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// Codegen-local mirror of `enzyme::MethylEffect`. Kept separate from the
+/// library type on purpose: codegen must build *before* the generated table it
+/// writes, so it cannot depend on the library crate compiling. The emitted
+/// literals still reference the real `crate::enzyme::MethylEffect` by name.
+#[derive(Debug, Clone, Copy)]
+enum MethEffect {
+    Cut,
+    Impaired,
+    Blocked,
+    Variable,
+    Untested,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Meth {
+    dam: MethEffect,
+    dcm: MethEffect,
+    cpg: MethEffect,
+}
+
 const BAIROCH_PATH: &str = "crates/seqforge-restriction/data/rebase_bairoch.txt";
+const METH_PATH: &str = "crates/seqforge-restriction/data/rebase_methylation.tsv";
 const OUT_PATH: &str = "crates/seqforge-restriction/src/enzymes_generated.rs";
 
 /// REBASE's "always latest" bairoch-format file. REBASE publishes `link_*`
@@ -51,7 +72,16 @@ struct Entry {
     top_offset: i16,
     bottom_offset: i16,
     is_type_iis: bool,
+    /// Methylation sensitivity, joined from `data/rebase_methylation.tsv` by
+    /// `join_methylation`. Starts `Untested`; set during the join.
+    methylation: Meth,
 }
+
+const UNTESTED: Meth = Meth {
+    dam: MethEffect::Untested,
+    dcm: MethEffect::Untested,
+    cpg: MethEffect::Untested,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -59,10 +89,14 @@ fn main() {
     // the crate directory. The snapshot may not exist yet (first --fetch), so
     // we key off the data *directory*, not the file.
     let from_root = Path::new("crates/seqforge-restriction/data").is_dir();
-    let (data_path, out_path) = if from_root {
-        (BAIROCH_PATH, OUT_PATH)
+    let (data_path, meth_path, out_path) = if from_root {
+        (BAIROCH_PATH, METH_PATH, OUT_PATH)
     } else {
-        ("data/rebase_bairoch.txt", "src/enzymes_generated.rs")
+        (
+            "data/rebase_bairoch.txt",
+            "data/rebase_methylation.tsv",
+            "src/enzymes_generated.rs",
+        )
     };
 
     // --fetch [url]: manual, intentional refresh of the REBASE snapshot.
@@ -83,13 +117,140 @@ fn main() {
         )
     });
     let entries = parse_all(&body);
-    let kept = filter_and_classify(entries);
+    let mut kept = filter_and_classify(entries);
+
+    // Join methylation sensitivity (Phase 3). Missing file is non-fatal — the
+    // table then ships fully `Untested` (as Phase 1 did), and the coverage-gate
+    // test flags it. This keeps a fresh checkout buildable before the scrape.
+    let meth_body = fs::read_to_string(meth_path).unwrap_or_default();
+    if meth_body.is_empty() {
+        eprintln!("note: {meth_path} not found — emitting all enzymes as Untested.\n  populate it with: cargo run -p seqforge-restriction --bin ms_scrape");
+    }
+    let n_sourced = join_methylation(&mut kept, &meth_body);
+
     let out_text = emit_generated(&kept);
     fs::write(out_path, out_text).expect("write enzymes_generated.rs");
     eprintln!("wrote {} enzymes to {}", kept.len(), out_path);
     let n_iis = kept.iter().filter(|e| e.is_type_iis).count();
     eprintln!("  Type II: {}", kept.len() - n_iis);
     eprintln!("  Type IIs: {}", n_iis);
+    eprintln!(
+        "  methylation: {} sourced, {} untested",
+        n_sourced,
+        kept.len() - n_sourced
+    );
+}
+
+/// Join methylation verdicts from a `rebase_methylation.tsv` body onto the kept
+/// enzymes. Primary key is enzyme name; enzymes with no definite verdict then
+/// inherit from a same-recognition enzyme that has one (isoschizomers share the
+/// methylated recognition context). Returns the count that ended up with at
+/// least one sourced (non-`Untested`) system.
+///
+/// Recognition-level conflicts (two enzymes, same recognition, different
+/// definite verdicts) are logged, not fatal: direct-by-name sourcing is
+/// authoritative per enzyme, so a conflict is a data note for the maintainer,
+/// and the fallback only ever fills a fully-`Untested` enzyme.
+fn join_methylation(kept: &mut [Entry], tsv: &str) -> usize {
+    let by_name = parse_methylation_tsv(tsv);
+
+    // Build a recognition → verdict index from enzymes that have a definite
+    // verdict, flagging conflicts.
+    let mut by_recognition: BTreeMap<Vec<u8>, Meth> = BTreeMap::new();
+    for e in kept.iter() {
+        let Some(m) = by_name.get(&e.name).copied() else {
+            continue;
+        };
+        if is_fully_untested(&m) {
+            continue;
+        }
+        match by_recognition.get(&e.recognition) {
+            Some(prev) if !meth_eq(prev, &m) => {
+                let rec: String = e.recognition.iter().map(|b| *b as char).collect();
+                eprintln!(
+                    "  methylation conflict for recognition {rec}: {} differs from an earlier isoschizomer — keeping first",
+                    e.name
+                );
+            }
+            None => {
+                by_recognition.insert(e.recognition.clone(), m);
+            }
+            _ => {}
+        }
+    }
+
+    let mut n_sourced = 0;
+    for e in kept.iter_mut() {
+        let direct = by_name.get(&e.name).copied().unwrap_or(UNTESTED);
+        let m = if is_fully_untested(&direct) {
+            // Fall back to a same-recognition isoschizomer's verdict, if any.
+            by_recognition
+                .get(&e.recognition)
+                .copied()
+                .unwrap_or(UNTESTED)
+        } else {
+            direct
+        };
+        e.methylation = m;
+        if !is_fully_untested(&m) {
+            n_sourced += 1;
+        }
+    }
+    n_sourced
+}
+
+/// Parse `rebase_methylation.tsv` (`name<TAB>dam<TAB>dcm<TAB>cpg`, `#` comments)
+/// into a name → verdict map.
+fn parse_methylation_tsv(body: &str) -> BTreeMap<String, Meth> {
+    let mut map = BTreeMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        map.insert(
+            cols[0].to_string(),
+            Meth {
+                dam: meth_from_str(cols[1]),
+                dcm: meth_from_str(cols[2]),
+                cpg: meth_from_str(cols[3]),
+            },
+        );
+    }
+    map
+}
+
+fn meth_from_str(s: &str) -> MethEffect {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "cut" => MethEffect::Cut,
+        "impaired" => MethEffect::Impaired,
+        "blocked" => MethEffect::Blocked,
+        "variable" => MethEffect::Variable,
+        _ => MethEffect::Untested,
+    }
+}
+
+fn is_fully_untested(m: &Meth) -> bool {
+    matches!(m.dam, MethEffect::Untested)
+        && matches!(m.dcm, MethEffect::Untested)
+        && matches!(m.cpg, MethEffect::Untested)
+}
+
+fn meth_eq(a: &Meth, b: &Meth) -> bool {
+    fn code(e: MethEffect) -> u8 {
+        match e {
+            MethEffect::Cut => 0,
+            MethEffect::Impaired => 1,
+            MethEffect::Blocked => 2,
+            MethEffect::Variable => 3,
+            MethEffect::Untested => 4,
+        }
+    }
+    code(a.dam) == code(b.dam) && code(a.dcm) == code(b.dcm) && code(a.cpg) == code(b.cpg)
 }
 
 /// Download the REBASE bairoch snapshot to `dest` via `curl`. Shells out
@@ -201,6 +362,7 @@ fn filter_and_classify(raw: Vec<RawRecord>) -> Vec<Entry> {
             top_offset: top_off,
             bottom_offset: bot_off,
             is_type_iis: is_iis,
+            methylation: UNTESTED,
         });
     }
 
@@ -303,7 +465,9 @@ fn emit_generated(entries: &[Entry]) -> String {
          // ║   Copyright (c) Dr. Richard J. Roberts. Used with attribution.   ║\n\
          // ╚══════════════════════════════════════════════════════════════════╝\n\n",
     );
-    s.push_str("use crate::enzyme::{Enzyme, EnzymeType, Iupac};\n\n");
+    s.push_str(
+        "use crate::enzyme::{Enzyme, EnzymeType, Iupac, MethylEffect, MethylSensitivity};\n\n",
+    );
     // `rustfmt::skip` keeps the compact one-line-per-enzyme layout: without it
     // rustfmt explodes each entry across ~9 lines and `fmt --check` would fail
     // after any regen.
@@ -316,11 +480,33 @@ fn emit_generated(entries: &[Entry]) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         let kind = if e.is_type_iis { "TypeIIs" } else { "TypeII" };
+        // `e.methylation` is the per-system verdict joined from
+        // `data/rebase_methylation.tsv` by `join_methylation` (Untested if unsourced).
+        let meth = format_methylation(&e.methylation);
         s.push_str(&format!(
-            "    Enzyme {{ name: {:?}, recognition: &[{rec}], top_offset: {}, bottom_offset: {}, enzyme_type: EnzymeType::{} }},\n",
+            "    Enzyme {{ name: {:?}, recognition: &[{rec}], top_offset: {}, bottom_offset: {}, enzyme_type: EnzymeType::{}, methylation: {meth} }},\n",
             e.name, e.top_offset, e.bottom_offset, kind,
         ));
     }
     s.push_str("];\n");
     s
+}
+
+/// Render a `MethylSensitivity` as the Rust literal emitted into the generated
+/// table. Kept as a single source of truth so the Phase 3 join only has to fill
+/// `Entry.methylation` — the emit shape doesn't change.
+fn format_methylation(m: &Meth) -> String {
+    let v = |e: MethEffect| match e {
+        MethEffect::Cut => "Cut",
+        MethEffect::Impaired => "Impaired",
+        MethEffect::Blocked => "Blocked",
+        MethEffect::Variable => "Variable",
+        MethEffect::Untested => "Untested",
+    };
+    format!(
+        "MethylSensitivity {{ dam: MethylEffect::{}, dcm: MethylEffect::{}, cpg: MethylEffect::{} }}",
+        v(m.dam),
+        v(m.dcm),
+        v(m.cpg),
+    )
 }

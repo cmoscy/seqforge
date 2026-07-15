@@ -6,9 +6,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Annotations, Buffer, CutSite, Document, FeatureId, Primer, PrimerId, SearchHit, Strand, View,
-    ViewId, ViewSelection,
+    Annotations, Buffer, CutSite, Document, FeatureId, MethylContext, MethylState, Primer,
+    PrimerId, SearchHit, Strand, View, ViewId, ViewSelection,
 };
+
+fn default_methyl_dam() -> bool {
+    true
+}
+
+fn default_methyl_dcm() -> bool {
+    true
+}
 
 // ── Selection model ───────────────────────────────────────────────────────────
 
@@ -180,6 +188,18 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
+        /// Dam methylation active on this molecule (default: on — standard *E. coli* prep).
+        #[arg(long, default_value_t = true)]
+        #[serde(default = "default_methyl_dam")]
+        dam: bool,
+        /// Dcm methylation active on this molecule (default: on).
+        #[arg(long, default_value_t = true)]
+        #[serde(default = "default_methyl_dcm")]
+        dcm: bool,
+        /// CpG methylation active on this molecule (default: off).
+        #[arg(long, default_value_t = false)]
+        #[serde(default)]
+        cpg: bool,
     },
 
     // ── Editor write-ops (v0.2) ────────────────────────────────────────────
@@ -516,7 +536,13 @@ pub enum ViewerResponse {
     /// Find — all matching hits (empty when the pattern was cleared).
     SearchResults { count: usize, hits: Vec<SearchHit> },
     /// Enzymes — all cut sites found (empty when the enzyme list was cleared).
-    CutSites { count: usize, sites: Vec<CutSite> },
+    CutSites {
+        count: usize,
+        sites: Vec<CutSite>,
+        methylation: MethylContext,
+        /// Parallel to `sites` — derived verdicts under `methylation`.
+        methyl_states: Vec<MethylState>,
+    },
     /// An editor write-op (insert/delete/replace/RC/cut/paste/undo/redo/feature)
     /// succeeded; `len` is the buffer length after the edit. `changed` is false
     /// for a no-op Undo/Redo (empty history) so callers can report "nothing to
@@ -655,6 +681,13 @@ pub trait BioOps {
     /// shape — the assembly (classify + qc) lives in `seqforge_bio` (which owns
     /// the thermo + anneal code), mirroring `find_cut_sites -> Vec<CutSite>`.
     fn primer_infos(&self, seq: &[u8], primers: &[&Primer], circular: bool) -> Vec<PrimerInfo>;
+    /// Derive methylation verdicts for cut sites under a context (CLI/socket output).
+    fn methyl_states_for_sites(
+        &self,
+        sites: &[CutSite],
+        seq: &[u8],
+        methylation: &MethylContext,
+    ) -> Vec<MethylState>;
 }
 
 /// Union `add` into `base`, preserving order and skipping case-insensitive
@@ -812,7 +845,14 @@ pub fn dispatch<B: BioOps>(
             Ok(ViewerResponse::Primers { primers: infos })
         }
 
-        ViewerRequest::Enzymes { query, op, view: _ } => {
+        ViewerRequest::Enzymes {
+            query,
+            op,
+            view: _,
+            dam,
+            dcm,
+            cpg,
+        } => {
             let circular = buffer.is_circular();
             // active_enzymes is the source of truth; the op mutates it and
             // cut_sites is always re-derived through the single scanner.
@@ -827,7 +867,18 @@ pub fn dispatch<B: BioOps>(
             let count = sites.len();
             view.active_enzymes = new_set;
             view.cut_sites = sites.clone();
-            Ok(ViewerResponse::CutSites { count, sites })
+            view.methylation = MethylContext { dam, dcm, cpg };
+            let methyl_states =
+                bio.methyl_states_for_sites(&sites, &buffer.text, &view.methylation);
+            // Cache alongside cut_sites (same lifecycle) so render/inspector read
+            // it instead of re-deriving per frame.
+            view.methyl_states = methyl_states.clone();
+            Ok(ViewerResponse::CutSites {
+                count,
+                sites,
+                methylation: view.methylation,
+                methyl_states,
+            })
         }
     }
 }
@@ -886,6 +937,17 @@ mod tests {
             });
             self
         }
+        fn with_site(mut self, start: usize) -> Self {
+            self.sites.push(CutSite {
+                enzyme: "EcoRI".into(),
+                recognition: "GAATTC".into(),
+                recognition_start: start,
+                recognition_end: start + 6,
+                cut_pos: start + 1,
+                bottom_cut_pos: start + 5,
+            });
+            self
+        }
     }
 
     impl BioOps for FakeBio {
@@ -912,8 +974,6 @@ mod tests {
             self.hits.clone()
         }
         fn find_cut_sites(&self, _seq: &[u8], enzymes: &[&str], _circular: bool) -> Vec<CutSite> {
-            // Honour the enzyme list so the dispatch's re-derive is testable:
-            // an empty set yields no sites; any non-empty set echoes the stub.
             if enzymes.is_empty() {
                 vec![]
             } else {
@@ -963,6 +1023,21 @@ mod tests {
                     sites: vec![],
                 })
                 .collect()
+        }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[CutSite],
+            _seq: &[u8],
+            methylation: &MethylContext,
+        ) -> Vec<MethylState> {
+            // Context-sensitive stub: Dam-on blocks every site, so tests can prove
+            // the cache reflects the passed context (not just its length).
+            let state = if methylation.dam {
+                MethylState::Blocked
+            } else {
+                MethylState::Cuttable
+            };
+            vec![state; sites.len()]
         }
     }
 
@@ -1080,6 +1155,9 @@ mod tests {
             query: "EcoRI BamHI".into(),
             op: EnzymeOp::Set,
             view: None,
+            dam: true,
+            dcm: true,
+            cpg: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
@@ -1194,6 +1272,9 @@ mod tests {
             query: "unique".into(),
             op: EnzymeOp::Set,
             view: None,
+            dam: true,
+            dcm: true,
+            cpg: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
@@ -1524,12 +1605,54 @@ mod tests {
                 query: String::new(),
                 op: EnzymeOp::Set,
                 view: None,
+                dam: true,
+                dcm: true,
+                cpg: false,
             },
         )
         .unwrap();
         assert!(view.cut_sites.is_empty());
         assert!(view.active_enzymes.is_empty());
+        assert!(view.methyl_states.is_empty());
         assert!(matches!(resp, ViewerResponse::CutSites { count: 0, .. }));
+    }
+
+    #[test]
+    fn dispatch_enzymes_caches_methyl_states_parallel_to_sites() {
+        let (mut view, buf, mut ann) = fixture();
+        let bio = FakeBio::new().with_site(0).with_site(10);
+        let enzymes = |view: &mut View, ann: &mut Annotations, dam: bool| {
+            dispatch(
+                view,
+                &buf,
+                ann,
+                &bio,
+                ViewerRequest::Enzymes {
+                    query: "EcoRI".into(),
+                    op: EnzymeOp::Set,
+                    view: None,
+                    dam,
+                    dcm: false,
+                    cpg: false,
+                },
+            )
+            .unwrap()
+        };
+        // Dam on: cache is populated, parallel to sites, and reflects the context.
+        enzymes(&mut view, &mut ann, true);
+        assert_eq!(view.methyl_states.len(), view.cut_sites.len());
+        assert!(
+            view.methyl_states
+                .iter()
+                .all(|s| *s == MethylState::Blocked)
+        );
+        // Re-run with Dam off: cache refreshes to the new context.
+        enzymes(&mut view, &mut ann, false);
+        assert!(
+            view.methyl_states
+                .iter()
+                .all(|s| *s == MethylState::Cuttable)
+        );
     }
 
     /// Run an enzyme op against `view`, returning nothing — callers assert on
@@ -1544,6 +1667,9 @@ mod tests {
                 query: query.into(),
                 op,
                 view: None,
+                dam: true,
+                dcm: true,
+                cpg: false,
             },
         )
         .unwrap();

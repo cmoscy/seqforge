@@ -16,7 +16,8 @@ use std::hash::{Hash, Hasher};
 
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, CutSite, Feature, FeatureId, FeatureKind, PrimerId, SearchHit, Selection, Strand,
+    Annotations, CutSite, Feature, FeatureId, FeatureKind, MethylState, PrimerId, SearchHit,
+    Selection, Strand,
 };
 
 use crate::command::AppCommand;
@@ -302,9 +303,9 @@ pub(crate) fn build_block_layouts(
                     .map(|&i| cut_sites[i].enzyme.len())
                     .max()
                     .unwrap_or(0);
-                let half_px = widest as f32 * style.label_char_w * 0.5 + 4.0;
-                let half_bases = (half_px / style.char_width).ceil() as usize + 1;
-                (pos.saturating_sub(half_bases), pos + half_bases)
+                let full_px = widest as f32 * style.label_char_w + 8.0;
+                let full_bases = (full_px / style.char_width).ceil() as usize + 1;
+                (pos.saturating_sub(1), *pos + full_bases)
             })
             .collect();
         let (group_rows, n_group_rows) = greedy_stack(&group_ranges);
@@ -611,6 +612,9 @@ pub(crate) struct BlockCtx<'a> {
     pub primer_display: super::PrimerDisplay,
     /// Cut sites (empty while staging — derived overlays are suppressed then).
     pub cut_sites: &'a [CutSite],
+    /// Methylation verdict per site, parallel to `cut_sites` (cached on the
+    /// `View`, recomputed only on enzyme/context change — not per frame).
+    pub methyl_states: &'a [MethylState],
     pub search_hits: &'a [SearchHit],
     pub trans_cache: Option<&'a TranslationCache>,
     pub show_orfs: bool,
@@ -1216,6 +1220,7 @@ mod tests {
             primer_states: &[],
             primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
+            methyl_states: &[],
             search_hits: &[],
             trans_cache: None,
             show_orfs: false,
@@ -1287,6 +1292,7 @@ mod tests {
             primer_states: &[],
             primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
+            methyl_states: &[],
             search_hits: &[],
             trans_cache: None,
             show_orfs: false,
@@ -1393,6 +1399,7 @@ mod tests {
             primer_states: &[],
             primer_display: crate::viewer::PrimerDisplay::default(),
             cut_sites: &[],
+            methyl_states: &[],
             search_hits: &[],
             trans_cache: None,
             show_orfs: false,

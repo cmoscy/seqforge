@@ -24,7 +24,7 @@ pub use primer::{
     classify_attachment, decompose_primer, enzyme_catalog, enzyme_cuts, find_primer_binding_sites,
     primer_infos, primer_qc, primer_qc_with_anneal, restriction_tail,
 };
-pub use search::{find_cut_sites, find_iupac_matches};
+pub use search::{find_cut_sites, find_iupac_matches, methyl_states_for_sites};
 pub use seqforge_thermo::{
     DEFAULT_FOLD_TEMP_C, FoldError, TmError, duplex_tm, gc, hairpin_dg, self_dimer_dg, tm,
 };

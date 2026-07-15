@@ -7,9 +7,43 @@
 //! painted last in the stack's z-order so the staple lands on top of the
 //! strands it crosses.
 
-use egui::{Align2, Painter, Pos2, Rect, Stroke, Vec2};
+use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, Vec2};
+use seqforge_core::MethylState;
 
 use crate::viewer::track::{BlockCtx, BlockGeom, Hit, Track, paint_wedge_down, paint_wedge_up};
+
+/// Cached verdict for site `idx`; `Cuttable` if the parallel `methyl_states`
+/// cache is absent (e.g. while staging) so overlays never crash on a short slice.
+fn site_methyl(ctx: &BlockCtx<'_>, idx: usize) -> MethylState {
+    ctx.methyl_states
+        .get(idx)
+        .copied()
+        .unwrap_or(MethylState::Cuttable)
+}
+
+fn methyl_tint_color(base: Color32, state: MethylState) -> Color32 {
+    match state {
+        MethylState::Cuttable => base,
+        MethylState::Blocked => base.gamma_multiply(0.35),
+        MethylState::Impaired => base.gamma_multiply(0.6),
+    }
+}
+
+fn cut_site_label(enzyme: &str, state: MethylState) -> String {
+    if state == MethylState::Cuttable {
+        enzyme.to_string()
+    } else {
+        format!("{enzyme}*")
+    }
+}
+
+fn worst_group_methyl(ctx: &BlockCtx<'_>, members: impl Iterator<Item = usize>) -> MethylState {
+    // `MethylState` is ordered by severity, so the worst is the max.
+    members
+        .map(|idx| site_methyl(ctx, idx))
+        .max()
+        .unwrap_or(MethylState::Cuttable)
+}
 
 pub(crate) struct CutSitesTrack;
 
@@ -30,9 +64,10 @@ impl Track for CutSitesTrack {
                 let site = &ctx.cut_sites[site_idx];
                 let line = group.base_line + k;
                 let label_w = site.enzyme.len() as f32 * style.label_char_w + 8.0;
+                let label_y = geom.y0 + line as f32 * style.cut_label_row_h;
                 hits.push((
-                    Rect::from_center_size(
-                        Pos2::new(cx, geom.y0 + (line as f32 + 0.5) * style.cut_label_row_h),
+                    Rect::from_min_size(
+                        Pos2::new(cx, label_y),
                         Vec2::new(label_w, style.cut_label_row_h),
                     ),
                     Hit::CutSite(site_idx),
@@ -60,22 +95,29 @@ impl Track for CutSitesTrack {
         for group in &ctx.layout.cut_groups {
             let tcx = seq_x0 + (group.cut_pos - block_start) as f32 * char_width;
             for (k, &site_idx) in group.members.iter().enumerate() {
+                let site = &ctx.cut_sites[site_idx];
+                let methyl = site_methyl(ctx, site_idx);
+                let color = methyl_tint_color(cut_site_color, methyl);
                 let line = group.base_line + k;
                 let label_y = block_y + line as f32 * cut_label_row_h;
                 painter.text(
                     Pos2::new(tcx, label_y),
-                    Align2::CENTER_TOP,
-                    &ctx.cut_sites[site_idx].enzyme,
+                    Align2::LEFT_TOP,
+                    cut_site_label(&site.enzyme, methyl),
                     style.small_font.clone(),
-                    cut_site_color,
+                    color,
                 );
             }
             // One leader tick per group, from below the last name to the ruler.
             let tick_top =
                 block_y + (group.base_line + group.members.len()) as f32 * cut_label_row_h;
+            let tick_color = methyl_tint_color(
+                cut_site_color,
+                worst_group_methyl(ctx, group.members.iter().copied()),
+            );
             painter.line_segment(
                 [Pos2::new(tcx, tick_top), Pos2::new(tcx, ruler_y)],
-                Stroke::new(1.0, cut_site_color),
+                Stroke::new(1.0, tick_color),
             );
         }
 
@@ -86,6 +128,8 @@ impl Track for CutSitesTrack {
             return;
         };
         let site = &ctx.cut_sites[idx];
+        let hover_methyl = site_methyl(ctx, idx);
+        let cut_site_color = methyl_tint_color(cut_site_color, hover_methyl);
         let top_cut = site.cut_pos;
         let bot_cut = site.bottom_cut_pos;
         // Descender starts at the hovered site's group leader (below its names),

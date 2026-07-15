@@ -95,6 +95,15 @@ impl BioOps for AppBio {
     ) -> Vec<seqforge_core::PrimerInfo> {
         seqforge_bio::primer_infos(seq, primers, circular)
     }
+
+    fn methyl_states_for_sites(
+        &self,
+        sites: &[CutSite],
+        seq: &[u8],
+        methylation: &seqforge_core::MethylContext,
+    ) -> Vec<seqforge_core::MethylState> {
+        seqforge_bio::methyl_states_for_sites(sites, seq, methylation)
+    }
 }
 
 // ── AppState ──────────────────────────────────────────────────────────────────

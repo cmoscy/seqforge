@@ -400,6 +400,14 @@ mod phase15_tests {
         ) -> Vec<seqforge_core::PrimerInfo> {
             vec![]
         }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[CutSite],
+            _: &[u8],
+            _: &seqforge_core::MethylContext,
+        ) -> Vec<seqforge_core::MethylState> {
+            vec![seqforge_core::MethylState::Cuttable; sites.len()]
+        }
     }
 
     fn temp_fasta(seq: &str) -> PathBuf {

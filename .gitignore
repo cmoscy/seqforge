@@ -3,6 +3,7 @@ examples/
 .DS_Store
 *.swp
 *.swo
+*.log
 
 # Raw REBASE snapshot (~4.5 MB) — a build-time input to the enzyme-table
 # codegen only. Not tracked: the generated, committed

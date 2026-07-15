@@ -25,7 +25,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CutSite, Feature, FeatureId, Primer, PrimerId, SearchHit, Selection, Topology};
+use crate::{
+    CutSite, Feature, FeatureId, MethylContext, MethylState, Primer, PrimerId, SearchHit,
+    Selection, Topology,
+};
 
 // ── Id newtypes ──────────────────────────────────────────────────────────────
 //
@@ -527,8 +530,17 @@ pub struct View {
     pub search_hits: Vec<SearchHit>,
     #[serde(skip)]
     pub cut_sites: Vec<CutSite>,
+    /// Methylation verdict per site, parallel to `cut_sites`. Derived cache
+    /// (like `cut_sites`): recomputed only when the enzyme set or `methylation`
+    /// changes, never per frame. Empty when `cut_sites` is empty.
+    #[serde(skip)]
+    pub methyl_states: Vec<MethylState>,
     #[serde(skip)]
     pub active_enzymes: Vec<String>,
+    /// Which host methylation systems are active for this view's cut-site
+    /// verdicts. Default Dam+Dcm on matches standard *E. coli* plasmid DNA.
+    #[serde(default)]
+    pub methylation: MethylContext,
     /// Visible sequence range written each frame by the text viewer.
     /// Used by the minimap to paint the viewport indicator.
     #[serde(skip)]
@@ -546,7 +558,9 @@ impl View {
             scroll_to: None,
             search_hits: Vec::new(),
             cut_sites: Vec::new(),
+            methyl_states: Vec::new(),
             active_enzymes: Vec::new(),
+            methylation: MethylContext::default(),
             visible_range: None,
         }
     }
@@ -563,6 +577,7 @@ impl View {
     pub fn clear_results(&mut self) {
         self.search_hits.clear();
         self.cut_sites.clear();
+        self.methyl_states.clear();
         self.active_enzymes.clear();
     }
 }

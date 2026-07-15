@@ -14,7 +14,11 @@
 > **Deviations from the plan as written:** codegen ships as `src/bin/codegen.rs`
 > (a bin target in the crate), not a separate `seqforge-restriction-xtask`
 > crate. The `Enzyme` struct does **not** carry an `isoschizomers` field yet
-> (isoschizomers currently surface as separate co-located labels). `OverhangKind`
+> (isoschizomers currently surface as separate co-located labels), and — contrary
+> to the "Data Model" sketch below — carries **no methylation field**: the
+> `bairoch` snapshot has no per-restriction-enzyme sensitivity data (its `MS`
+> lines are all on methyltransferase records), so that data must be sourced
+> separately. See [`methylation.md`](methylation.md). `OverhangKind`
 > is computed from offsets; overhang *sequences* arrive with Tier 2 `Fragment`.
 >
 > **Next:** Tier 2 (digest + fragments) — separate plan, not yet started.
@@ -80,7 +84,7 @@ pub struct Enzyme {
     pub top_cut: i16,        // signed offset from 5' end of recognition
     pub bottom_cut: i16,     // signed offset on bottom strand (relative to top)
     pub enzyme_type: EnzymeType,
-    pub methylation_sensitive: bool,
+    pub methylation_sensitive: bool,   // ⚠ NOT SHIPPED — see note below + methylation.md
     pub isoschizomers: &'static [&'static str],
 }
 
@@ -97,6 +101,7 @@ Key design choices:
 - `top_cut` / `bottom_cut` are **signed offsets** so Type IIs cuts outside the recognition site (BsaI: top=+1, bottom=+5 past the 3′ end) and Type II cuts inside the site (EcoRI: top=+1, bottom=+5 from 5′ end of GAATTC) use the same arithmetic.
 - `IupacByte` is a `#[repr(u8)]` enum mirroring our existing IUPAC table. Recognition seqs in REBASE like `GGTCTC` or `GACNNNNNGTC` parse straight into `&[IupacByte]`.
 - `isoschizomers` lets the GUI show "BsmBI ≡ Esp3I" when relevant — critical for cloning workflows.
+- `methylation_sensitive` as sketched here (a bare `bool`) was **never shipped and was the wrong shape** — this Tier-1 sketch wrongly assumed the sensitivity data rode in `bairoch`. It does not (see the deviations note above). The realized design is a per-system `MethylSensitivity { dam, dcm, cpg }` record joined from a *second* REBASE snapshot through the same codegen pipeline; full plan in [`methylation.md`](methylation.md) (ROADMAP decision 18).
 - The whole table is `&'static` — zero allocation at startup, all lookups are pointer arithmetic.
 
 ## Public API Surface
@@ -227,7 +232,7 @@ Removed:
 
 - Tiers 2–4 (digestion / ligation / extraction) — separate plans
 - Primer design, Tm calculation — deferred to Tier 3 if needed
-- Methylation-aware site filtering — data is in the table but UI uses it later
+- Methylation-aware site filtering — **now its own pre-`v0.2` plan** ([`methylation.md`](methylation.md)); the Tier-1 assumption that the data was already in the table was wrong (it is not in `bairoch`), so it is a real sourcing effort, not a UI wire-up
 - Star activity warnings — table tracks where applicable; UI surfaces later
 - Sequence editor support — orthogonal track; merges in when buffer mutations land
 - `bio-seq` migration of the buffer representation — separate work, Phase 10+

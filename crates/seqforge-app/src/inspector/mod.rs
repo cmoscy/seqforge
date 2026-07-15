@@ -21,7 +21,9 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use seqforge_core::{CutSite, CutSiteKey, FeatureId, PrimerId, PrimerInfo, ViewId};
+use seqforge_core::{
+    CutSite, CutSiteKey, FeatureId, MethylContext, MethylState, PrimerId, PrimerInfo, ViewId,
+};
 
 use crate::command::{AppCommand, PendingCommand};
 use crate::viewer::PrimerDisplay;
@@ -85,8 +87,13 @@ pub struct InspectorState {
     /// Cheap reads, rebuilt each frame.
     features: Vec<FeatureRow>,
     cut_sites: Vec<CutSite>,
+    /// Methylation verdict per site, parallel to `cut_sites` (cached on the
+    /// `View`; the tab just reads it — no per-frame evaluation).
+    methyl_states: Vec<MethylState>,
     /// The active view's displayed enzyme set (Cut-sites tab manages it — 1.5b).
     active_enzymes: Vec<String>,
+    /// Host methylation toggles (Dam/Dcm/CpG) shown as the tab's checkboxes.
+    methylation: MethylContext,
     /// The active view's selected object (feature / primer / cut site), synced
     /// from `ViewSelection` each frame. One field (decision 17); each tab derives
     /// its highlight, and it drives follow-selection tab switching.
@@ -171,7 +178,9 @@ impl InspectorState {
                 selected,
                 features,
                 v.cut_sites.clone(),
+                v.methyl_states.clone(),
                 v.active_enzymes.clone(),
+                v.methylation,
                 selection_seed,
                 ann.suggest_primer_name(),
             )
@@ -181,7 +190,9 @@ impl InspectorState {
             selected,
             features,
             cut_sites,
+            methyl_states,
             active_enzymes,
+            methylation,
             selection_seed,
             suggested_primer_name,
         ) = match snap {
@@ -196,7 +207,9 @@ impl InspectorState {
         self.has_view = true;
         self.features = features;
         self.cut_sites = cut_sites;
+        self.methyl_states = methyl_states;
         self.active_enzymes = active_enzymes;
+        self.methylation = methylation;
         self.apply_follow_selection(&selected, follow_selection);
         self.selected = selected;
         // Drop a stale edit draft if its feature was removed (or an edit/undo
@@ -253,7 +266,9 @@ impl InspectorState {
         self.primer_cache = None;
         self.features.clear();
         self.cut_sites.clear();
+        self.methyl_states.clear();
         self.active_enzymes.clear();
+        self.methylation = MethylContext::default();
         self.selected = None;
         self.editing = None;
         self.editing_primer = None;

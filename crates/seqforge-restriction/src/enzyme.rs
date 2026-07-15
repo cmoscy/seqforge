@@ -89,6 +89,37 @@ pub enum EnzymeType {
     TypeIIs,
 }
 
+/// Effect of one methylation system on cleavage, normalized from REBASE's
+/// `damlist` `sensitivity?` summary (`cut` / `blocked` / `impaired` / `some
+/// blocked` / `some impaired` / `variable` / `-`). The "some"/context dependence
+/// REBASE reports at the enzyme level is resolved per-site by the evaluator
+/// (`methylation::site_methyl_state`), which ANDs this with whether the
+/// methylatable base actually falls inside a given occurrence of the site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethylEffect {
+    /// Cleaves normally under this methylation (REBASE `cut`, or `-` = no overlap).
+    Cut,
+    /// Cleavage slowed but not abolished (REBASE `impaired` / `some impaired`).
+    Impaired,
+    /// Cleavage abolished where the context is present (REBASE `blocked` / `some blocked`).
+    Blocked,
+    /// Conflicting reports (REBASE `variable`) — surfaced as a caution, not a hard block.
+    Variable,
+    /// No sourced data for this enzyme/system.
+    Untested,
+}
+
+/// Per-system methylation sensitivity for one enzyme. A **required** field on
+/// `Enzyme` (never `Option`) so codegen must assign every enzyme a value —
+/// "enzyme missing its sensitivity data" is unrepresentable; the coverage-gate
+/// test rejects `Untested` outside a reviewed allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MethylSensitivity {
+    pub dam: MethylEffect,
+    pub dcm: MethylEffect,
+    pub cpg: MethylEffect,
+}
+
 /// One restriction enzyme.
 ///
 /// `top_offset` and `bottom_offset` are signed positions measured from the
@@ -112,6 +143,7 @@ pub struct Enzyme {
     pub top_offset: i16,
     pub bottom_offset: i16,
     pub enzyme_type: EnzymeType,
+    pub methylation: MethylSensitivity,
 }
 
 impl Enzyme {

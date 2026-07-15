@@ -627,6 +627,14 @@ mod tests {
             ) -> Vec<seqforge_core::PrimerInfo> {
                 vec![]
             }
+            fn methyl_states_for_sites(
+                &self,
+                sites: &[seqforge_core::CutSite],
+                _: &[u8],
+                _: &seqforge_core::MethylContext,
+            ) -> Vec<seqforge_core::MethylState> {
+                vec![seqforge_core::MethylState::Cuttable; sites.len()]
+            }
         }
 
         let got = ws.buffers.open_path(&path, &ExplodingBio).unwrap();

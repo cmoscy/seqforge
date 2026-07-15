@@ -110,6 +110,12 @@ pub enum AppCommand {
     RemoveEnzyme {
         name: String,
     },
+    /// Update the active view's methylation context. Verdicts derive at read time.
+    SetMethylation {
+        dam: bool,
+        dcm: bool,
+        cpg: bool,
+    },
     DismissCliStatus,
 
     // ── Focus / layout ───────────────────────────────────────────────
@@ -279,6 +285,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | SubmitEnzymes { .. }
         | AddEnzymes { .. }
         | RemoveEnzyme { .. }
+        | SetMethylation { .. }
         | CloseDoc
         | SplitPane { .. } => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
@@ -555,6 +562,7 @@ pub fn apply<B: BioOps>(
         RemoveEnzyme { name } => {
             nav::apply_enzyme_op(state, bio, name, seqforge_core::EnzymeOp::Remove)
         }
+        SetMethylation { dam, dcm, cpg } => nav::apply_set_methylation(state, bio, dam, dcm, cpg),
         DismissCliStatus => file::apply_dismiss_cli_status(state),
 
         // ── Focus / layout ──────────────────────────────────────────

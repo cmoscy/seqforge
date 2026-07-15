@@ -1,0 +1,8 @@
+# Enzymes allowed to carry no sourced methylation sensitivity (all three systems
+# `Untested`) without failing the coverage-gate test in tests/methylation.rs.
+#
+# One enzyme name per line; `#` comments and blank lines ignored.
+#
+# Currently empty: every enzyme in the table has a REBASE `damlist` sensitivity
+# row. Add a name here only after confirming REBASE genuinely lacks data for it
+# (a scrape/parse miss should be fixed in ms_scrape, not allowlisted).

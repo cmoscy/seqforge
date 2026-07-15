@@ -9,12 +9,14 @@ extraction (see `../../plans/restriction.md`).
 
 | Path | Tracked? | Role |
 |------|----------|------|
-| `src/enzymes_generated.rs` (~98 KB, 565 enzymes) | ✅ committed | The enzyme table the build and runtime actually use |
-| `data/rebase_bairoch.txt` (~4.5 MB) | ❌ git-ignored | Raw REBASE snapshot — a build-time input to codegen only |
+| `src/enzymes_generated.rs` (~160 KB, 565 enzymes) | ✅ committed | The enzyme table the build and runtime actually use (recognition + methylation) |
+| `data/rebase_bairoch.txt` (~4.5 MB) | ❌ git-ignored | Raw REBASE snapshot — input to codegen only |
+| `data/rebase_methylation.tsv` (~12 KB) | ❌ git-ignored | Per-enzyme methylation sensitivity scraped from REBASE `damlist` — input to codegen only |
+| `tests/fixtures/ms_untested_allow.txt` | ✅ committed | Reviewed allowlist for the coverage-gate test (enzymes permitted to have no sourced sensitivity) |
 
 The normal `cargo build` and all runtime lookups read **only** the generated
-file. The raw snapshot is never compiled in (`no include_str!`, no `build.rs`)
-and is not in git.
+file. Raw snapshots are never compiled in (`no include_str!`, no `build.rs`)
+and are not in git.
 
 ## Refreshing the enzyme set (manual, intentional)
 
@@ -34,6 +36,22 @@ cargo run -p seqforge-restriction --bin codegen
 
 Then review the diff to `src/enzymes_generated.rs` and commit **only that file**.
 The downloaded `data/rebase_bairoch.txt` stays local (git-ignored).
+
+### Refreshing methylation sensitivity
+
+Methylation sensitivity (Dam / Dcm / CpG) is scraped from REBASE's per-enzyme
+`damlist` CGI endpoint and joined into the same generated table by codegen.
+
+```bash
+# Scrape sensitivity for the ~565 kept enzymes (writes data/rebase_methylation.tsv):
+cargo run -p seqforge-restriction --bin ms_scrape
+
+# Then regenerate the table (joins bairoch + methylation):
+cargo run -p seqforge-restriction --bin codegen
+```
+
+Run on the same quarterly cadence as the bairoch refresh. The TSV stays local
+(git-ignored); the joined data ships inside `enzymes_generated.rs`.
 
 ### Want a larger / more inclusive table?
 

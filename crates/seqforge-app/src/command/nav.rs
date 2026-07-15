@@ -112,6 +112,15 @@ pub(super) fn apply_enzyme_op<B: BioOps>(
     query: String,
     op: EnzymeOp,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
+    // The `Enzymes` request carries the methylation context so the CLI
+    // (`enzymes … --dam/--dcm/--cpg`) can set it in one shot. On this GUI path the
+    // toggles are owned by `SetMethylation`, so we just echo the view's current
+    // context back through — the dispatch writes the same value it already holds.
+    let methyl = state
+        .workspace
+        .active_view()
+        .map(|v| v.methylation)
+        .unwrap_or_default();
     let resp = dispatch_active(
         state,
         bio,
@@ -119,9 +128,34 @@ pub(super) fn apply_enzyme_op<B: BioOps>(
             query,
             op,
             view: None,
+            dam: methyl.dam,
+            dcm: methyl.dcm,
+            cpg: methyl.cpg,
         },
     )?;
     Ok(Some(resp))
+}
+
+/// Update the active view's methylation context and refresh the derived
+/// `methyl_states` cache. Only re-evaluates verdicts over the existing
+/// `cut_sites` (O(sites)); the site scanner is **not** re-run.
+pub(super) fn apply_set_methylation<B: BioOps>(
+    state: &mut AppState,
+    bio: &B,
+    dam: bool,
+    dcm: bool,
+    cpg: bool,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let view_id = state
+        .workspace
+        .active_view
+        .ok_or(DispatchError::NoActiveView)?;
+    state.workspace.with_buffer(view_id, |view, buf, _ann| {
+        view.methylation = seqforge_core::MethylContext { dam, dcm, cpg };
+        view.methyl_states =
+            bio.methyl_states_for_sites(&view.cut_sites, &buf.text, &view.methylation);
+    })?;
+    Ok(None)
 }
 
 pub(super) fn apply_submit_goto<B: BioOps>(
@@ -450,6 +484,21 @@ mod tests {
         fn primer_infos(&self, _: &[u8], _: &[&Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
             vec![]
         }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[seqforge_core::CutSite],
+            _: &[u8],
+            methylation: &seqforge_core::MethylContext,
+        ) -> Vec<seqforge_core::MethylState> {
+            // Context-sensitive stub: Dam-on blocks, so the SetMethylation refresh
+            // test can observe the cache tracking the passed context.
+            let state = if methylation.dam {
+                seqforge_core::MethylState::Blocked
+            } else {
+                seqforge_core::MethylState::Cuttable
+            };
+            vec![state; sites.len()]
+        }
     }
 
     fn open_with_primer(
@@ -479,6 +528,49 @@ mod tests {
             .unwrap();
         let _ = std::fs::remove_file(&path);
         (state, id)
+    }
+
+    #[test]
+    fn set_methylation_refreshes_cached_states_without_rescan() {
+        let (mut state, _id) = open_with_primer(None, "methyl");
+        // Seed the derived cut-sites cache (as an Enzymes op would).
+        state
+            .workspace
+            .with_active_buffer(|v, _b, _a| {
+                v.cut_sites = vec![
+                    seqforge_core::CutSite {
+                        enzyme: "EcoRI".into(),
+                        recognition: "GAATTC".into(),
+                        recognition_start: 0,
+                        recognition_end: 6,
+                        cut_pos: 1,
+                        bottom_cut_pos: 5,
+                    };
+                    2
+                ];
+            })
+            .unwrap();
+
+        // Dam on → cache recomputed to Blocked, parallel to sites; context stored.
+        apply_set_methylation(&mut state, &TestBio, true, false, false).unwrap();
+        let v = state.workspace.active_view().unwrap();
+        assert!(v.methylation.dam);
+        assert_eq!(v.methyl_states.len(), v.cut_sites.len());
+        assert!(
+            v.methyl_states
+                .iter()
+                .all(|s| *s == seqforge_core::MethylState::Blocked)
+        );
+
+        // Dam off → cache refreshes; sites are untouched (no re-scan).
+        apply_set_methylation(&mut state, &TestBio, false, false, false).unwrap();
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.cut_sites.len(), 2, "toggle must not re-scan sites");
+        assert!(
+            v.methyl_states
+                .iter()
+                .all(|s| *s == seqforge_core::MethylState::Cuttable)
+        );
     }
 
     #[test]

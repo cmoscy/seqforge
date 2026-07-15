@@ -23,10 +23,14 @@
 
 mod enzyme;
 mod enzymes_generated;
+mod methylation;
 mod preset;
 mod scan;
 
-pub use enzyme::{Enzyme, EnzymeType, Iupac, OverhangKind, Site, SiteStrand};
+pub use enzyme::{
+    Enzyme, EnzymeType, Iupac, MethylEffect, MethylSensitivity, OverhangKind, Site, SiteStrand,
+};
+pub use methylation::{site_methyl_state, MethylContext, SiteMethylState};
 pub use preset::{resolve_preset, Preset, PresetResult};
 pub use scan::{count_sites_per_enzyme, find_all_sites, find_sites};
 

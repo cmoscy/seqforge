@@ -13,6 +13,37 @@ pub struct SearchHit {
     pub strand: Strand,
 }
 
+/// Which host methylation systems are active on the molecule being viewed.
+/// Authored/persisted per-view (default Dam+Dcm on = standard *E. coli*
+/// plasmid prep); passed to the evaluator when deriving cut-site verdicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MethylContext {
+    pub dam: bool,
+    pub dcm: bool,
+    pub cpg: bool,
+}
+
+impl Default for MethylContext {
+    fn default() -> Self {
+        MethylContext {
+            dam: true,
+            dcm: true,
+            cpg: false,
+        }
+    }
+}
+
+/// Two-factor verdict for one cut site under a methylation context. Variants are
+/// ordered by severity (`Cuttable < Impaired < Blocked`) so the worst state
+/// across systems/sites is `.max()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub enum MethylState {
+    #[default]
+    Cuttable,
+    Impaired,
+    Blocked,
+}
+
 /// A restriction enzyme recognition site found in the sequence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CutSite {

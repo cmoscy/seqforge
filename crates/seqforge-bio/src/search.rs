@@ -1,4 +1,4 @@
-use seqforge_core::{CutSite, SearchHit, Strand};
+use seqforge_core::{CutSite, MethylContext, MethylState, SearchHit, Strand};
 use seqforge_restriction::find_all_sites;
 
 // ── IUPAC matching ────────────────────────────────────────────────────────────
@@ -104,12 +104,8 @@ pub fn find_iupac_matches(
 
 /// Find cut sites for the named restriction enzymes in `seq`.
 ///
-/// Names are matched case-insensitively against the embedded REBASE table.
-/// Unknown enzyme names are silently skipped (the caller should validate
-/// names and surface an error if nothing matched).
-///
-/// For circular sequences, pass `circular = true` to detect sites spanning
-/// the origin.
+/// Returns geometry only (enzyme, recognition span, cut positions). Methylation
+/// verdicts are derived separately via [`methyl_states_for_sites`].
 pub fn find_cut_sites(seq: &[u8], enzyme_names: &[&str], circular: bool) -> Vec<CutSite> {
     if seq.is_empty() || enzyme_names.is_empty() {
         return vec![];
@@ -121,8 +117,49 @@ pub fn find_cut_sites(seq: &[u8], enzyme_names: &[&str], circular: bool) -> Vec<
     if lookups.is_empty() {
         return vec![];
     }
-    let sites = find_all_sites(seq, &lookups, circular);
-    sites.into_iter().map(site_to_cutsite).collect()
+    find_all_sites(seq, &lookups, circular)
+        .into_iter()
+        .map(site_to_cutsite)
+        .collect()
+}
+
+/// Derive the methylation verdict for one projected cut site under a context.
+/// Internal helper behind [`methyl_states_for_sites`]; the enzyme sensitivity is
+/// looked up from the embedded table and ANDed with the site's context.
+fn cut_site_methyl_state(site: &CutSite, seq: &[u8], methylation: &MethylContext) -> MethylState {
+    let Some(enzyme) = seqforge_restriction::enzyme_by_name(&site.enzyme) else {
+        return MethylState::Cuttable;
+    };
+    let rs_ctx = seqforge_restriction::MethylContext {
+        dam: methylation.dam,
+        dcm: methylation.dcm,
+        cpg: methylation.cpg,
+    };
+    match seqforge_restriction::site_methyl_state(
+        site.recognition_start,
+        site.recognition_end,
+        &enzyme.methylation,
+        seq,
+        &rs_ctx,
+    ) {
+        seqforge_restriction::SiteMethylState::Cuttable => MethylState::Cuttable,
+        seqforge_restriction::SiteMethylState::Impaired => MethylState::Impaired,
+        seqforge_restriction::SiteMethylState::Blocked => MethylState::Blocked,
+    }
+}
+
+/// Batch derive methylation verdicts for cut sites under a context (parallel to
+/// `sites`) — used to (re)fill the `View`'s cached `methyl_states` and for
+/// CLI / socket output.
+pub fn methyl_states_for_sites(
+    sites: &[CutSite],
+    seq: &[u8],
+    methylation: &MethylContext,
+) -> Vec<MethylState> {
+    sites
+        .iter()
+        .map(|s| cut_site_methyl_state(s, seq, methylation))
+        .collect()
 }
 
 /// Bridge: convert the new `seqforge_restriction::Site` to the existing

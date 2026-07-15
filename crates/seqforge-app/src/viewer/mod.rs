@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use egui::{Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, Selection, Strand, View, ViewId,
-    ViewSelection, ViewerRequest, mutations::apply_splice,
+    Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, MethylState, Selection, Strand, View,
+    ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -746,6 +746,8 @@ impl SequenceView {
             None => (buffer.text.as_slice(), annotations),
         };
         let cut_sites: &[CutSite] = if staging { &[] } else { &view.cut_sites };
+        // Parallel to cut_sites; both suppressed while staging.
+        let methyl_states: &[MethylState] = if staging { &[] } else { &view.methyl_states };
         let seq_len = seq.len();
 
         if seq_len == 0 {
@@ -1003,6 +1005,7 @@ impl SequenceView {
                         primer_states,
                         primer_display,
                         cut_sites,
+                        methyl_states,
                         search_hits: &view.search_hits,
                         trans_cache: trans_cache.as_ref(),
                         show_orfs,

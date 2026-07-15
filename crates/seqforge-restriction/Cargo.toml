@@ -10,3 +10,7 @@ description = "REBASE-derived restriction enzyme database and scanner. Internal 
 [[bin]]
 name = "codegen"
 path = "src/bin/codegen.rs"
+
+[[bin]]
+name = "ms_scrape"
+path = "src/bin/ms_scrape.rs"
