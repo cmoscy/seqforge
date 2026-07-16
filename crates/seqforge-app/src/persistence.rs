@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use egui_dock::{DockState, Node, NodeIndex, Split, SurfaceIndex};
+use egui_dock::{DockState, Node, NodeIndex};
 use seqforge_core::Selection;
 use serde::{Deserialize, Serialize};
 
@@ -52,11 +52,11 @@ pub struct PersistedSession {
     /// Recent-files menu, most-recent first.
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
-    /// Dock layout snapshot — splits + which paths are in each leaf.
-    /// `None` means "use the default layout" (fresh install / cleared
-    /// session).
+    /// Flat workbench layout — panel visibility + open document paths
+    /// (decision 19). Replaces the old dock-tree snapshot. Missing (older
+    /// sessions) → default (all regions visible, no files).
     #[serde(default)]
-    pub layout: Option<LayoutSnapshot>,
+    pub workbench: WorkbenchLayout,
     /// Per-file UI state keyed by source path. Restored when the
     /// file's View is created during load.
     #[serde(default)]
@@ -76,145 +76,95 @@ pub struct FileState {
     pub scroll_pos: Option<f32>,
 }
 
-// ── Layout snapshot ──────────────────────────────────────────────────────────
+// ── Workbench layout (flat — decision 19) ─────────────────────────────────────
 
-/// Path-keyed mirror of the egui_dock tree. ViewIds intentionally do
-/// not appear here — they're session-scoped pointers.
+/// Flat, path-keyed session layout: which shell regions are visible and which
+/// documents are open in the center. Replaces the old dock-tree mirror — the
+/// shell regions are native panels now, so there is no tree to serialize. Split
+/// arrangements in the center are *not* persisted (a transient view choice);
+/// restored files reopen as tabs in one center leaf. ViewIds never appear here
+/// (session-scoped pointers); paths are the only stable identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LayoutSnapshot {
-    /// A leaf node holding tabs of one of the well-known kinds.
-    Leaf(LeafSnapshot),
-    /// Vertical split (top = `a`, bottom = `b`).
-    VSplit {
-        ratio: f32,
-        a: Box<LayoutSnapshot>,
-        b: Box<LayoutSnapshot>,
-    },
-    /// Horizontal split (left = `a`, right = `b`).
-    HSplit {
-        ratio: f32,
-        a: Box<LayoutSnapshot>,
-        b: Box<LayoutSnapshot>,
-    },
+pub struct WorkbenchLayout {
+    #[serde(default = "yes")]
+    pub show_files: bool,
+    #[serde(default = "yes")]
+    pub show_terminal: bool,
+    #[serde(default = "yes")]
+    pub show_inspector: bool,
+    #[serde(default = "yes")]
+    pub show_minimap: bool,
+    /// Open document paths, in center-tab order.
+    #[serde(default)]
+    pub open_paths: Vec<PathBuf>,
+    /// Index into `open_paths` of the active tab.
+    #[serde(default)]
+    pub active: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LeafSnapshot {
-    /// The Files browser pane.
-    Browser,
-    /// The terminal pane.
-    Terminal,
-    /// The Inspector pane (right dock).
-    Inspector,
-    /// A viewer leaf — zero or more files (by path) plus the index
-    /// of the active tab. Empty `paths` round-trips to a single
-    /// `Tab::Welcome` placeholder.
-    Viewer { paths: Vec<PathBuf>, active: usize },
+fn yes() -> bool {
+    true
 }
 
-impl LayoutSnapshot {
-    /// The hard-coded default layout — Browser left, viewer in the
-    /// central area (no files), Terminal at the bottom of the central
-    /// area. Mirrors what `AppState::Default::default()` builds.
-    #[allow(dead_code)]
-    pub fn default_layout() -> Self {
-        LayoutSnapshot::HSplit {
-            ratio: 0.20,
-            a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Browser)),
-            b: Box::new(LayoutSnapshot::VSplit {
-                ratio: 0.70,
-                a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Viewer {
-                    paths: Vec::new(),
-                    active: 0,
-                })),
-                b: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Terminal)),
-            }),
+impl Default for WorkbenchLayout {
+    /// All regions visible, no files — matches a fresh `AppState`.
+    fn default() -> Self {
+        Self {
+            show_files: true,
+            show_terminal: true,
+            show_inspector: true,
+            show_minimap: true,
+            open_paths: Vec::new(),
+            active: 0,
         }
     }
 }
 
-// ── Save: dock_state → LayoutSnapshot ────────────────────────────────────────
+// ── Save: dock_state + panel visibility → WorkbenchLayout ─────────────────────
 
-/// Walk the main surface of `dock_state` and emit a path-keyed
-/// `LayoutSnapshot`. `Tab::View(vid)` entries are resolved to their
-/// buffer's `source_path` via the workspace; tabs whose buffer has no
-/// path (scratch buffers, post-MVP) are omitted from the saved layout
-/// — they wouldn't be reopenable anyway.
-pub fn capture_layout(dock: &DockState<Tab>, workspace: &Workspace) -> Option<LayoutSnapshot> {
-    let main = dock.main_surface();
-    // The main surface is a Tree<Tab> with nodes stored in a heap-
-    // indexed Vec. NodeIndex(0) is the root.
-    capture_node(main, NodeIndex::root(), workspace)
-}
-
-fn capture_node(
-    tree: &egui_dock::Tree<Tab>,
-    node: NodeIndex,
+/// Capture the flat workbench layout: the panel-visibility bools plus the open
+/// document paths (in center-tab order) and the active index. `View` tabs are
+/// resolved to their buffer's `source_path`; pathless (scratch) buffers are
+/// skipped — they wouldn't be reopenable.
+pub fn capture_workbench(
+    dock: &DockState<Tab>,
     workspace: &Workspace,
-) -> Option<LayoutSnapshot> {
-    if node.0 >= tree.len() {
-        return None;
-    }
-    match &tree[node] {
-        egui_dock::Node::Empty => None,
-        egui_dock::Node::Leaf { tabs, active, .. } => {
-            Some(LayoutSnapshot::Leaf(capture_leaf(tabs, *active, workspace)))
-        }
-        egui_dock::Node::Vertical { fraction, .. } => {
-            let a = capture_node(tree, node.left(), workspace)?;
-            let b = capture_node(tree, node.right(), workspace)?;
-            Some(LayoutSnapshot::VSplit {
-                ratio: *fraction,
-                a: Box::new(a),
-                b: Box::new(b),
-            })
-        }
-        egui_dock::Node::Horizontal { fraction, .. } => {
-            let a = capture_node(tree, node.left(), workspace)?;
-            let b = capture_node(tree, node.right(), workspace)?;
-            Some(LayoutSnapshot::HSplit {
-                ratio: *fraction,
-                a: Box::new(a),
-                b: Box::new(b),
-            })
-        }
-    }
-}
+    show_files: bool,
+    show_terminal: bool,
+    show_inspector: bool,
+    show_minimap: bool,
+) -> WorkbenchLayout {
+    let tree = dock.main_surface();
+    let active_vid = workspace.active_view;
 
-fn capture_leaf(tabs: &[Tab], active: egui_dock::TabIndex, workspace: &Workspace) -> LeafSnapshot {
-    // A leaf can hold any mix of tabs but in practice only one kind
-    // — Browser / Terminal / Welcome / View(_) — appears per leaf.
-    // For mixed leaves (unlikely), the *first* tab decides the
-    // category; this is good enough until a future kind violates
-    // the invariant.
-    for tab in tabs {
-        match tab {
-            Tab::FileBrowser => return LeafSnapshot::Browser,
-            Tab::Terminal => return LeafSnapshot::Terminal,
-            Tab::Inspector => return LeafSnapshot::Inspector,
-            _ => {}
-        }
-    }
-    // Otherwise it's a viewer leaf — collect paths of View tabs.
-    let mut paths = Vec::new();
-    let mut active_idx = 0usize;
-    for (idx, tab) in tabs.iter().enumerate() {
-        if let Tab::View(vid) = tab {
-            let path = workspace
-                .view(*vid)
-                .and_then(|v| workspace.buffers.get(v.buffer_id))
-                .and_then(|arc| arc.read().ok().and_then(|b| b.source_path.clone()));
-            if let Some(p) = path {
-                if idx == active.0 {
-                    active_idx = paths.len();
+    let mut open_paths = Vec::new();
+    let mut active = 0usize;
+    for i in 0..tree.len() {
+        if let Node::Leaf { tabs, .. } = &tree[NodeIndex(i)] {
+            for tab in tabs {
+                if let Tab::View(vid) = tab {
+                    let path = workspace
+                        .view(*vid)
+                        .and_then(|v| workspace.buffers.get(v.buffer_id))
+                        .and_then(|arc| arc.read().ok().and_then(|b| b.source_path.clone()));
+                    if let Some(p) = path {
+                        if Some(*vid) == active_vid {
+                            active = open_paths.len();
+                        }
+                        open_paths.push(p);
+                    }
                 }
-                paths.push(p);
             }
         }
     }
-    LeafSnapshot::Viewer {
-        paths,
-        active: active_idx,
+
+    WorkbenchLayout {
+        show_files,
+        show_terminal,
+        show_inspector,
+        show_minimap,
+        open_paths,
+        active,
     }
 }
 
@@ -241,181 +191,39 @@ pub fn capture_file_state(workspace: &Workspace) -> HashMap<PathBuf, FileState> 
     out
 }
 
-// ── Load: LayoutSnapshot → empty dock skeleton ───────────────────────────────
-
-/// Rebuild a `DockState<Tab>` from a snapshot. Viewer leaves come
-/// back as `Tab::Welcome` placeholders; the caller is expected to
-/// `OpenFile` each persisted path afterwards, which replaces the
-/// placeholders with `Tab::View(_)` tabs (placement is driven by the
-/// returned [`PendingOpens`] map).
-///
-/// On any structural problem with the snapshot, falls back to the
-/// default layout — never panics.
-pub fn rebuild_dock(snapshot: &LayoutSnapshot) -> (DockState<Tab>, PendingOpens) {
-    let mut pending = PendingOpens::default();
-
-    // Seed with a placeholder so we have a single root leaf to split
-    // against. The recursive walk overwrites it.
-    let mut dock = DockState::new(vec![Tab::Welcome]);
-    install_node(
-        &mut dock,
-        snapshot,
-        SurfaceIndex::main(),
-        NodeIndex::root(),
-        &mut pending,
-    );
-    (dock, pending)
-}
-
-/// Map from "Tab::Welcome placeholder location" to the list of file
-/// paths that should populate that leaf, plus the desired active
-/// index. The load path replays `OpenFile` for each path, targeting
-/// the placeholder leaf.
-#[derive(Default, Debug)]
-pub struct PendingOpens {
-    /// Each entry: (surface, node, paths, active_index_within_paths).
-    pub leaves: Vec<(SurfaceIndex, NodeIndex, Vec<PathBuf>, usize)>,
-}
-
-fn install_node(
-    dock: &mut DockState<Tab>,
-    snapshot: &LayoutSnapshot,
-    surface: SurfaceIndex,
-    node: NodeIndex,
-    pending: &mut PendingOpens,
-) {
-    match snapshot {
-        LayoutSnapshot::Leaf(leaf) => {
-            install_leaf(dock, leaf, surface, node, pending);
-        }
-        LayoutSnapshot::HSplit { ratio, a, b } => {
-            // Existing placeholder becomes 'a'; 'b' is the freshly
-            // allocated sibling. We need to know which "kind" of
-            // placeholder to put on each side so the recursive call
-            // can swap it for the real content.
-            let placeholder = Tab::Welcome;
-            let [a_idx, b_idx] = dock.split(
-                (surface, node),
-                Split::Right,
-                ratio.clamp(0.05, 0.95),
-                Node::leaf(placeholder),
-            );
-            install_node(dock, a, surface, a_idx, pending);
-            install_node(dock, b, surface, b_idx, pending);
-        }
-        LayoutSnapshot::VSplit { ratio, a, b } => {
-            let [a_idx, b_idx] = dock.split(
-                (surface, node),
-                Split::Below,
-                ratio.clamp(0.05, 0.95),
-                Node::leaf(Tab::Welcome),
-            );
-            install_node(dock, a, surface, a_idx, pending);
-            install_node(dock, b, surface, b_idx, pending);
-        }
-    }
-}
-
-fn install_leaf(
-    dock: &mut DockState<Tab>,
-    leaf: &LeafSnapshot,
-    surface: SurfaceIndex,
-    node: NodeIndex,
-    pending: &mut PendingOpens,
-) {
-    // Replace the placeholder's tab list with the right content.
-    let tabs = match leaf {
-        LeafSnapshot::Browser => vec![Tab::FileBrowser],
-        LeafSnapshot::Terminal => vec![Tab::Terminal],
-        LeafSnapshot::Inspector => vec![Tab::Inspector],
-        LeafSnapshot::Viewer { paths, active } => {
-            if paths.is_empty() {
-                vec![Tab::Welcome]
-            } else {
-                // Queue the opens; install a Welcome placeholder
-                // that the OpenFile replay will replace.
-                pending.leaves.push((surface, node, paths.clone(), *active));
-                vec![Tab::Welcome]
-            }
-        }
-    };
-    if let egui_dock::Node::Leaf {
-        tabs: existing,
-        active,
-        ..
-    } = &mut dock[surface][node]
-    {
-        *existing = tabs;
-        *active = egui_dock::TabIndex(0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Collect every tab across the main surface's leaves.
-    fn collect_tabs(dock: &DockState<Tab>) -> Vec<Tab> {
-        let tree = dock.main_surface();
-        let mut out = Vec::new();
-        for i in 0..tree.len() {
-            if let Node::Leaf { tabs, .. } = &tree[NodeIndex(i)] {
-                out.extend(tabs.iter().cloned());
-            }
-        }
-        out
+    #[test]
+    fn workbench_layout_round_trips_through_json() {
+        let wb = WorkbenchLayout {
+            show_files: false,
+            show_terminal: true,
+            show_inspector: false,
+            show_minimap: false,
+            open_paths: vec![PathBuf::from("/tmp/a.gb"), PathBuf::from("/tmp/b.fasta")],
+            active: 1,
+        };
+        let json = serde_json::to_string(&wb).unwrap();
+        let back: WorkbenchLayout = serde_json::from_str(&json).unwrap();
+        assert!(!back.show_files);
+        assert!(back.show_terminal);
+        assert!(!back.show_inspector);
+        assert!(!back.show_minimap);
+        assert_eq!(back.open_paths.len(), 2);
+        assert_eq!(back.active, 1);
     }
 
-    /// A snapshot written *before* the Inspector variant existed must still
-    /// deserialize and rebuild — the one real back-compat risk of adding a new
-    /// `Tab`/`LeafSnapshot` variant. The Inspector is simply absent (graceful
-    /// fallback until a ResetLayout); nothing panics.
+    /// Older sessions have no `workbench` key (or missing region bools) — they
+    /// must default to *visible*, not hidden, so a panel never silently vanishes.
     #[test]
-    fn legacy_layout_without_inspector_loads() {
-        let legacy = LayoutSnapshot::HSplit {
-            ratio: 0.2,
-            a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Browser)),
-            b: Box::new(LayoutSnapshot::VSplit {
-                ratio: 0.7,
-                a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Viewer {
-                    paths: vec![],
-                    active: 0,
-                })),
-                b: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Terminal)),
-            }),
-        };
-        // Round-trip through JSON exactly as a persisted session would.
-        let json = serde_json::to_string(&legacy).unwrap();
-        let back: LayoutSnapshot = serde_json::from_str(&json).unwrap();
-        let (dock, _pending) = rebuild_dock(&back);
-        let tabs = collect_tabs(&dock);
-        assert!(tabs.contains(&Tab::FileBrowser));
-        assert!(tabs.contains(&Tab::Terminal));
-        assert!(
-            !tabs.iter().any(|t| matches!(t, Tab::Inspector)),
-            "legacy layout must not conjure an Inspector"
-        );
-    }
-
-    /// A snapshot that carries the Inspector round-trips and rebuilds it.
-    #[test]
-    fn layout_with_inspector_round_trips() {
-        let snap = LayoutSnapshot::HSplit {
-            ratio: 0.8,
-            a: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Viewer {
-                paths: vec![],
-                active: 0,
-            })),
-            b: Box::new(LayoutSnapshot::Leaf(LeafSnapshot::Inspector)),
-        };
-        let json = serde_json::to_string(&snap).unwrap();
-        let back: LayoutSnapshot = serde_json::from_str(&json).unwrap();
-        let (dock, _pending) = rebuild_dock(&back);
-        assert!(
-            collect_tabs(&dock)
-                .iter()
-                .any(|t| matches!(t, Tab::Inspector)),
-            "a persisted Inspector leaf must rebuild"
-        );
+    fn missing_workbench_defaults_to_all_regions_visible() {
+        let session: PersistedSession = serde_json::from_str("{}").unwrap();
+        assert!(session.workbench.show_files);
+        assert!(session.workbench.show_terminal);
+        assert!(session.workbench.show_inspector);
+        assert!(session.workbench.show_minimap);
+        assert!(session.workbench.open_paths.is_empty());
     }
 }

@@ -14,8 +14,8 @@
 //!   snapshot/restore, dispatch pass-through, dock walking).
 //! - **`file.rs`** — Open / Close / recent files / CLI install.
 //! - **`nav.rs`** — Find / GoTo / selection / feature highlight.
-//! - **`layout.rs`** — split / focus / tab cycling / dock-layout
-//!   invariants (Welcome, place-view-tab, activate-tab).
+//! - **`layout.rs`** — focus / tab cycling / center-dock invariants
+//!   (Welcome, place-view-tab, activate-tab) + `buffers`/`focus` (CLI parity).
 //!
 //! Splitting by domain keeps `apply` short and each file under ~250
 //! lines as edit, multi-cursor, plugin variants land in Tier 3+.
@@ -36,13 +36,6 @@ mod edit;
 pub(crate) mod file;
 mod layout;
 mod nav;
-
-/// Direction for `AppCommand::SplitPane`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitDirection {
-    Horizontal,
-    Vertical,
-}
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
@@ -77,9 +70,6 @@ pub enum AppCommand {
     },
 
     // ── Tabs ─────────────────────────────────────────────────────────
-    SwitchTab {
-        view: ViewId,
-    },
     CloseTab {
         view: ViewId,
     },
@@ -121,12 +111,13 @@ pub enum AppCommand {
     // ── Focus / layout ───────────────────────────────────────────────
     FocusPane(FocusScope),
     FocusPaneByIndex(usize),
-    SplitPane {
-        direction: SplitDirection,
-    },
     ResetLayout,
-    /// Show the Inspector pane if hidden; hide it if already docked.
+    /// Show/hide the Inspector region (right — active-document surface).
     ToggleInspector,
+    /// Show/hide the Files region (left — workspace navigation).
+    ToggleFiles,
+    /// Show/hide the minimap overview (sub-region of the Inspector pane).
+    ToggleMinimap,
 
     // ── Selection ────────────────────────────────────────────────────
     /// Set the active view's one selection (range / cursor / feature / primer /
@@ -286,10 +277,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | AddEnzymes { .. }
         | RemoveEnzyme { .. }
         | SetMethylation { .. }
-        | CloseDoc
-        | SplitPane { .. } => state.workspace.active_view().is_some(),
+        | CloseDoc => state.workspace.active_view().is_some(),
         NextTab | PrevTab => count_view_tabs(state) >= 2,
-        SwitchTab { .. } | CloseTab { .. } | Quit => true,
+        CloseTab { .. } | Quit => true,
         // Revert only makes sense for a file-backed buffer.
         RevertBuffer { .. } | OpenRevertConfirm { .. } => active_has_source_path(state),
         // Editor write-ops carry their own enablement so menus / keymap grey
@@ -308,6 +298,8 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             }
             ViewerRequest::Save { .. } => active_dirty(state),
             ViewerRequest::Open { .. } => true,
+            // Workspace-scoped queries — valid regardless of the active view.
+            ViewerRequest::Buffers | ViewerRequest::Focus { .. } => true,
             // SaveAs, GoTo/Find/Enzymes, Insert/Replace/feature ops, Close.
             _ => state.workspace.active_view().is_some(),
         },
@@ -339,10 +331,9 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         }
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
-        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | InstallCli
-        | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile | OpenThemeFile | OpenConfigDir => {
-            true
-        }
+        | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | ToggleFiles
+        | ToggleMinimap | InstallCli | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile
+        | OpenThemeFile | OpenConfigDir => true,
     }
 }
 
@@ -538,7 +529,6 @@ pub fn apply<B: BioOps>(
         RevertBuffer { view } => file::apply_revert(state, bio, view),
 
         // ── Tabs ────────────────────────────────────────────────────
-        SwitchTab { view } => layout::apply_switch_tab(state, view),
         CloseTab { view } => file::apply_close_view(state, view),
         NextTab => layout::apply_cycle_tab(state, 1),
         PrevTab => layout::apply_cycle_tab(state, -1),
@@ -568,9 +558,10 @@ pub fn apply<B: BioOps>(
         // ── Focus / layout ──────────────────────────────────────────
         FocusPane(scope) => layout::apply_focus_pane(state, scope),
         FocusPaneByIndex(n) => layout::apply_focus_pane_by_index(state, n),
-        SplitPane { direction } => layout::apply_split_pane(state, direction),
         ResetLayout => layout::apply_reset_layout(state),
         ToggleInspector => layout::apply_toggle_inspector(state),
+        ToggleFiles => layout::apply_toggle_files(state),
+        ToggleMinimap => layout::apply_toggle_minimap(state),
 
         // ── Selection ───────────────────────────────────────────────
         Select(sel) => nav::apply_select(state, sel),
@@ -702,6 +693,8 @@ pub fn apply<B: BioOps>(
         Viewer(req) => match req {
             ViewerRequest::Open { path } => file::apply_open_file(state, bio, path),
             ViewerRequest::Close => file::apply_close_doc(state),
+            ViewerRequest::Buffers => layout::apply_buffers(state),
+            ViewerRequest::Focus { target } => layout::apply_focus_doc(state, &target),
 
             // ── Editor write-ops → command/edit.rs (Phase 11 write path) ──
             // Intercepted here, never reaching `dispatch_active`/`core::dispatch`

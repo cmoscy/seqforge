@@ -26,7 +26,7 @@
 use egui::{Key, Modifiers};
 
 use crate::app::AppState;
-use crate::command::{self, AppCommand, SplitDirection};
+use crate::command::{self, AppCommand};
 use crate::focus::{FocusState, KeyContext};
 use crate::overlay::Overlay;
 
@@ -125,13 +125,6 @@ pub const KEYMAP: &[Binding] = &[
     // ⌘1..⌘9 focuses the Nth viewer pane in pane_order. Out-of-range
     // indices are a no-op (the chord is still consumed so it doesn't
     // leak into the terminal).
-    Binding {
-        chord: (Modifiers::COMMAND, Key::Backslash),
-        when_context: &[KeyContext::WORKSPACE],
-        command: || AppCommand::SplitPane {
-            direction: SplitDirection::Horizontal,
-        },
-    },
     Binding {
         chord: (Modifiers::COMMAND, Key::Num1),
         when_context: &[KeyContext::WORKSPACE],

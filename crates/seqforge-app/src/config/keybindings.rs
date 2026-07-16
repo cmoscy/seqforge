@@ -15,7 +15,7 @@ use egui::{Key, Modifiers};
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::command::{AppCommand, SplitDirection};
+use crate::command::AppCommand;
 
 /// User-facing action names. Subset of `AppCommand` variants that don't
 /// carry user-supplied data — those are the only ones a bare keybinding
@@ -29,8 +29,6 @@ pub enum Action {
     Enzymes,
     NextTab,
     PrevTab,
-    SplitHorizontal,
-    SplitVertical,
     DismissOverlay,
     ReloadConfig,
 }
@@ -45,8 +43,6 @@ impl Action {
             "enzymes" => Some(Action::Enzymes),
             "next_tab" => Some(Action::NextTab),
             "prev_tab" => Some(Action::PrevTab),
-            "split_horizontal" => Some(Action::SplitHorizontal),
-            "split_vertical" => Some(Action::SplitVertical),
             "dismiss_overlay" => Some(Action::DismissOverlay),
             "reload_config" => Some(Action::ReloadConfig),
             _ => None,
@@ -62,12 +58,6 @@ impl Action {
             Action::Enzymes => AppCommand::OpenEnzymes,
             Action::NextTab => AppCommand::NextTab,
             Action::PrevTab => AppCommand::PrevTab,
-            Action::SplitHorizontal => AppCommand::SplitPane {
-                direction: SplitDirection::Horizontal,
-            },
-            Action::SplitVertical => AppCommand::SplitPane {
-                direction: SplitDirection::Vertical,
-            },
             Action::DismissOverlay => AppCommand::DismissOverlay,
             Action::ReloadConfig => AppCommand::ReloadConfig,
         }

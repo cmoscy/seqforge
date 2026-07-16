@@ -54,7 +54,7 @@ pub(super) fn apply_open_enzymes(
     // ⌘E is now a pane verb: open the Inspector's Cut-sites tab and focus its
     // enzyme query (decision 15 / Phase 1.5b). The standalone enzyme bar is
     // retired; querying manages the persistent `active_enzymes` collection there.
-    super::layout::dock_inspector_if_absent(state);
+    super::layout::ensure_inspector_visible(state);
     state.inspector.reveal_enzyme_query();
     state.focus.set_scope(FocusScope::Inspector);
     state
@@ -315,7 +315,7 @@ pub(super) fn apply_edit_feature_in_inspector(
     };
 
     let before = active_selection(state);
-    super::layout::dock_inspector_if_absent(state);
+    super::layout::ensure_inspector_visible(state);
     state
         .inspector
         .begin_feature_edit(id, label, kind, strand, start, end, arm_delete);
@@ -370,7 +370,7 @@ pub(super) fn apply_edit_primer_in_inspector(
     };
 
     let before = active_selection(state);
-    super::layout::dock_inspector_if_absent(state);
+    super::layout::ensure_inspector_visible(state);
     let scroll = binding.as_ref().map(|b| b.start);
     state
         .inspector

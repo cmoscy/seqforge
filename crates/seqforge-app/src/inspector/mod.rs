@@ -14,7 +14,7 @@
 //! which suppresses single-key user bindings (keymap gate) — otherwise the pane
 //! grabs no keys. Read-only nouns (cut-sites) stay non-editable.
 //!
-//! Like `Tab::FileBrowser`/`Tab::Terminal` it holds **no `ViewId`**. The primer
+//! Like the Files/Terminal regions it holds **no `ViewId`**. The primer
 //! projection is the shared `PrimerInfo` shape (same as the CLI `primers list`),
 //! memoized on `buffer.version`; features/cut-sites are cheap per-frame reads.
 

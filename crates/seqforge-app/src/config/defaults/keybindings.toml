@@ -17,8 +17,6 @@
 #   goto              Open the go-to-position bar
 #   next_tab          Cycle to the next tab in the active pane
 #   prev_tab          Cycle to the previous tab in the active pane
-#   split_horizontal  Split the active viewer pane left/right
-#   split_vertical    Split the active viewer pane top/bottom
 #   dismiss_overlay   Close the topmost overlay (find/goto/dialog)
 #   reload_config     Re-read settings.toml, keybindings.toml, and theme
 #

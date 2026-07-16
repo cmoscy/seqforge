@@ -42,11 +42,8 @@ linear_spine_height       = 8.0
 linear_feature_row_height = 6.0
 spine_feature_gap         = 3.0
 
-[layout]
-file_browser_fraction      = 0.20
-terminal_fraction          = 0.70
-minimap_browser_fraction   = 0.62
-inspector_fraction         = 0.22
+# Panel sizes (Files / Terminal / Inspector) are managed by the window manager
+# — drag a panel edge to resize; egui remembers it. No [layout] fractions.
 
 [terminal]
 # Empty = use $SHELL (or /bin/bash as a fallback)

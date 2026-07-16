@@ -138,31 +138,14 @@ impl Default for MinimapSettings {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// The workbench regions are native egui panels now (decision 19); egui owns
+/// their sizes (persisted in its own memory), so the old `[layout]` split
+/// fractions are gone. The struct is retained (empty) so existing configs
+/// carrying a `[layout]` section still load — `serde(default)` ignores its
+/// now-unknown sub-fields.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-pub struct LayoutSettings {
-    /// Width fraction given to the file browser in a fresh layout.
-    pub file_browser_fraction: f32,
-    /// Height fraction given to the viewer above the terminal in a fresh layout.
-    pub terminal_fraction: f32,
-    /// Height fraction given to the file browser within its tab (the
-    /// minimap takes the remainder).
-    pub minimap_browser_fraction: f32,
-    /// Width fraction given to the Inspector pane (right dock) in a fresh
-    /// layout; the central viewer takes the remainder.
-    pub inspector_fraction: f32,
-}
-
-impl Default for LayoutSettings {
-    fn default() -> Self {
-        Self {
-            file_browser_fraction: 0.20,
-            terminal_fraction: 0.70,
-            minimap_browser_fraction: 0.62,
-            inspector_fraction: 0.22,
-        }
-    }
-}
+pub struct LayoutSettings {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]

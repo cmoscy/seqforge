@@ -1,11 +1,11 @@
-//! Layout / tab / focus / split commands. Owns the dock-tree
-//! invariants (Welcome ↔ View, place-view-tab targeting) and the
-//! egui_dock wiggle-room around `NodeIndex` instability.
+//! Layout / tab / focus / document commands. Owns the center dock-tab
+//! invariants (Welcome ↔ View, place-view-tab targeting) and the CLI-parity
+//! document surface (`buffers` / `focus`). Side-by-side is egui_dock's native
+//! tab-drag — no hand-rolled split.
 
-use egui_dock::{Node, Split, SurfaceIndex};
-use seqforge_core::{DispatchError, ViewId, ViewKind, ViewerResponse};
+use seqforge_core::{DispatchError, DocInfo, ViewId, ViewerResponse};
 
-use super::{SplitDirection, view_tab_order};
+use super::view_tab_order;
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
@@ -80,114 +80,161 @@ pub(super) fn apply_focus_pane_by_index(
     Ok(None)
 }
 
-/// Split the dock leaf hosting the active view; clone the active
-/// view's buffer into a new `View` in the new leaf (Zed convention).
-pub(super) fn apply_split_pane(
+// Side-by-side of *different* documents is egui_dock's native tab-drag
+// (drag a tab to an edge). The old hand-rolled `SplitPane` (which cloned the
+// active buffer into a second view) is gone — it was the only path that put one
+// buffer in two panes, and the sole trigger of the egui ID-collision (decision
+// 19 follow-up). Different buffers never collide.
+
+// ── Document management (GUI ↔ CLI parity — decision 19) ────────────────────
+
+/// `buffers` — list the open documents in tab order. The `index` is the stable
+/// 1-based handle `focus` accepts (alongside a path / basename).
+pub(super) fn apply_buffers(state: &mut AppState) -> Result<Option<ViewerResponse>, DispatchError> {
+    let active = state.workspace.active_view;
+    let docs: Vec<DocInfo> = view_tab_order(state)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, vid)| doc_info(state, vid, i + 1, active == Some(vid)))
+        .collect();
+    Ok(Some(ViewerResponse::Buffers { docs }))
+}
+
+fn doc_info(state: &AppState, vid: ViewId, index: usize, active: bool) -> Option<DocInfo> {
+    let view = state.workspace.view(vid)?;
+    let arc = state.workspace.buffers.get(view.buffer_id)?;
+    let buf = arc.read().ok()?;
+    Some(DocInfo {
+        index,
+        name: crate::workspace::display_name(&buf),
+        path: buf.source_path.clone(),
+        dirty: buf.dirty,
+        active,
+    })
+}
+
+/// `focus <target>` — activate an open document by 1-based index (from
+/// `buffers`), an exact path, or a file basename. The GUI equivalent is
+/// clicking the document's tab.
+pub(super) fn apply_focus_doc(
     state: &mut AppState,
-    direction: SplitDirection,
+    target: &str,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let active_vid = state
-        .workspace
-        .active_view()
-        .ok_or(DispatchError::NoActiveView)?
-        .id;
-    let buffer_id = state.workspace.view(active_vid).expect("located").buffer_id;
+    let vid = resolve_doc(state, target).ok_or_else(|| {
+        DispatchError::InvalidInput(format!("no open document matching {target:?}"))
+    })?;
+    apply_switch_tab(state, vid).map(|_| Some(ViewerResponse::Ok))
+}
 
-    let (surface, node, _) = state
-        .dock_state
-        .find_tab(&Tab::View(active_vid))
-        .ok_or(DispatchError::ViewNotFound(active_vid))?;
-
-    let new_vid = state.workspace.add_view(buffer_id, ViewKind::TextView);
-    let split = match direction {
-        SplitDirection::Horizontal => Split::Right,
-        SplitDirection::Vertical => Split::Below,
-    };
-    let _ = state
-        .dock_state
-        .split((surface, node), split, 0.5, Node::leaf(Tab::View(new_vid)));
-
-    state.workspace.focus_view(new_vid);
-    let scope = FocusScope::View(new_vid);
-    state.focus.set_scope(scope);
-    state.events.emit(AppEvent::FocusChanged(scope));
-    Ok(None)
+/// Resolve a document handle to a `ViewId`: all-digits → 1-based index into tab
+/// order; else an exact path match, then a case-insensitive basename match.
+fn resolve_doc(state: &AppState, target: &str) -> Option<ViewId> {
+    let t = target.trim();
+    let order = view_tab_order(state);
+    if let Ok(n) = t.parse::<usize>() {
+        return order.get(n.checked_sub(1)?).copied();
+    }
+    if let Some(vid) = state.workspace.find_view_for_path(std::path::Path::new(t)) {
+        return Some(vid);
+    }
+    order.into_iter().find(|&vid| {
+        let Some(view) = state.workspace.view(vid) else {
+            return false;
+        };
+        let Some(arc) = state.workspace.buffers.get(view.buffer_id) else {
+            return false;
+        };
+        let Ok(buf) = arc.read() else {
+            return false;
+        };
+        buf.source_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().eq_ignore_ascii_case(t))
+            .unwrap_or(false)
+    })
 }
 
 pub(super) fn apply_reset_layout(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Restore all shell regions (decision 19) + the center dock. Views are
+    // preserved: rebuild_default_dock only resets the empty center; re-place any
+    // open views afterward so Reset Layout never closes documents.
+    state.show_files = true;
+    state.show_terminal = true;
+    state.show_inspector = true;
+    let open: Vec<ViewId> = view_tab_order(state);
     crate::app::rebuild_default_dock(&mut state.dock_state, &state.config);
+    for vid in open {
+        place_view_tab(state, vid);
+    }
+    ensure_welcome_invariant(state);
+    if let Some(vid) = state.workspace.active_view {
+        dock_activate_view(state, vid);
+    }
     Ok(None)
 }
 
-/// Toggle the Inspector pane: remove it if docked, otherwise dock it on the
-/// right of a viewer-bearing leaf (matching the default layout) and focus it.
-/// The escape hatch for sessions whose persisted layout predates the pane.
+/// Toggle the Inspector region's visibility (native `SidePanel::right` —
+/// decision 19). Flipping on focuses it; flipping off returns focus to the
+/// active view (or terminal) if it was on the Inspector.
 pub(super) fn apply_toggle_inspector(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    // Already docked → hide it.
-    if let Some(loc) = state.dock_state.find_tab(&Tab::Inspector) {
-        let _ = state.dock_state.remove_tab(loc);
-        if state.focus.scope == FocusScope::Inspector {
-            let scope = state
-                .workspace
-                .active_view
-                .map_or(FocusScope::Terminal, FocusScope::View);
-            state.focus.set_scope(scope);
-            state.events.emit(AppEvent::FocusChanged(scope));
-        }
+    state.show_inspector = !state.show_inspector;
+    let scope = if state.show_inspector {
+        FocusScope::Inspector
+    } else if state.focus.scope == FocusScope::Inspector {
+        state
+            .workspace
+            .active_view
+            .map_or(FocusScope::Terminal, FocusScope::View)
+    } else {
         return Ok(None);
-    }
-
-    // Otherwise dock it and focus it.
-    dock_inspector_if_absent(state);
-    let scope = FocusScope::Inspector;
+    };
     state.focus.set_scope(scope);
     state.events.emit(AppEvent::FocusChanged(scope));
     Ok(None)
 }
 
-/// Dock the Inspector on the right of a viewer-bearing leaf if it isn't already
-/// present; a no-op when it is. Shared by `ToggleInspector` and the ⌘E enzyme
-/// re-target (decision 15). Does **not** touch focus — callers decide that.
-pub(super) fn dock_inspector_if_absent(state: &mut AppState) {
-    if state.dock_state.find_tab(&Tab::Inspector).is_some() {
-        return;
-    }
-    // `split`'s fraction is the retained (viewer) share, so pass the complement
-    // of the pane's width.
-    let target = {
-        let mut found = None;
-        for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
-            for (n_idx, node) in surface.iter_nodes().enumerate() {
-                if let Some(tabs) = node.tabs() {
-                    if tabs
-                        .iter()
-                        .any(|t| matches!(t, Tab::View(_) | Tab::Welcome))
-                    {
-                        found = Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
-                        break;
-                    }
-                }
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        found
+/// Make the Inspector region visible if it isn't. Shared by `ToggleInspector`
+/// and the ⌘E enzyme re-target (decision 15). Does **not** touch focus —
+/// callers decide that.
+pub(super) fn ensure_inspector_visible(state: &mut AppState) {
+    state.show_inspector = true;
+}
+
+/// Show/hide the minimap overview (a sibling region in the right column,
+/// independent of the Inspector). It grabs no keyboard focus, so this is a
+/// plain visibility flip.
+pub(super) fn apply_toggle_minimap(
+    state: &mut AppState,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    state.show_minimap = !state.show_minimap;
+    Ok(None)
+}
+
+/// Toggle the Files region's visibility (native `SidePanel::left` — decision 19).
+/// Flipping on focuses it; flipping off returns focus to the active view (or
+/// terminal) if it was on the browser.
+pub(super) fn apply_toggle_files(
+    state: &mut AppState,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    state.show_files = !state.show_files;
+    let scope = if state.show_files {
+        FocusScope::Browser
+    } else if state.focus.scope == FocusScope::Browser {
+        state
+            .workspace
+            .active_view
+            .map_or(FocusScope::Terminal, FocusScope::View)
+    } else {
+        return Ok(None);
     };
-    let frac = 1.0 - state.config.settings.layout.inspector_fraction;
-    match target {
-        Some((si, ni)) => {
-            let _ =
-                state
-                    .dock_state
-                    .split((si, ni), Split::Right, frac, Node::leaf(Tab::Inspector));
-        }
-        None => state.dock_state.push_to_focused_leaf(Tab::Inspector),
-    }
+    state.focus.set_scope(scope);
+    state.events.emit(AppEvent::FocusChanged(scope));
+    Ok(None)
 }
 
 // ── Dock-tree helpers (also used by file.rs) ────────────────────────────────
@@ -207,7 +254,6 @@ pub(super) fn ensure_welcome_invariant(state: &mut AppState) {
                     match tab {
                         Tab::View(_) => view_count += 1,
                         Tab::Welcome => welcome_count += 1,
-                        _ => {}
                     }
                 }
             }
@@ -227,15 +273,12 @@ pub(super) fn ensure_welcome_invariant(state: &mut AppState) {
     }
 }
 
-/// Push a new `Tab::View(view_id)` into the dock. Targeting rules
-/// (in order):
-///   1. Same leaf as the currently active view (chain into the user's
-///      current pane).
-///   2. Any leaf already holding a `Tab::View(_)` or `Tab::Welcome`
-///      (never push into Browser / Terminal).
-///   3. Focused leaf as last resort.
+/// Place a new `Tab::View(view_id)` into the center dock. Chains into the active
+/// view's leaf (a new doc opens as a tab in the currently-focused pane, so it
+/// respects native splits); otherwise egui_dock's focused leaf. The center dock
+/// holds only `View`/`Welcome` tabs now (the shell is native panels — decision
+/// 19), so no cross-leaf hunting is needed.
 pub(super) fn place_view_tab(state: &mut AppState, view_id: ViewId) {
-    // (1) Active view's leaf.
     if let Some(active_vid) = state.workspace.active_view {
         if active_vid != view_id {
             if let Some((si, ni, _)) = state.dock_state.find_tab(&Tab::View(active_vid)) {
@@ -244,39 +287,17 @@ pub(super) fn place_view_tab(state: &mut AppState, view_id: ViewId) {
             }
         }
     }
-
-    // (2) Any viewer-bearing leaf.
-    let viewer_leaf = {
-        let mut found = None;
-        for (s_idx, surface) in state.dock_state.iter_surfaces().enumerate() {
-            for (n_idx, node) in surface.iter_nodes().enumerate() {
-                if let Some(tabs) = node.tabs() {
-                    if tabs
-                        .iter()
-                        .any(|t| matches!(t, Tab::View(_) | Tab::Welcome))
-                    {
-                        found = Some((SurfaceIndex(s_idx), egui_dock::NodeIndex(n_idx)));
-                        break;
-                    }
-                }
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        found
-    };
-
-    if let Some((si, ni)) = viewer_leaf {
-        state.dock_state[si][ni].append_tab(Tab::View(view_id));
-    } else {
-        state.dock_state.push_to_focused_leaf(Tab::View(view_id));
-    }
+    state.dock_state.push_to_focused_leaf(Tab::View(view_id));
 }
 
 /// Activate `view_id`'s tab in the dock.
 pub(super) fn dock_activate_view(state: &mut AppState, view_id: ViewId) {
     if let Some((si, ni, ti)) = state.dock_state.find_tab(&Tab::View(view_id)) {
+        // Set egui_dock's *focused node* too, not just the active tab —
+        // otherwise the end-of-frame reconciler (which trusts
+        // `find_active_focused`) sees the still-focused old leaf and enqueues a
+        // `SwitchTab` back, reverting a programmatic `focus`.
+        state.dock_state.set_focused_node_and_surface((si, ni));
         state.dock_state.set_active_tab((si, ni, ti));
     }
 }
@@ -286,22 +307,130 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toggle_inspector_docks_then_undocks() {
-        // Fresh state's stub dock has a Welcome leaf but no Inspector.
+    fn toggle_inspector_flips_visibility_and_focus() {
+        // Native right region (decision 19): default visible.
         let mut state = AppState::default();
-        assert!(state.dock_state.find_tab(&Tab::Inspector).is_none());
+        assert!(state.show_inspector);
 
         apply_toggle_inspector(&mut state).unwrap();
         assert!(
-            state.dock_state.find_tab(&Tab::Inspector).is_some(),
-            "toggle on must dock the Inspector"
+            !state.show_inspector,
+            "toggle off hides the Inspector region"
         );
+
+        apply_toggle_inspector(&mut state).unwrap();
+        assert!(state.show_inspector, "toggle on shows it again");
         assert_eq!(state.focus.scope, FocusScope::Inspector);
+    }
 
-        apply_toggle_inspector(&mut state).unwrap();
+    // ── buffers / focus (GUI–CLI parity) ────────────────────────────────────
+
+    struct TestBio;
+    impl seqforge_core::BioOps for TestBio {
+        fn load(&self, path: &std::path::Path) -> Result<seqforge_core::Document, String> {
+            seqforge_bio::load(path).map_err(|e| e.to_string())
+        }
+        fn find_matches(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u8,
+            _: bool,
+        ) -> Vec<seqforge_core::SearchHit> {
+            vec![]
+        }
+        fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
+            vec![]
+        }
+        fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn primer_infos(
+            &self,
+            _: &[u8],
+            _: &[&seqforge_core::Primer],
+            _: bool,
+        ) -> Vec<seqforge_core::PrimerInfo> {
+            vec![]
+        }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[seqforge_core::CutSite],
+            _: &[u8],
+            _: &seqforge_core::MethylContext,
+        ) -> Vec<seqforge_core::MethylState> {
+            vec![seqforge_core::MethylState::Cuttable; sites.len()]
+        }
+    }
+
+    /// Write a temp fasta and open it through the real command path (so it gets a
+    /// dock tab + active-view tracking). Returns the file path.
+    fn open_temp(state: &mut AppState, tag: &str, seq: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "sf_buffers_{}_{uniq}_{tag}.fasta",
+            std::process::id()
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, ">{tag}\n{seq}").unwrap();
+        crate::command::apply(
+            crate::command::AppCommand::Viewer(seqforge_core::ViewerRequest::Open {
+                path: path.clone(),
+            }),
+            state,
+            &TestBio,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn buffers_lists_open_docs_with_active_flag() {
+        let mut state = AppState::default();
+        let pa = open_temp(&mut state, "a", "ACGT");
+        let pb = open_temp(&mut state, "b", "TTTT"); // opened last → active
+
+        let resp = apply_buffers(&mut state).unwrap();
+        let seqforge_core::ViewerResponse::Buffers { docs } = resp.unwrap() else {
+            panic!("expected Buffers");
+        };
+        assert_eq!(docs.len(), 2);
+        // Indices are 1-based and stable; exactly one is active (the last opened).
+        assert_eq!(docs.iter().filter(|d| d.active).count(), 1);
+        assert!(docs.iter().any(|d| d.path.as_deref() == Some(pa.as_path())));
         assert!(
-            state.dock_state.find_tab(&Tab::Inspector).is_none(),
-            "toggle off must remove the Inspector"
+            docs.iter()
+                .find(|d| d.path.as_deref() == Some(pb.as_path()))
+                .is_some_and(|d| d.active)
         );
+        let _ = (std::fs::remove_file(pa), std::fs::remove_file(pb));
+    }
+
+    #[test]
+    fn focus_by_index_and_basename_switches_active() {
+        let mut state = AppState::default();
+        let pa = open_temp(&mut state, "a", "ACGT");
+        let pb = open_temp(&mut state, "b", "TTTT");
+        let vid_a = state.workspace.find_view_for_path(&pa).unwrap();
+
+        // Focus doc #1 (a) by index.
+        apply_focus_doc(&mut state, "1").unwrap();
+        assert_eq!(state.workspace.active_view, Some(vid_a));
+
+        // Focus b back by basename.
+        let base_b = pb.file_name().unwrap().to_string_lossy().to_string();
+        apply_focus_doc(&mut state, &base_b).unwrap();
+        assert_eq!(
+            state.workspace.active_view,
+            state.workspace.find_view_for_path(&pb)
+        );
+
+        // Unknown handle errors.
+        assert!(apply_focus_doc(&mut state, "nope.gb").is_err());
+        let _ = (std::fs::remove_file(pa), std::fs::remove_file(pb));
     }
 }

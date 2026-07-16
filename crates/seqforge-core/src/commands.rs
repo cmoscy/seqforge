@@ -153,6 +153,11 @@ pub enum ViewerRequest {
     Open { path: PathBuf },
     /// Close the current document.
     Close,
+    /// List the open documents (index, path, dirty, active).
+    Buffers,
+    /// Focus an open document by handle — a 1-based index (from `buffers`) or a
+    /// path / file basename. The GUI equivalent is clicking a document tab.
+    Focus { target: String },
     /// Navigate to a sequence position (1-based).
     #[serde(rename = "goto")]
     #[command(name = "goto")]
@@ -519,9 +524,23 @@ impl ViewerRequest {
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
             ViewerRequest::Redo { view, .. } => *view,
-            ViewerRequest::Open { .. } | ViewerRequest::Close => None,
+            ViewerRequest::Open { .. }
+            | ViewerRequest::Close
+            | ViewerRequest::Buffers
+            | ViewerRequest::Focus { .. } => None,
         }
     }
+}
+
+/// One open document, as reported by `buffers`. `index` is the stable 1-based
+/// handle used to `focus` it (also accepts the path/basename).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocInfo {
+    pub index: usize,
+    pub name: String,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    pub active: bool,
 }
 
 /// Response returned from `dispatch`. Each variant carries the data relevant
@@ -531,6 +550,8 @@ impl ViewerRequest {
 pub enum ViewerResponse {
     /// Open or Close succeeded.
     Ok,
+    /// `buffers` — the open documents in tab order.
+    Buffers { docs: Vec<DocInfo> },
     /// GoTo — 1-based position the viewer navigated to.
     Navigated { position: usize },
     /// Find — all matching hits (empty when the pattern was cleared).
@@ -737,10 +758,13 @@ pub fn dispatch<B: BioOps>(
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
     match req {
-        ViewerRequest::Open { .. } | ViewerRequest::Close => {
+        ViewerRequest::Open { .. }
+        | ViewerRequest::Close
+        | ViewerRequest::Buffers
+        | ViewerRequest::Focus { .. } => {
             unreachable!(
-                "Open/Close are workspace-scoped; the caller must handle them \
-                 before invoking dispatch (see command::apply)"
+                "Open/Close/Buffers/Focus are workspace-scoped; the caller must \
+                 handle them before invoking dispatch (see command::apply)"
             )
         }
 

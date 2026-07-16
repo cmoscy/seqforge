@@ -3,45 +3,30 @@ use std::sync::Arc;
 use seqforge_core::ViewId;
 use serde::{Deserialize, Serialize};
 
-use crate::browser::BrowserState;
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 use crate::focus::{FocusScope, FocusState};
-use crate::inspector::InspectorState;
-use crate::minimap::MiniMap;
 use crate::overlay::{self, OverlayStack};
-use crate::terminal::TerminalPane;
 use crate::workspace::Workspace;
 
-/// A leaf in the egui_dock tree.
+/// A leaf in the **center** egui_dock tree.
 ///
-/// After the Stage 2.5c follow-up flatten, viewer tabs are addressed
-/// by `ViewId` directly — egui_dock's native tab bar handles
-/// switching, drag-rearrange, and split-across-leaves. `Welcome` is a
-/// placeholder shown when no view is open; it gets replaced by the
-/// first `View(_)` tab and re-introduced when the last view closes,
-/// so the central dock area never becomes an empty void.
+/// The shell regions (Files / Terminal / Inspector) are native panels now
+/// (decision 19); the dock manages only the center editor tab strip. Viewer
+/// tabs are addressed by `ViewId` directly (egui_dock handles switching,
+/// drag-rearrange, split-across-leaves). `Welcome` is the placeholder shown when
+/// no view is open, so the center never becomes an empty void.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Tab {
-    FileBrowser,
-    Terminal,
     Welcome,
     View(ViewId),
-    /// The Inspector pane (right dock) — a singleton reading the active view.
-    Inspector,
 }
 
 pub struct TabViewer<'a> {
-    pub browser: &'a mut BrowserState,
     pub workspace: &'a mut Workspace,
     pub pending_commands: &'a mut Vec<PendingCommand>,
-    pub terminal: &'a mut Option<TerminalPane>,
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
-    pub minimap: &'a mut MiniMap,
-    /// The Inspector pane's memoized state (refreshed before the dock renders).
-    /// `&mut` because the pane owns transient UI state (the active sub-tab).
-    pub inspector: &'a mut InspectorState,
     /// In-memory clipboard bytes (`AppState.clipboard`), passed to the sequence
     /// viewer so a staged Paste can preview the clipboard contents.
     pub clipboard: Option<&'a [u8]>,
@@ -54,10 +39,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
         match tab {
-            Tab::FileBrowser => "Files".into(),
-            Tab::Terminal => "Terminal".into(),
             Tab::Welcome => "Welcome".into(),
-            Tab::Inspector => "Inspector".into(),
             Tab::View(vid) => {
                 let name = self.workspace.view(*vid).and_then(|v| {
                     let arc = self.workspace.buffers.get(v.buffer_id)?;
@@ -94,60 +76,11 @@ impl egui_dock::TabViewer for TabViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         let pane_rect = ui.max_rect();
         let pane_scope = match tab {
-            Tab::FileBrowser => FocusScope::Browser,
-            Tab::Terminal => FocusScope::Terminal,
             Tab::Welcome => FocusScope::View(ViewId(0)),
             Tab::View(vid) => FocusScope::View(*vid),
-            Tab::Inspector => FocusScope::Inspector,
         };
 
         match tab {
-            Tab::FileBrowser => {
-                let available_h = ui.available_height();
-                let available_w = ui.available_width();
-
-                // Fraction-based split: browser gets the top portion,
-                // minimap the bottom. `browser_fraction` is adjusted by
-                // the drag handle below and lives on `MiniMap` so it
-                // survives tab switches within the session.
-                let browser_h = (available_h * self.minimap.browser_fraction).max(40.0);
-
-                ui.allocate_ui(egui::Vec2::new(available_w, browser_h), |ui| {
-                    if let Some(path) = self.browser.show(ui) {
-                        self.pending_commands
-                            .push((AppCommand::OpenFile(path), None));
-                    }
-                });
-
-                // ── Drag handle ───────────────────────────────────────────────
-                // A thin interactive strip the user drags to resize the split.
-                // Highlight on hover; update `browser_fraction` on drag.
-                let handle_size = egui::Vec2::new(available_w, 6.0);
-                let (handle_rect, handle_resp) =
-                    ui.allocate_exact_size(handle_size, egui::Sense::drag());
-
-                if handle_resp.hovered() || handle_resp.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                }
-                if handle_resp.dragged() {
-                    let delta = handle_resp.drag_delta().y / available_h;
-                    self.minimap.browser_fraction =
-                        (self.minimap.browser_fraction + delta).clamp(0.15, 0.85);
-                }
-                let handle_color = if handle_resp.hovered() || handle_resp.dragged() {
-                    ui.visuals().selection.stroke.color
-                } else {
-                    ui.visuals().widgets.noninteractive.bg_stroke.color
-                };
-                ui.painter().hline(
-                    handle_rect.x_range(),
-                    handle_rect.center().y,
-                    egui::Stroke::new(1.0, handle_color),
-                );
-
-                self.minimap
-                    .show(ui, self.workspace, self.pending_commands, &self.config);
-            }
             Tab::Welcome => {
                 if let Some(cmd) = overlay::show_inline_bar(self.overlays, ui) {
                     self.pending_commands.push((cmd, None));
@@ -223,21 +156,6 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // No focused-pane border: focus is cued by the blinking caret
                 // (solid when unfocused, blinking when focused). The accent
                 // rectangle read as visual noise, especially in a single pane.
-            }
-            Tab::Terminal => match self.terminal.as_mut() {
-                Some(term) => {
-                    let terminal_has_focus =
-                        self.focus.scope == FocusScope::Terminal && self.overlays.is_empty();
-                    term.show(ui, terminal_has_focus);
-                }
-                None => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Terminal failed to initialise.\nCheck stderr for details.");
-                    });
-                }
-            },
-            Tab::Inspector => {
-                self.inspector.show(ui, self.pending_commands);
             }
         }
 

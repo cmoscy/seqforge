@@ -174,25 +174,13 @@ fn angle_for_pos(pos: usize, seq_len: usize) -> f32 {
 // ── MiniMap widget ────────────────────────────────────────────────────────────
 
 /// Retained state for the minimap panel.
+#[derive(Default)]
 pub struct MiniMap {
     /// `(buffer_id, buffer.version, panel_size_q, config_epoch)` → cached geometry.
     /// `panel_size_q` is `(panel_size * 2.0).round() as u32` so sub-0.5px
     /// resize noise doesn't thrash the cache. `config_epoch` bumps on
     /// `ReloadConfig` so a theme/sizing change re-tessellates.
     geom_cache: Cache<(BufferId, u64, u32, u64), MinimapGeom>,
-    /// Fraction of the FileBrowser tab height given to the browser tree.
-    /// The remainder is the minimap. Adjusted by the drag handle in
-    /// `tabs.rs`. Clamped to `[0.15, 0.85]` during drag.
-    pub browser_fraction: f32,
-}
-
-impl Default for MiniMap {
-    fn default() -> Self {
-        Self {
-            geom_cache: Cache::default(),
-            browser_fraction: 0.62,
-        }
-    }
 }
 
 impl MiniMap {

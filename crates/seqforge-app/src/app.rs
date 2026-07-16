@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use egui_dock::{DockArea, DockState, NodeIndex, Style};
+use egui_dock::{DockArea, DockState, Style};
 use seqforge_core::{
     BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, ViewId, ViewSelection,
     ViewerRequest, ViewerResponse,
@@ -13,7 +13,7 @@ use crate::browser::BrowserState;
 use crate::command::{self, AppCommand, PendingCommand};
 use crate::config::Config;
 use crate::event::{AppEvent, EventLog, EventSink};
-use crate::focus::FocusState;
+use crate::focus::{FocusScope, FocusState};
 use crate::keymap;
 use crate::minimap::MiniMap;
 use crate::overlay::{FEATURE_KINDS, OverlayStack};
@@ -192,6 +192,16 @@ pub struct AppState {
     /// Refreshed once per frame before the dock renders. Singleton — holds no
     /// `ViewId`; reads whatever view is active.
     pub(crate) inspector: crate::inspector::InspectorState,
+    /// Workbench shell region visibility (native panels — decision 19). The
+    /// editor `CentralPanel` is always present; these gate the surrounding
+    /// regions. Sizes are owned by egui's per-panel memory.
+    pub(crate) show_inspector: bool,
+    pub(crate) show_terminal: bool,
+    pub(crate) show_files: bool,
+    /// Minimap overview visibility. Independent of `show_inspector`: the two
+    /// share the right column as sibling panels (Inspector fills, Minimap is the
+    /// sized bottom strip) and either can be shown alone.
+    pub(crate) show_minimap: bool,
 }
 
 impl Default for AppState {
@@ -228,6 +238,10 @@ impl Default for AppState {
             last_title: None,
             allow_close: false,
             inspector: crate::inspector::InspectorState::default(),
+            show_inspector: true,
+            show_terminal: true,
+            show_files: true,
+            show_minimap: true,
         }
     }
 }
@@ -246,89 +260,66 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
     state.recent_files = session.recent_files;
     state.pending_file_state = session.file_state;
 
-    let Some(snapshot) = session.layout else {
-        return;
-    };
+    // Flat workbench layout (decision 19): restore panel visibility, then reopen
+    // the persisted documents as tabs in a fresh center dock.
+    let wb = session.workbench;
+    state.show_files = wb.show_files;
+    state.show_terminal = wb.show_terminal;
+    state.show_inspector = wb.show_inspector;
+    state.show_minimap = wb.show_minimap;
 
-    // Build the dock skeleton (splits + Browser/Terminal/Welcome
-    // placeholders for viewer leaves) and collect the per-leaf opens
-    // that need replaying.
-    let (dock, pending) = persistence::rebuild_dock(&snapshot);
-    state.dock_state = dock;
-
-    // Replay opens, targeting each persisted leaf directly. Bypasses
-    // the command pipeline because we're inside startup — no events,
-    // no recent_files churn, no focus moves.
-    for (surface, node, paths, active) in pending.leaves {
-        let mut view_tabs: Vec<seqforge_core::ViewId> = Vec::new();
-        for path in paths {
-            match state.workspace.open_path(&path, bio) {
-                Ok(vid) => {
-                    // Restore selection / scroll if we have any.
-                    if let Some(fs) = state.pending_file_state.remove(&path) {
-                        if let Some(view) = state.workspace.view_mut(vid) {
-                            view.selection = fs
-                                .selection
-                                .map_or(ViewSelection::None, ViewSelection::Text);
-                            view.scroll_pos = fs.scroll_pos;
-                        }
+    let mut view_ids: Vec<seqforge_core::ViewId> = Vec::new();
+    for path in &wb.open_paths {
+        match state.workspace.open_path(path, bio) {
+            Ok(vid) => {
+                if let Some(fs) = state.pending_file_state.remove(path) {
+                    if let Some(view) = state.workspace.view_mut(vid) {
+                        view.selection = fs
+                            .selection
+                            .map_or(ViewSelection::None, ViewSelection::Text);
+                        view.scroll_pos = fs.scroll_pos;
                     }
-                    view_tabs.push(vid);
                 }
-                Err(e) => {
-                    eprintln!("[seqforge] restore: failed to reopen {path:?}: {e}");
-                }
+                view_ids.push(vid);
             }
-        }
-        if view_tabs.is_empty() {
-            continue;
-        }
-        // Replace the Welcome placeholder in this leaf with the
-        // freshly minted View tabs.
-        if let egui_dock::Node::Leaf {
-            tabs,
-            active: tab_active,
-            ..
-        } = &mut state.dock_state[surface][node]
-        {
-            *tabs = view_tabs.iter().copied().map(Tab::View).collect();
-            *tab_active = egui_dock::TabIndex(active.min(tabs.len().saturating_sub(1)));
+            Err(e) => eprintln!("[seqforge] restore: failed to reopen {path:?}: {e}"),
         }
     }
 
-    // Set workspace.active_view to whichever view the dock currently
-    // shows as focused (egui_dock keeps a focused_node hint).
-    if let Some((_, Tab::View(vid))) = state.dock_state.find_active_focused() {
-        let vid = *vid;
-        state.workspace.focus_view(vid);
-        state.focus.set_scope(crate::focus::FocusScope::View(vid));
+    if view_ids.is_empty() {
+        state.dock_state = DockState::new(vec![Tab::Welcome]);
+        return;
     }
+
+    state.dock_state = DockState::new(view_ids.iter().copied().map(Tab::View).collect());
+    let active = wb.active.min(view_ids.len() - 1);
+    let vid = view_ids[active];
+    if let Some(loc) = state.dock_state.find_tab(&Tab::View(vid)) {
+        state.dock_state.set_active_tab(loc);
+    }
+    state.workspace.focus_view(vid);
+    state.focus.set_scope(FocusScope::View(vid));
 }
 
-/// Reset the dock to a fresh Welcome+Browser+Terminal layout using the
-/// active configuration's split fractions. Called on first launch (no
-/// saved session) and by `AppCommand::ResetLayout`.
-pub(crate) fn rebuild_default_dock(dock: &mut DockState<Tab>, cfg: &Config) {
+/// Reset the dock to a fresh Welcome placeholder (the shell regions are native
+/// panels — decision 19). Called on first launch (no saved session) and by
+/// `AppCommand::ResetLayout`.
+pub(crate) fn rebuild_default_dock(dock: &mut DockState<Tab>, _cfg: &Config) {
+    // Files / Terminal / Inspector are native panels now (decision 19). The dock
+    // holds only the center View tabs — a lone Welcome placeholder until a file
+    // opens (Phase d moves the empty-state onto the CentralPanel directly).
     *dock = DockState::new(vec![Tab::Welcome]);
-    let surface = dock.main_surface_mut();
-    let [_right, _left] = surface.split_left(
-        NodeIndex::root(),
-        cfg.settings.layout.file_browser_fraction,
-        vec![Tab::FileBrowser],
-    );
-    let [viewer, _terminal] = surface.split_below(
-        NodeIndex::root(),
-        cfg.settings.layout.terminal_fraction,
-        vec![Tab::Terminal],
-    );
-    // Inspector on the right of the central viewer area. `split_right`'s
-    // fraction is the *retained* (left/viewer) share, so pass the complement of
-    // the Inspector's own width fraction.
-    surface.split_right(
-        viewer,
-        1.0 - cfg.settings.layout.inspector_fraction,
-        vec![Tab::Inspector],
-    );
+}
+
+/// A click anywhere in a Files-sidebar sub-region focuses the Browser pane —
+/// the native-panel equivalent of the old dock leaf-click → `FocusPane`.
+fn focus_files_on_click(ui: &egui::Ui, focus: &FocusState, pending: &mut Vec<PendingCommand>) {
+    if ui.rect_contains_pointer(ui.max_rect())
+        && ui.ctx().input(|i| i.pointer.any_pressed())
+        && focus.scope != FocusScope::Browser
+    {
+        pending.push((AppCommand::FocusPane(FocusScope::Browser), None));
+    }
 }
 
 // ── SeqForgeApp ───────────────────────────────────────────────────────────────
@@ -351,12 +342,6 @@ impl SeqForgeApp {
         for w in cfg_warnings {
             state.toasts.warning(w);
         }
-        state.minimap.browser_fraction = state
-            .config
-            .settings
-            .layout
-            .minimap_browser_fraction
-            .clamp(0.15, 0.85);
         // If no saved session restores the layout below, rebuild the
         // default dock using the *user-configured* split fractions so a
         // first launch honours `[layout]` overrides.
@@ -956,7 +941,14 @@ impl eframe::App for SeqForgeApp {
         // and BufferIds are not persisted — they're session-scoped.
         let session = PersistedSession {
             recent_files: self.state.recent_files.clone(),
-            layout: persistence::capture_layout(&self.state.dock_state, &self.state.workspace),
+            workbench: persistence::capture_workbench(
+                &self.state.dock_state,
+                &self.state.workspace,
+                self.state.show_files,
+                self.state.show_terminal,
+                self.state.show_inspector,
+                self.state.show_minimap,
+            ),
             file_state: persistence::capture_file_state(&self.state.workspace),
         };
         eframe::set_value(storage, SESSION_KEY, &session);
@@ -1248,19 +1240,7 @@ impl eframe::App for SeqForgeApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.button("Split Right  ⌘\\").clicked() {
-                        menu_cmds.push(AppCommand::SplitPane {
-                            direction: crate::command::SplitDirection::Horizontal,
-                        });
-                        ui.close_menu();
-                    }
-                    if ui.button("Split Below").clicked() {
-                        menu_cmds.push(AppCommand::SplitPane {
-                            direction: crate::command::SplitDirection::Vertical,
-                        });
-                        ui.close_menu();
-                    }
-                    ui.separator();
+                    // Side-by-side is native: drag a document tab to an edge.
                     // ── Translation lanes (View → Translation) ──
                     let cur_trans = self
                         .state
@@ -1297,9 +1277,19 @@ impl eframe::App for SeqForgeApp {
                         });
                     });
                     ui.separator();
-                    let inspector_shown = self.state.dock_state.find_tab(&Tab::Inspector).is_some();
+                    let files_shown = self.state.show_files;
+                    if ui.selectable_label(files_shown, "Files").clicked() {
+                        menu_cmds.push(AppCommand::ToggleFiles);
+                        ui.close_menu();
+                    }
+                    let inspector_shown = self.state.show_inspector;
                     if ui.selectable_label(inspector_shown, "Inspector").clicked() {
                         menu_cmds.push(AppCommand::ToggleInspector);
+                        ui.close_menu();
+                    }
+                    let minimap_shown = self.state.show_minimap;
+                    if ui.selectable_label(minimap_shown, "Minimap").clicked() {
+                        menu_cmds.push(AppCommand::ToggleMinimap);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1562,6 +1552,10 @@ impl eframe::App for SeqForgeApp {
             config,
             clipboard,
             inspector,
+            show_inspector,
+            show_terminal,
+            show_files,
+            show_minimap,
             ..
         } = &mut self.state;
 
@@ -1569,47 +1563,153 @@ impl eframe::App for SeqForgeApp {
         // reads it (version-keyed; a no-op when nothing changed).
         inspector.refresh(workspace, config.settings.inspector.follow_selection);
 
+        // ── Terminal: native bottom region (decision 19) ──────────────────────
+        // Drawn before the side panels so it spans full width (matches the prior
+        // `split_below(root)` look); above the status bar (which is outermost).
+        if *show_terminal {
+            egui::TopBottomPanel::bottom("terminal_panel")
+                .resizable(true)
+                .default_height(180.0)
+                .show(ctx, |ui| {
+                    match terminal.as_mut() {
+                        Some(term) => {
+                            let has_focus =
+                                focus.scope == FocusScope::Terminal && overlays.is_empty();
+                            term.show(ui, has_focus);
+                        }
+                        None => {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    "Terminal failed to initialise.\nCheck stderr for details.",
+                                );
+                            });
+                        }
+                    }
+                    if ui.rect_contains_pointer(ui.max_rect())
+                        && ui.ctx().input(|i| i.pointer.any_pressed())
+                        && focus.scope != FocusScope::Terminal
+                    {
+                        pending_commands.push((AppCommand::FocusPane(FocusScope::Terminal), None));
+                    }
+                });
+        }
+
+        // ── Files: native left region — workspace navigation (decision 19) ────
+        // Browser only; the minimap is document-scoped and lives on the right.
+        if *show_files {
+            egui::SidePanel::left("files_panel")
+                .resizable(true)
+                .default_width(220.0)
+                .show(ctx, |ui| {
+                    if let Some(path) = browser.show(ui) {
+                        pending_commands.push((AppCommand::OpenFile(path), None));
+                    }
+                    focus_files_on_click(ui, focus, pending_commands);
+                });
+        }
+
+        // ── Right region — active-document surface (decision 19) ──────────────
+        // egui's canonical layout (see its `panels.rs` demo): one resizable
+        // *sized* panel + a `CentralPanel` that fills the remainder — never two
+        // stacked resizable panels, never a spacer. Role assignment matters: the
+        // sized panel wants a stable, bounded size, while the CentralPanel is the
+        // *greedy* one and is the natural home for unbounded, list-like content.
+        // So the **Minimap** (a fixed sequence overview — bounded) is the sized
+        // bottom panel, and the **Inspector** (primer/enzyme lists — unbounded)
+        // is the greedy CentralPanel that fills the rest and gets the majority by
+        // default. A single divider splits the whole column: drag it up to grow
+        // the Minimap (Inspector → 0), down to shrink the Minimap to its small min
+        // (Inspector maximized). egui clamps a dragged panel only to its
+        // `height_range`, never to content-min (see `TopBottomPanel::show_inside_dyn`),
+        // so the divider ranges nearly the full column and each side simply shows
+        // whitespace when its content is short. A small Minimap min keeps its
+        // handle grabbable; full-hide of either is on the View toggles. The
+        // column owns its width; egui owns every height. Minimap clicks are
+        // focus-neutral (they only scroll the active view).
+        if *show_inspector || *show_minimap {
+            egui::SidePanel::right("inspector_panel")
+                .resizable(true)
+                .default_width(280.0)
+                .width_range(220.0..=560.0)
+                .show(ctx, |ui| {
+                    match (*show_inspector, *show_minimap) {
+                        // Both visible: Minimap = sized bottom panel (single
+                        // divider, ~200px default), Inspector = greedy CentralPanel
+                        // remainder above it (gets the majority by default).
+                        (true, true) => {
+                            egui::TopBottomPanel::bottom("minimap_body")
+                                .resizable(true)
+                                .default_height(200.0)
+                                .height_range(48.0..=f32::INFINITY)
+                                .show_inside(ui, |ui| {
+                                    minimap.show(ui, workspace, pending_commands, config);
+                                });
+                            egui::CentralPanel::default().show_inside(ui, |ui| {
+                                inspector.show(ui, pending_commands);
+                            });
+                        }
+                        // Only the Inspector: it fills the whole column.
+                        (true, false) => {
+                            egui::CentralPanel::default().show_inside(ui, |ui| {
+                                inspector.show(ui, pending_commands);
+                            });
+                        }
+                        // Only the minimap: it fills the whole column.
+                        (false, true) => {
+                            egui::CentralPanel::default().show_inside(ui, |ui| {
+                                minimap.show(ui, workspace, pending_commands, config);
+                            });
+                        }
+                        // Unreachable: the column is gated off when both are hidden.
+                        (false, false) => {}
+                    }
+                    // Click anywhere in the pane (outside the minimap's GoTo
+                    // targets) → focus the Inspector.
+                    if ui.rect_contains_pointer(ui.max_rect())
+                        && ui.ctx().input(|i| i.pointer.any_pressed())
+                        && focus.scope != FocusScope::Inspector
+                    {
+                        pending_commands.push((AppCommand::FocusPane(FocusScope::Inspector), None));
+                    }
+                });
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(0.0))
             .show(ctx, |ui| {
+                // Draggable tabs (default) give native side-by-side — drag a
+                // document tab to an edge to split. `show_inside` keeps everything
+                // docked (no floating windows), consistent with the native shell.
                 DockArea::new(dock_state)
                     .style(Style::from_egui(ui.style()))
                     .show_inside(
                         ui,
                         &mut TabViewer {
-                            browser,
                             workspace,
                             pending_commands,
-                            terminal,
                             overlays,
                             focus,
-                            minimap,
-                            inspector,
                             clipboard: clipboard.as_deref(),
                             config: config.clone(),
                         },
                     );
             });
 
-        // ── Reconcile dock-internal focus with workspace.active_view ──────────
-        // egui_dock activates tabs on its own (tab-strip clicks, drag).
-        // Detect divergence and enqueue a SwitchTab so the workspace +
-        // FocusScope catch up through the single-applier path.
-        //
-        // Only enqueue when the workspace actually knows the view —
-        // otherwise we'd issue SwitchTab for a ghost tab every frame
-        // and the applier would toast `ViewNotFound`. The startup
-        // sanitizer should make ghost tabs impossible, but this guard
-        // keeps the runtime resilient to drift from any future code
-        // path that mutates the dock without updating the workspace.
+        // ── Derive workspace.active_view from egui_dock's focus (one-way) ─────
+        // egui_dock owns the center's tab focus (clicks, drag, tab close). We
+        // *mirror* its focused view into the workspace **inline** — not by
+        // enqueuing a `SwitchTab`, which could outlive a view being closed in the
+        // same frame (→ `ViewNotFound`). Programmatic focus (cycle / CLI `focus`)
+        // drives egui's focus via `set_focused_node_and_surface`, so this read
+        // agrees with it. Guarded on `contains_key` for resilience to any drift.
         if let Some((_rect, Tab::View(vid))) = self.state.dock_state.find_active_focused() {
             let vid = *vid;
             if self.state.workspace.active_view != Some(vid)
                 && self.state.workspace.views.contains_key(&vid)
             {
-                self.state
-                    .pending_commands
-                    .push((AppCommand::SwitchTab { view: vid }, None));
+                self.state.workspace.focus_view(vid);
+                self.state.focus.set_scope(FocusScope::View(vid));
+                self.state.events.emit(AppEvent::TabSwitched { view: vid });
             }
         }
 
@@ -1665,18 +1765,21 @@ mod tests {
     use crate::tabs::Tab;
 
     #[test]
-    fn default_dock_includes_inspector() {
+    fn default_dock_is_only_the_center_welcome() {
+        // Shell regions are native panels now (decision 19); the dock holds only
+        // the center — a lone Welcome placeholder until a file opens.
         let cfg = crate::config::Config::default();
         let mut dock = egui_dock::DockState::new(vec![Tab::Welcome]);
         rebuild_default_dock(&mut dock, &cfg);
         let tree = dock.main_surface();
-        let has_inspector = (0..tree.len()).any(|i| {
-            matches!(
-                &tree[egui_dock::NodeIndex(i)],
-                egui_dock::Node::Leaf { tabs, .. } if tabs.iter().any(|t| matches!(t, Tab::Inspector))
-            )
-        });
-        assert!(has_inspector, "fresh layout must dock an Inspector pane");
+        let tabs: Vec<&Tab> = (0..tree.len())
+            .filter_map(|i| match &tree[egui_dock::NodeIndex(i)] {
+                egui_dock::Node::Leaf { tabs, .. } => Some(tabs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(tabs, vec![&Tab::Welcome], "dock is just the center Welcome");
     }
 
     #[test]
