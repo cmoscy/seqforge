@@ -7,11 +7,12 @@ use crate::span::Span;
 
 // ── Result types (computed from a Document) ───────────────────────────────────
 
-/// A pattern match hit — 0-based half-open range, indicates which strand was matched.
+/// A pattern match hit — a [`Span`] (circular-native, so a site crossing the
+/// origin is one wrapping span rather than an `end > len` overflow) plus the
+/// strand matched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
-    pub start: usize,
-    pub end: usize,
+    pub span: Span,
     pub strand: Strand,
 }
 

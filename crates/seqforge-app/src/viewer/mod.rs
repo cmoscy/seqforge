@@ -1184,9 +1184,10 @@ impl SequenceView {
                             );
                         } else if let Some(hit_idx) = find_hit(&hits, pos, Hit::as_search) {
                             let hit = &view.search_hits[hit_idx];
+                            // A wrapping hit selects the origin-crossing arc.
                             push_select(
                                 cmds,
-                                ViewSelection::Text(Selection::range(hit.start, hit.end)),
+                                ViewSelection::Text(Selection::from_span(hit.span, seq_len)),
                             );
                         } else if let Some(site_idx) = find_hit(&hits, pos, Hit::as_cut_site) {
                             // Clicking a cut site selects the site *object* (its

@@ -37,15 +37,22 @@ impl Track for SequenceTrack {
         let style = ctx.style;
         let top_y = geom.y0;
         for (hit_idx, hit) in ctx.search_hits.iter().enumerate() {
-            let vis_s = hit.start.max(ctx.block_start).min(ctx.block_end);
-            let vis_e = hit.end.min(ctx.block_end);
-            if vis_s < vis_e && vis_e > ctx.block_start {
-                let sx = geom.seq_x0 + (vis_s - ctx.block_start) as f32 * style.char_width;
-                let sw = (vis_e - vis_s) as f32 * style.char_width;
-                hits.push((
-                    Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, style.strand_h * 2.0)),
-                    Hit::Search(hit_idx),
-                ));
+            // One hit rect per linear run — an origin-spanning hit is clickable on
+            // either arm (`Span::linear_pieces`, the shared geometry primitive).
+            for run in hit.span.linear_pieces(ctx.seq_len).iter() {
+                let vis_s = run.start.max(ctx.block_start).min(ctx.block_end);
+                let vis_e = run.end.min(ctx.block_end);
+                if vis_s < vis_e && vis_e > ctx.block_start {
+                    let sx = geom.seq_x0 + (vis_s - ctx.block_start) as f32 * style.char_width;
+                    let sw = (vis_e - vis_s) as f32 * style.char_width;
+                    hits.push((
+                        Rect::from_min_size(
+                            Pos2::new(sx, top_y),
+                            Vec2::new(sw, style.strand_h * 2.0),
+                        ),
+                        Hit::Search(hit_idx),
+                    ));
+                }
             }
         }
     }
@@ -68,22 +75,25 @@ impl Track for SequenceTrack {
         // committed coordinates and refresh on commit.
         if !ctx.staging {
             for hit in ctx.search_hits {
-                let vis_s = hit.start.max(block_start).min(block_end);
-                let vis_e = hit.end.min(block_end); // clamp wrap-arounds
-                if vis_s < vis_e && vis_e > block_start {
-                    let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
-                    let sw = (vis_e - vis_s) as f32 * char_width;
-                    let color = search_hit_color(ctx.theme, hit.strand);
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
-                        2.0,
-                        color,
-                    );
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
-                        2.0,
-                        color,
-                    );
+                let color = search_hit_color(ctx.theme, hit.strand);
+                // Paint each linear run — both arms of an origin-spanning hit.
+                for run in hit.span.linear_pieces(ctx.seq_len).iter() {
+                    let vis_s = run.start.max(block_start).min(block_end);
+                    let vis_e = run.end.min(block_end);
+                    if vis_s < vis_e && vis_e > block_start {
+                        let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                        let sw = (vis_e - vis_s) as f32 * char_width;
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                            2.0,
+                            color,
+                        );
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                            2.0,
+                            color,
+                        );
+                    }
                 }
             }
         }

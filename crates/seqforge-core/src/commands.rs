@@ -75,6 +75,19 @@ impl Selection {
         (self.anchor.min(self.focus), self.anchor.max(self.focus))
     }
 
+    /// A selection covering `span` on a molecule of length `len` — the inverse of
+    /// [`Selection::to_span`]. Anchor at the span start, focus at its (mod-`len`)
+    /// end, `wrap` set iff the span crosses the origin. (A whole-molecule span is
+    /// not representable here — it collapses to a cursor — but callers building a
+    /// selection from a sub-region span, e.g. a search hit, never hit that.)
+    pub fn from_span(span: Span, len: usize) -> Selection {
+        Selection {
+            anchor: span.start,
+            focus: span.end(len),
+            wrap: span.wraps(len),
+        }
+    }
+
     /// The covered region as a wrap-aware [`Span`] on a molecule of length `len`
     /// — the single geometry projection (highlight / copy / minimap all consume
     /// its [`Span::linear_pieces`]). Non-wrapping → the `[min, max)` arc;
@@ -899,8 +912,9 @@ pub fn dispatch<B: BioOps>(
             let hits = bio.find_matches(&buffer.text, pattern.as_bytes(), mismatches, circular);
             let count = hits.len();
             if let Some(first) = hits.first() {
-                view.scroll_to = Some(first.start);
-                view.selection = ViewSelection::Text(Selection::range(first.start, first.end));
+                view.scroll_to = Some(first.span.start);
+                view.selection =
+                    ViewSelection::Text(Selection::from_span(first.span, buffer.text.len()));
             }
             view.search_hits = hits.clone();
             Ok(ViewerResponse::SearchResults { count, hits })
@@ -1123,8 +1137,7 @@ mod tests {
         }
         fn with_hit(mut self, start: usize, end: usize) -> Self {
             self.hits.push(SearchHit {
-                start,
-                end,
+                span: Span::from_range(start..end),
                 strand: crate::Strand::Forward,
             });
             self
@@ -1915,7 +1928,7 @@ mod tests {
             ViewerResponse::SearchResults { count: 1, .. }
         ));
         if let ViewerResponse::SearchResults { hits, .. } = resp {
-            assert_eq!(hits[0].start, 2);
+            assert_eq!(hits[0].span.start, 2);
         }
     }
 
@@ -1923,8 +1936,7 @@ mod tests {
     fn dispatch_find_empty_pattern_clears() {
         let (mut view, buf, mut ann) = fixture();
         view.search_hits.push(SearchHit {
-            start: 0,
-            end: 4,
+            span: Span::from_range(0..4),
             strand: crate::Strand::Forward,
         });
         // Pre-populate a selection so we can verify clear-on-empty behavior.

@@ -1,4 +1,4 @@
-use seqforge_core::{CutSite, MethylContext, MethylState, SearchHit, Strand};
+use seqforge_core::{CutSite, MethylContext, MethylState, SearchHit, Span, Strand};
 use seqforge_restriction::find_all_sites;
 
 // ── IUPAC matching ────────────────────────────────────────────────────────────
@@ -39,8 +39,9 @@ fn hamming_iupac(pattern: &[u8], seq_slice: &[u8]) -> u8 {
 /// Find all IUPAC pattern matches in `seq`, on both strands.
 ///
 /// For circular sequences, pass `circular = true` to detect sites that span
-/// the origin. Positions are 0-based; `end` may exceed `seq.len()` for
-/// wrap-around hits — the renderer clamps to visible range.
+/// the origin. Each hit's [`Span`] is circular-native: an origin-crossing site
+/// is one wrapping span (`start ∈ 0..seq_len`, `len == pattern.len()`), not an
+/// `end`-past-the-molecule overflow.
 ///
 /// Note: uses a simple O(n·m) scan; adequate for plasmid-scale sequences.
 pub fn find_iupac_matches(
@@ -78,20 +79,19 @@ pub fn find_iupac_matches(
 
     for i in 0..search_end {
         let slice = &search_seq[i..i + pat_len];
-        let start = i % seq_len;
-        let end = start + pat_len;
+        // `start + pat_len` may exceed `seq_len` for an origin-spanning hit; the
+        // `Span` carries that as a wrap (start ∈ 0..seq_len, len = pat_len).
+        let span = Span::new(i % seq_len, pat_len);
 
         if hamming_iupac(pattern, slice) <= mismatches {
             hits.push(SearchHit {
-                start,
-                end,
+                span,
                 strand: Strand::Forward,
             });
         }
         if search_rc && hamming_iupac(&rc_pat, slice) <= mismatches {
             hits.push(SearchHit {
-                start,
-                end,
+                span,
                 strand: Strand::Reverse,
             });
         }
@@ -196,8 +196,7 @@ mod tests {
         let seq = b"AAAGAATTCAAA";
         let hits = find_iupac_matches(seq, b"GAATTC", 0, false);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].start, 3);
-        assert_eq!(hits[0].end, 9);
+        assert_eq!(hits[0].span, Span::new(3, 6));
         assert_eq!(hits[0].strand, Strand::Forward);
     }
 
@@ -235,10 +234,14 @@ mod tests {
     fn circular_wrap_around() {
         let seq = b"AATTCNNNNNNNNNNG"; // len 16, 'G' at pos 15
         let hits = find_iupac_matches(seq, ECORI_SITE, 0, true);
-        let wrap = hits.iter().find(|h| h.start == 15);
+        let wrap = hits.iter().find(|h| h.span.start == 15);
         assert!(
             wrap.is_some(),
             "should find wrap-around site; got: {hits:?}"
+        );
+        assert!(
+            wrap.unwrap().span.wraps(16),
+            "origin-spanning hit is a wrap"
         );
     }
 
