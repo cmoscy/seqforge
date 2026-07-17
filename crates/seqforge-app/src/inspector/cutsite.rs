@@ -23,7 +23,7 @@ fn cutsite_state(
 ) -> MethylState {
     cut_sites
         .iter()
-        .position(|s| s.enzyme == enzyme && s.recognition_start == start)
+        .position(|s| s.enzyme == enzyme && s.recognition.start == start)
         .and_then(|i| methyl_states.get(i).copied())
         .unwrap_or(MethylState::Cuttable)
 }

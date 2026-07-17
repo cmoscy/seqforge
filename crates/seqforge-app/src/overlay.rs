@@ -100,14 +100,16 @@ pub fn enzyme_rows(active_enzymes: &[String], cut_sites: &[CutSite]) -> Vec<Enzy
             let group = by.get(name.as_str());
             let recognition = group
                 .and_then(|v| v.first())
-                .map(|s| s.recognition.clone())
+                .map(|s| s.pattern.clone())
                 .unwrap_or_default();
             let mut sites: Vec<EnzymeSite> = group
                 .map(|v| {
                     v.iter()
                         .map(|s| EnzymeSite {
-                            recognition_start: s.recognition_start,
-                            recognition_end: s.recognition_end,
+                            recognition_start: s.recognition.start,
+                            // Linear extent (== the old recognition_end; may exceed
+                            // seq_len for an origin-spanning site).
+                            recognition_end: s.recognition.start + s.recognition.len,
                         })
                         .collect()
                 })

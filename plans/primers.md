@@ -729,14 +729,61 @@ first. Find/GoTo stay bars (transient one-shot verbs — decision 15).
       add-primer-site …` all landed (auto-flatten). Remaining: `seqforge oligo
       random …` (rides the 2.2b generative package).
 
-### Phase 3 — Cloning convergence (Tier 3 territory)
-- [ ] 3.1 PCR product simulation; primer-pair / amplicon logic; **hetero-dimer**
-      QC (needs the pair/reaction context introduced here — seqfold concat-fold).
-- [ ] 3.2 **Gapped heteroduplex** decomposition (indel-mutagenesis bulge) — custom
+### Phase 3 — PCR + cloning convergence (Tier 3 territory)
+
+**PCR ships standalone of the *assembly* track** — it is the fragment *generator*
+the [assembly workbench](assembly.md) later consumes, but depends on nothing
+*downstream* of it: a Primers-tab action + `seqforge pcr` verb producing a product
+buffer. It rides machinery already shipped (`find_primer_binding_sites`,
+`decompose_primer` annealed/tail/mismatch), so the op is mostly *assembly of
+existing outputs*, not new biology.
+
+> **Upstream dependency (decision 23):** PCR now **consumes the feature-model /
+> transport track** ([`feature-model.md`](feature-model.md)) so the product
+> inherits the template's annotations (features within the amplicon, shifted by the
+> 5' tail offset; partials dropped or truncated per policy) — not just nucleotides
+> + a lone provenance feature. The amplicon is one `Annotations::extract` +
+> `place(Δ=tail_f_len, Identity)`. Build **F0 (Feature `Location`) + F1 (transport,
+> via copy/paste)** before this phase.
+
+- [ ] 3.1a **PCR MVP — select two primers → product.** `seqforge-bio::pcr`: given
+      (template, fwd, rev), validate orientation/spacing, emit product =
+      `fwd_full (tail+annealed) + interior template + revcomp(rev_full)`. **Mismatches
+      bake in** (mutagenesis, via `decompose_primer`); **tails become the ends**
+      (overhangs, for free). Product = a new blunt `Buffer` carrying **provenance**
+      (template handle + primer ids + sites) **and the template's inherited
+      annotations** (amplicon features re-homed via `Annotations::extract` +
+      `place(Δ=tail_f_len)`, decision 23) plus a whole-product `Provenance` feature;
+      opens as `Tab::View`.
+      **Circular templates give around-the-horn / whole-plasmid amplification for
+      free** (outward-facing primers on a circular template = Q5/KLD site-directed
+      mutagenesis) — the scan is already circular-aware; `fwd-3′ → around → rev-3′`
+      needs no special case. Op reports (not blocks): no-product, multiple products
+      (mispriming), detached/floating primer ("attach or rescan first", decision
+      16), tail-frame warning.
+- [ ] 3.1b **`PrimerPair` selection (extends decision 17).** A bounded, ordered
+      selection variant `Primer` → `PrimerPair { fwd, rev }` — **not** a general
+      multi-select (that stays deferred to the cloning cart). **Cmd-click** (macOS
+      list convention; **Shift reserved** for the future range/N-select cart) on a
+      Primers-tab row *or* a map arrow promotes a selected primer to a pair:
+      first-clicked = fwd anchor, each subsequent Cmd-click sets/replaces rev,
+      Cmd-click-an-included-primer removes it, plain click collapses to single.
+      Orientation defaults from strand (top-strand binder → fwd) with a **⇄ swap**
+      affordance. The pair's derived `text_range()` = the **amplicon span**
+      (fwd-anchor→rev-anchor) → selecting the pair highlights what PCR produces.
+      Both surfaces set the same variant; Shift is a no-op on the map. GUI Run =
+      `seqforge pcr --fwd <id> --rev <id> [--template <handle>]` (same op).
+- [ ] 3.1c **`FragmentSource::Pcr`** hook — the assembly cart addresses PCR
+      products by name ([assembly.md](assembly.md) A1). Product is *also* just a
+      buffer, so PCR neither blocks nor is blocked by the assembly track.
+- [ ] 3.2 **Hetero-dimer** QC (needs the pair/reaction context 3.1 introduces —
+      seqfold concat-fold).
+- [ ] 3.3 **Gapped heteroduplex** decomposition (indel-mutagenesis bulge) — custom
       NN-param DP over seqfold's tables, behind the same `Vec<Segment>` interface;
       internal-bulge render. primer3 offline oracle here.
-- [ ] 3.3 Converge with `seqforge-restriction` Tier 3 into one cloning layer.
-- [ ] 3.4 (Optional) Primer3 escape hatch for full primer *selection*.
+- [ ] 3.4 Converge with `seqforge-restriction` Tier 3 into one cloning layer —
+      i.e. PCR products feed the [assembly workbench](assembly.md).
+- [ ] 3.5 (Optional) Primer3 escape hatch for full primer *selection*.
 
 ## Out of scope / deferred directions
 

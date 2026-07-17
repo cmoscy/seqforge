@@ -179,10 +179,17 @@ The crate ships in tiers. Each tier delivers a useful chunk on its own.
 - `seqforge-bio` migrated off `na_seq`
 
 **Tier 2 — Digestion + fragments**
-- `digest()` returning `Fragment` with overhang metadata
+- > **⚠ The `Fragment`/`End` interface is now specified authoritatively in
+  > [`assembly.md`](assembly.md) ("The fragment interface") + ROADMAP decision 21,
+  > which supersede the older "Data Model" sketch above.** Tier 2 must implement
+  > *that* shape: `Product = Fragment` (closure), `End { Blunt | Overhang { kind,
+  > seq, cut_by } }`, derived `topology`, and `provenance` — because the whole
+  > assembly track reads this type. The Fragments view is the assembly **workspace**,
+  > not a result pane.
+- `digest(seq, enzyme-SET, topology)` returning `Fragment` with overhang metadata
 - Linear and circular topology handling
 - Visualization-ready: each fragment carries its source enzyme(s) for highlighting
-- Adds fragments tab / view in SeqForge GUI
+- Adds Fragments view (the assembly workspace) in SeqForge GUI
 
 **Tier 3 — Ligation + cloning ops**
 - `ends_compatible`, `ligate`

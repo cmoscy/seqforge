@@ -541,9 +541,8 @@ mod tests {
                 v.cut_sites = vec![
                     seqforge_core::CutSite {
                         enzyme: "EcoRI".into(),
-                        recognition: "GAATTC".into(),
-                        recognition_start: 0,
-                        recognition_end: 6,
+                        pattern: "GAATTC".into(),
+                        recognition: seqforge_core::Span::new(0, 6),
                         cut_pos: 1,
                         bottom_cut_pos: 5,
                     };

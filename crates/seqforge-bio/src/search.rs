@@ -136,8 +136,8 @@ fn cut_site_methyl_state(site: &CutSite, seq: &[u8], methylation: &MethylContext
         cpg: methylation.cpg,
     };
     match seqforge_restriction::site_methyl_state(
-        site.recognition_start,
-        site.recognition_end,
+        site.recognition.start,
+        site.recognition.start + site.recognition.len,
         &enzyme.methylation,
         seq,
         &rs_ctx,
@@ -169,14 +169,15 @@ pub fn methyl_states_for_sites(
 pub(crate) fn site_to_cutsite(s: seqforge_restriction::Site) -> CutSite {
     // Recognition pattern for display. `Iupac` is `#[repr(u8)]` over ASCII
     // letters, so each variant casts straight to its character.
-    let recognition = seqforge_restriction::enzyme_by_name(s.enzyme)
+    let pattern = seqforge_restriction::enzyme_by_name(s.enzyme)
         .map(|e| e.recognition.iter().map(|i| *i as u8 as char).collect())
         .unwrap_or_default();
     CutSite {
         enzyme: s.enzyme.to_string(),
-        recognition,
-        recognition_start: s.recognition_start,
-        recognition_end: s.recognition_end,
+        pattern,
+        // `recognition_end` is `recognition_start + rec_len` (may exceed seq_len
+        // for an origin-spanning site) → the span's length is that difference.
+        recognition: Span::new(s.recognition_start, s.recognition_end - s.recognition_start),
         cut_pos: s.top_cut,
         bottom_cut_pos: s.bottom_cut,
     }
@@ -251,8 +252,7 @@ mod tests {
         let sites = find_cut_sites(seq, &["EcoRI"], false);
         assert_eq!(sites.len(), 1);
         assert_eq!(sites[0].enzyme, "EcoRI");
-        assert_eq!(sites[0].recognition_start, 3);
-        assert_eq!(sites[0].recognition_end, 9);
+        assert_eq!(sites[0].recognition, Span::new(3, 6));
         assert_eq!(sites[0].cut_pos, 4);
         assert_eq!(sites[0].bottom_cut_pos, 8);
     }

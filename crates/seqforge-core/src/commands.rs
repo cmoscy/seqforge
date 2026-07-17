@@ -1145,9 +1145,8 @@ mod tests {
         fn with_site(mut self, start: usize) -> Self {
             self.sites.push(CutSite {
                 enzyme: "EcoRI".into(),
-                recognition: "GAATTC".into(),
-                recognition_start: start,
-                recognition_end: start + 6,
+                pattern: "GAATTC".into(),
+                recognition: Span::new(start, 6),
                 cut_pos: start + 1,
                 bottom_cut_pos: start + 5,
             });
@@ -1795,9 +1794,8 @@ mod tests {
         let (mut view, buf, mut ann) = fixture();
         view.cut_sites.push(crate::CutSite {
             enzyme: "EcoRI".into(),
-            recognition: "GAATTC".into(),
-            recognition_start: 0,
-            recognition_end: 6,
+            pattern: "GAATTC".into(),
+            recognition: Span::new(0, 6),
             cut_pos: 1,
             bottom_cut_pos: 5,
         });

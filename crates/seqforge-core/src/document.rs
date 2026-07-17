@@ -53,16 +53,17 @@ pub struct CutSite {
     pub enzyme: String,
     /// IUPAC recognition pattern of the enzyme (e.g. `"GGTCTC"`). Display-only;
     /// the canonical pattern, not the concrete bases at this site.
-    pub recognition: String,
-    /// 0-based start of the recognition sequence.
-    pub recognition_start: usize,
-    /// 0-based exclusive end of the recognition sequence.
-    pub recognition_end: usize,
+    pub pattern: String,
+    /// The recognition sequence's footprint as a [`Span`] (circular-native, so a
+    /// site crossing the origin is one wrapping span rather than a
+    /// `recognition_end > len` overflow). Its `start` is the [`CutSiteKey`].
+    pub recognition: Span,
     /// Inter-base position of the top-strand cut (between bases `cut_pos-1` and `cut_pos`).
+    /// A **point**, not a region — kept a bare `usize` (`plans/span.md`).
     pub cut_pos: usize,
     /// Inter-base position of the bottom-strand cut — derived from palindrome symmetry.
     /// Equal to `cut_pos` for blunt-end enzymes. Greater than `cut_pos` for 5' overhangs,
-    /// less than `cut_pos` for 3' overhangs.
+    /// less than `cut_pos` for 3' overhangs. A point, like `cut_pos`.
     pub bottom_cut_pos: usize,
 }
 

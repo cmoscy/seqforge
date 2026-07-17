@@ -1199,12 +1199,9 @@ impl SequenceView {
                                 ViewSelection::CutSite {
                                     key: CutSiteKey {
                                         enzyme: site.enzyme.clone(),
-                                        recognition_start: site.recognition_start,
+                                        recognition_start: site.recognition.start,
                                     },
-                                    range: Selection::range(
-                                        site.recognition_start,
-                                        site.recognition_end,
-                                    ),
+                                    range: Selection::from_span(site.recognition, seq_len),
                                 },
                             );
                         } else if let Some(codon) = find_hit(&hits, pos, Hit::as_codon) {
@@ -1410,11 +1407,9 @@ impl SequenceView {
                 })
                 .or_else(|| {
                     hovered_site_idx.map(|i| {
-                        (
-                            cut_sites[i].recognition_start,
-                            cut_sites[i].recognition_end,
-                            FootprintStrands::Both,
-                        )
+                        let rec = cut_sites[i].recognition;
+                        // Linear extent for the footprint wash (== old recognition_end).
+                        (rec.start, rec.start + rec.len, FootprintStrands::Both)
                     })
                 });
 
