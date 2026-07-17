@@ -150,3 +150,45 @@ Revisit any of these only if implementation surfaces a concrete reason.
 - Manual (GUI): pUC19 `ori` renders as two arms meeting at the origin in **both**
   the main viewer and the minimap; shift-select from near the end through
   position 0 selects the wrapping region.
+
+## P5 — normalization sweep (follow-on)
+
+P0–P4 landed `Span` but stopped partway: "where something sits on the molecule"
+is still modelled ~5 ways (a primer binding is a `Span` in `PrimerInfo`, a
+`Range` in `PrimerSiteInfo`, and a `Range` in bio `PrimerBinding`), and a few
+`hull` calls are **shims** that silently flatten wrapping/spliced features
+(CDS translation, feature resize) rather than deliberate bounding boxes. P5
+finishes the job: **one canonical region type, `Range` demoted to a projection
+output**, per the three-tier rule now codified in
+[`docs/architecture.md`](../docs/architecture.md) ("`Span`: the canonical
+region type"). Pre-release → **no serde adapters**; DTOs serialize `Span`
+natively as `{start,len}`.
+
+- **P5a — disambiguate `hull`.** Add `Span::bounds` / `Location::bounds` /
+  `Feature::bounds` (the intention-revealing name); migrate the legitimate
+  bounds-only callers (stacking / LOD / provenance key) to it; retire `hull`.
+  Retire the **shim** flattens with *correct-by-omission* gated on the `Span`
+  predicate: CDS translation skips (marker, not a wrong frame) when
+  `as_span().is_none()` or the span wraps; resize is rejected on a wrapping
+  feature. (Exact segment-aware CDS translation stays a feature-model follow-up.)
+- **P5b — DTOs + inspector → `Span`.** `FeatureInfo`, `PrimerSiteInfo`,
+  inspector `FeatureRow`/`selection_seed`, CLI list columns all carry a single
+  `span: Span` field; the only remaining reduction is the `Span → String`
+  formatter at the display edge (renders both arms on wrap).
+- **P5c — bio `PrimerBinding.range → Span`.** Unifies the primer path
+  end-to-end; `same_site`/off-target dedup compare `Span`s; `decompose_primer` /
+  `anneal_tm` take a `Span`.
+- **P5d — RESOLVED as the linear edit-command boundary (no code change).**
+  Investigation showed `transport::extract` + `extract_region` already take/recover
+  a `Span`, so GUI cross-origin copy already works. `Copy`/`Cut`'s `start,end` are
+  *transient parameters to a linear splice*, not a stored region identity — the
+  same tier as `Delete`/`Replace`/`ReverseComplement`, which the plan already
+  exempts. Converting them (to `--start --len`) would split structurally-identical
+  edit commands across two representations and regress linear-cut ergonomics for a
+  niche headless-wrap capability. So all five stay `start,end`, now **documented**
+  as a deliberate `Range`-tier survivor (`commands.rs`, `docs/architecture.md`).
+  A headless wrapping cut/copy remains a deferrable feature.
+
+**Outcome:** region representations 5 → 1; every surviving `Range` is one of the
+documented survivors (lineage key, splice engine, viewport geometry, projection
+output). Performance neutral (`Span` = `Range` = 16 B; no new allocation).

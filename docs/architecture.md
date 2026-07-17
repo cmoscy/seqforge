@@ -96,6 +96,54 @@ rather than deleting the reagent. Full contract + the implemented-model
 consistency notes: [`../plans/primers.md`](../plans/primers.md) and ROADMAP
 decision 14.
 
+## `Span`: the canonical region type
+
+SeqForge is a plasmid tool, so "a contiguous region on the molecule" is a
+first-class concept — and on a circular molecule it may **wrap the origin**.
+That concept has exactly one type: [`Span`](../plans/span.md)
+(`core::span`), a pure geometric value (`start + len`, `L` passed in, never
+stored — see the derived-not-stored rule above). A wrapping selection and an
+origin-spanning feature are the *same shape*, and both are a `Span`.
+
+The wrap is a **rendering projection**, not part of the region's identity, so
+region-shaped data flows as a `Span` everywhere and reduces to a plainer type
+only at a genuine boundary. Three tiers:
+
+| Tier | Type | Meaning |
+|------|------|---------|
+| Region on the molecule | **`Span`** | canonical identity; may wrap the origin |
+| Projection output / linear engine | `Range<usize>` | *already downstream* of a projection — definitionally linear |
+| Point | `usize` | not a region (cut pos, insert/paste pos, codon_start) |
+
+**The discriminator:** a `Range` is legal only as the *output* of a projection
+(`Span::linear_pieces` for render/hit/copy, `Span::bounds` for a deliberate
+bounding box) or *inside* the linear splice engine — **never as the stored
+identity of a region**. If you are holding a `Range` that names where something
+lives on the molecule, it is either a bug or one of the documented exceptions
+below. This one rule is what stops the "region modelled five different ways"
+drift: a reader seeing a `Range` knows it is downstream of a projection, not a
+half-migrated leftover.
+
+Projections off a `Span` (each named for the loss it accepts):
+
+- `linear_pieces(L) -> Pieces` — the 1-or-2 linear runs; **lossless**. The
+  render / highlight / copy primitive; both the main viewer and the minimap
+  derive geometry from it, so they cannot drift.
+- `bounds(L) -> Range` — a single bounding box; **lossy on wrap** (returns
+  `0..L`). Explicit and opt-in, for the genuinely 1-D sinks only: interval
+  stacking / LOD culling.
+- `contains(p, L) -> bool` — point membership; no reduction.
+
+**Principled `Range` survivors** (deliberate, not drift):
+
+| Site | Why it stays a `Range` |
+|------|------------------------|
+| `Provenance.source_range` | opaque lineage key, compared by equality — not geometry |
+| `mutations::shift_range` / `PosMap` | the linear splice-policy engine — `Span`'s complement, operates post-projection |
+| `Delete`/`Replace`/`ReverseComplement`/`Cut`/`Copy` command `start,end` | transient parameters to a linear splice, not a stored region identity (cross-origin copy is recovered as a `Span` in `extract_region`) |
+| render block / viewport hints | screen geometry — a visible window is inherently linear |
+| `Pieces`, `Location::pieces()` / `bounds()` outputs | these *are* the projections; `Range` is their correct output |
+
 ## Edit operations: primitive (`core`) vs composed (command layer)
 
 Editing splits into two tiers, placed by what they depend on:
