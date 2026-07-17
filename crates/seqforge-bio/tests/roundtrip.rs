@@ -131,6 +131,66 @@ fn roundtrip_puc19() {
 }
 
 #[test]
+fn puc19_origin_join_normalizes_to_wrapping_simple_and_round_trips() {
+    // pUC19's rep_origin is `join(2315..2686,1..217)` — a single ~589 bp region
+    // that crosses the origin. On a circular molecule it must ingest as ONE
+    // wrapping `Simple`, not a `Join` (plans/span.md decision 1); export inverts
+    // to the original `join(...)` bytes for a fixed-point round-trip.
+    use seqforge_core::Span;
+
+    let doc1 = load(&fixture("pUC19.gbk")).expect("load pUC19");
+    let len = doc1.sequence.len();
+    assert_eq!(len, 2686);
+
+    let ori = doc1
+        .features
+        .iter()
+        .find(|f| f.raw_kind == "rep_origin")
+        .expect("pUC19 has a rep_origin");
+    // One wrapping Simple: start 2314 (0-based of 2315), len 372 + 217 = 589.
+    assert_eq!(
+        ori.location,
+        Location::from_span(Span::new(2314, 589)),
+        "origin-crossing join must fold to a single wrapping Simple"
+    );
+    assert!(ori.location.contains(2500, len), "covers the head arm");
+    assert!(
+        ori.location.contains(100, len),
+        "covers the wrapped tail arm"
+    );
+    assert!(!ori.location.contains(1000, len), "excludes the interior");
+    assert_eq!(ori.location.pieces(len), vec![2314..2686, 0..217]);
+    let ori_location = ori.location.clone();
+
+    // Export: the wrapping Simple must emit the original join(...) bytes.
+    let (buf, ann) = shell(doc1);
+    let out = TempOut::new("puc19_ori", "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+    let written = std::fs::read_to_string(out.path()).expect("read back");
+    assert!(
+        written.contains("join(2315..2686,1..217)"),
+        "wrapping Simple must export as the origin join(...); rep_origin lines:\n{}",
+        written
+            .lines()
+            .filter(|l| l.contains("2315") || l.contains("rep_origin"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // Fixed point: reload → identical wrapping Simple (load→save→load stable).
+    let doc2 = load(out.path()).expect("reload gb");
+    let ori2 = doc2
+        .features
+        .iter()
+        .find(|f| f.raw_kind == "rep_origin")
+        .expect("rep_origin survives round-trip");
+    assert_eq!(
+        ori_location, ori2.location,
+        "origin geometry not fixed-point across load→save→load"
+    );
+}
+
+#[test]
 fn roundtrip_small_linear_fasta() {
     let doc1 = load(&fixture("small_linear.fasta")).expect("load fasta");
     let (buf, ann) = shell(doc1);

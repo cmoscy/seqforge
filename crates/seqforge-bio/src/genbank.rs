@@ -64,7 +64,7 @@ pub fn load(path: &Path) -> Result<Document, BioError> {
             if let Some(p) = map_primer(f, &sequence) {
                 primers.push(p);
             }
-        } else if let Some(feat) = map_feature(f) {
+        } else if let Some(feat) = map_feature(f, sequence.len(), topology == Topology::Circular) {
             features.push(feat);
         }
     }
@@ -79,11 +79,11 @@ pub fn load(path: &Path) -> Result<Document, BioError> {
     })
 }
 
-fn map_feature(f: &GbFeature) -> Option<Feature> {
+fn map_feature(f: &GbFeature, len: usize, circular: bool) -> Option<Feature> {
     // Map the full location grammar losslessly (join/fuzzy/complement) instead
     // of flattening to a bounding range. The overall strand is normalized into
     // `Feature.strand`; a mixed-strand join is single-stranded (the stub).
-    let (location, strand) = map_location(&f.location)?;
+    let (location, strand) = map_location(&f.location, len, circular)?;
     let raw_kind = f.kind.to_string();
 
     let label = f
@@ -207,17 +207,24 @@ fn location_strand(loc: &Location) -> Strand {
 /// from the outermost `complement(...)`; the returned [`CoreLocation`] is
 /// strand-free geometry (join/fuzzy) — inner complements (a mixed-strand join)
 /// are dropped, which single-strands trans-splicing (the stub). `None` if no
-/// segment resolves to a non-empty range.
-fn map_location(loc: &Location) -> Option<(CoreLocation, Strand)> {
+/// segment resolves to a non-empty range. `len`/`circular` drive origin-join
+/// normalization (a `join` across the origin becomes one wrapping `Simple`).
+fn map_location(loc: &Location, len: usize, circular: bool) -> Option<(CoreLocation, Strand)> {
     let strand = location_strand(loc);
-    Some((gb_geometry(loc)?, strand))
+    Some((gb_geometry(loc, len, circular)?, strand))
 }
 
 /// Recursively map `gb_io` geometry to [`CoreLocation`], discarding every
 /// `complement` wrapper (strand is tracked separately). `Range` carries its
 /// `<`/`>` fuzzy flags across; `Join`/`Order` become segments; unusual variants
 /// (`Bond`/`OneOf`/`External`/`Gap`) fall back to their bounding hull.
-fn gb_geometry(loc: &Location) -> Option<CoreLocation> {
+///
+/// On a **circular** molecule an origin-adjacent two-part `join` — the first
+/// segment ending at `len`, the second starting at `0` — is normalized to a
+/// single wrapping [`CoreSpan`] on a `Simple`, retiring the GenBank
+/// `join(...)`-for-origin-wrap overload (`plans/span.md` decision 1). `write`
+/// inverts this on export for byte-level round-trip.
+fn gb_geometry(loc: &Location, len: usize, circular: bool) -> Option<CoreLocation> {
     match loc {
         Location::Range((a, Before(before)), (b, After(after))) => {
             let start = (*a).max(0) as usize;
@@ -228,12 +235,16 @@ fn gb_geometry(loc: &Location) -> Option<CoreLocation> {
                 after: *after,
             })
         }
-        Location::Complement(inner) => gb_geometry(inner),
+        Location::Complement(inner) => gb_geometry(inner, len, circular),
         Location::Join(parts) | Location::Order(parts) => {
-            let segs: Vec<CoreLocation> = parts.iter().filter_map(gb_geometry).collect();
+            let segs: Vec<CoreLocation> = parts
+                .iter()
+                .filter_map(|p| gb_geometry(p, len, circular))
+                .collect();
             match segs.len() {
                 0 => None,
                 1 => segs.into_iter().next(),
+                2 => Some(fold_origin_join(segs, len, circular)),
                 _ => Some(CoreLocation::Join(segs)),
             }
         }
@@ -248,30 +259,77 @@ fn gb_geometry(loc: &Location) -> Option<CoreLocation> {
     }
 }
 
+/// Collapse a two-segment `join` that hugs the origin into one wrapping `Simple`
+/// (the geometry a circular molecule actually means); otherwise keep it a
+/// `Join`. Origin-adjacent = crisp `Simple` head ending at `len`, crisp `Simple`
+/// tail starting at `0`. Fuzzy `<`/`>` markers ride the outer ends; the (now
+/// continuous) origin junction is crisp.
+fn fold_origin_join(mut segs: Vec<CoreLocation>, len: usize, circular: bool) -> CoreLocation {
+    if circular && len > 0 {
+        if let [
+            CoreLocation::Simple {
+                span: head, before, ..
+            },
+            CoreLocation::Simple {
+                span: tail, after, ..
+            },
+        ] = segs.as_slice()
+        {
+            if head.start + head.len == len && tail.start == 0 {
+                return CoreLocation::Simple {
+                    span: CoreSpan::new(head.start, head.len + tail.len),
+                    before: *before,
+                    after: *after,
+                };
+            }
+        }
+    }
+    CoreLocation::Join(std::mem::take(&mut segs))
+}
+
 /// Build a `gb_io` location from core geometry, then wrap it in `complement`
 /// iff the feature's overall strand is reverse (the inverse of [`map_location`]).
-fn core_location_to_gb(loc: &CoreLocation, strand: Strand) -> Location {
-    let base = geometry_to_gb(loc);
+fn core_location_to_gb(loc: &CoreLocation, strand: Strand, len: usize) -> Location {
+    let base = geometry_to_gb(loc, len);
     match strand {
         Strand::Reverse => Location::Complement(Box::new(base)),
         _ => base,
     }
 }
 
-fn geometry_to_gb(loc: &CoreLocation) -> Location {
+fn geometry_to_gb(loc: &CoreLocation, len: usize) -> Location {
     match loc {
         CoreLocation::Simple {
             span,
             before,
             after,
+        } if span.wraps(len) => {
+            // The inverse of `fold_origin_join`: an origin-wrapping `Simple` is
+            // emitted as the GenBank `join((start..len),(0..tail))` it round-trips
+            // from. Fuzzy `<`/`>` ride the outer ends; the origin junction is crisp.
+            let tail = span.end(len);
+            Location::Join(vec![
+                Location::Range(
+                    (span.start as i64, Before(*before)),
+                    (len as i64, After(false)),
+                ),
+                Location::Range((0, Before(false)), (tail as i64, After(*after))),
+            ])
+        }
+        CoreLocation::Simple {
+            span,
+            before,
+            after,
         } => Location::Range(
-            // P1: no Simple wraps yet; a plain range. (P2 emits join(...) for a
-            // wrapping span.)
             (span.start as i64, Before(*before)),
             ((span.start + span.len) as i64, After(*after)),
         ),
-        CoreLocation::Join(parts) => Location::Join(parts.iter().map(geometry_to_gb).collect()),
-        CoreLocation::Complement(inner) => Location::Complement(Box::new(geometry_to_gb(inner))),
+        CoreLocation::Join(parts) => {
+            Location::Join(parts.iter().map(|p| geometry_to_gb(p, len)).collect())
+        }
+        CoreLocation::Complement(inner) => {
+            Location::Complement(Box::new(geometry_to_gb(inner, len)))
+        }
     }
 }
 
@@ -290,10 +348,11 @@ pub fn write(buf: &Buffer, ann: &Annotations, path: &Path) -> Result<(), BioErro
     // Emit features, then primers as `primer_bind`. Primers are written from
     // `primers` **only** (decision 14); defensively skip any feature that still
     // carries the `primer_bind` kind so a record is never emitted twice.
+    let len = buf.text.len();
     let mut gb_features: Vec<GbFeature> = ann
         .iter()
         .filter(|f| f.raw_kind != PRIMER_BIND_KIND)
-        .map(feature_to_gb)
+        .map(|f| feature_to_gb(f, len))
         .collect();
     gb_features.extend(ann.primers().filter_map(primer_to_gb));
     seq.features = gb_features;
@@ -303,10 +362,10 @@ pub fn write(buf: &Buffer, ann: &Annotations, path: &Path) -> Result<(), BioErro
         .map_err(|e| BioError::Write(e.to_string()))
 }
 
-fn feature_to_gb(f: &Feature) -> GbFeature {
+fn feature_to_gb(f: &Feature, len: usize) -> GbFeature {
     // Emit the full geometry (join/fuzzy), re-wrapping in `complement` from the
     // authoritative `Feature.strand` — the inverse of the import mapping.
-    let location = core_location_to_gb(&f.location, f.strand);
+    let location = core_location_to_gb(&f.location, f.strand, len);
 
     let mut qualifiers: Vec<(Cow<'static, str>, Option<String>)> = f
         .qualifiers
