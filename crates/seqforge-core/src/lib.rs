@@ -16,6 +16,7 @@ pub mod history;
 pub mod model;
 pub mod mutations;
 pub mod span;
+pub mod topology;
 pub mod transport;
 
 pub use commands::{
@@ -31,4 +32,5 @@ pub use model::{
     Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, View, ViewId, ViewKind, ViewSelection,
 };
 pub use span::{Pieces, Span};
+pub use topology::{reverse_complement_circular, rotate_origin};
 pub use transport::{Orient, PartialPolicy, SeqSlice, extract, place};

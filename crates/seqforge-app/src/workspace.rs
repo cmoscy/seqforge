@@ -181,9 +181,10 @@ impl BufferStore {
         Ok(())
     }
 
-    /// Create a buffer from raw inputs — used by tests.
-    #[cfg(test)]
-    pub fn insert_raw(
+    /// Create a new in-memory **scratch** buffer (empty or seeded), not backed by
+    /// a file — powers `New` / paste-into-new (and, later, PCR/assembly product
+    /// buffers). No `by_path` entry (no source path), so it never dedupes.
+    pub fn new_scratch(
         &mut self,
         name: String,
         text: Vec<u8>,
@@ -321,6 +322,19 @@ impl Workspace {
     pub fn open_path(&mut self, path: &Path, bio: &dyn BioOps) -> Result<ViewId, String> {
         let buffer_id = self.buffers.open_path(path, bio)?;
         Ok(self.add_view(buffer_id, ViewKind::TextView))
+    }
+
+    /// Create a new scratch buffer (empty or seeded) + View, not backed by a
+    /// file. Returns the new view's id; the caller adds the dock tab (mirrors
+    /// [`Workspace::open_path`]).
+    pub fn new_buffer(
+        &mut self,
+        name: String,
+        text: Vec<u8>,
+        topology: seqforge_core::Topology,
+    ) -> ViewId {
+        let buffer_id = self.buffers.new_scratch(name, text, topology);
+        self.add_view(buffer_id, ViewKind::TextView)
     }
 
     /// Close a view by id. If the closed view held the last reference
@@ -548,6 +562,150 @@ impl Workspace {
         Ok(())
     }
 
+    // ── Topology / buffer-lifecycle ops ───────────────────────────────────────
+
+    /// Replace a buffer's **whole** text + annotations (and optionally topology)
+    /// as ONE undo unit. `f` reads the current buffer + annotations and returns
+    /// the new `(text, annotations, topology)`. Records a full-buffer history
+    /// entry (start 0, old→new bytes, pre-edit annotation snapshot), stamping the
+    /// old topology when it changes so undo/redo restore it. The shared engine
+    /// behind Set-Origin / Linearize / Circularize.
+    fn replace_whole<F>(&mut self, view_id: ViewId, f: F) -> Result<(), DispatchError>
+    where
+        F: FnOnce(&Buffer, &Annotations) -> (Vec<u8>, Annotations, seqforge_core::Topology),
+    {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+
+        let old_text = buf.text.clone();
+        let old_topo = buf.topology;
+        let (new_text, new_ann, new_topo) = f(&buf, ann);
+
+        // Record with the pre-edit annotations (still live in `ann`) + full-text
+        // delta, then swap in the new state.
+        history.record(0, old_text, new_text.clone(), ann, EditKind::Other);
+        if new_topo != old_topo {
+            history.stamp_topology(old_topo);
+        }
+        buf.text = new_text;
+        buf.topology = new_topo;
+        buf.version += 1;
+        buf.dirty = true;
+        *ann = new_ann;
+        Ok(())
+    }
+
+    /// Set Origin: rotate a **circular** buffer so `index` becomes position 0.
+    pub fn set_origin(&mut self, view_id: ViewId, index: usize) -> Result<(), DispatchError> {
+        self.require_circular(view_id)?;
+        self.replace_whole(view_id, |buf, ann| {
+            let mut text = buf.text.clone();
+            let mut ann = ann.clone();
+            seqforge_core::rotate_origin(&mut text, &mut ann, index);
+            (text, ann, buf.topology)
+        })
+    }
+
+    /// Linearize a **circular** buffer, cutting at `at` (`None` = current origin).
+    /// Reuses `transport::extract` of the whole circle rooted at `at`, so a
+    /// feature straddling the seam is truncated + fuzzy-marked (`TruncatePartials`).
+    pub fn linearize(&mut self, view_id: ViewId, at: Option<usize>) -> Result<(), DispatchError> {
+        self.require_circular(view_id)?;
+        self.replace_whole(view_id, |buf, ann| {
+            let len = buf.text.len();
+            let start = at.unwrap_or(0) % len.max(1);
+            let slice = seqforge_core::extract(
+                &buf.text,
+                ann,
+                seqforge_core::Span::new(start, len),
+                seqforge_core::PartialPolicy::TruncatePartials,
+                &buf.name,
+            );
+            let new_ann = Annotations::from_parts(slice.features, slice.primers);
+            (slice.bytes, new_ann, seqforge_core::Topology::Linear)
+        })
+    }
+
+    /// Circularize a **linear** buffer (join the ends); `origin` optionally rotates
+    /// the new circle so that base becomes position 0.
+    pub fn circularize(
+        &mut self,
+        view_id: ViewId,
+        origin: Option<usize>,
+    ) -> Result<(), DispatchError> {
+        self.require_linear(view_id)?;
+        self.replace_whole(view_id, |buf, ann| {
+            let mut text = buf.text.clone();
+            let mut ann = ann.clone();
+            if let Some(o) = origin {
+                // Rotate after conceptually closing the circle.
+                seqforge_core::rotate_origin(&mut text, &mut ann, o);
+            }
+            (text, ann, seqforge_core::Topology::Circular)
+        })
+    }
+
+    /// Mirror the **whole-buffer** annotation layer to match a reverse-complement
+    /// of the bytes (called by the RC applier after it installs the RC'd bytes via
+    /// [`Workspace::edit`], so it rides that edit's single undo unit). Bumps
+    /// version; records no separate history entry.
+    pub fn reverse_complement_annotations_whole(
+        &mut self,
+        view_id: ViewId,
+    ) -> Result<(), DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let len = buf.text.len();
+        let ann = self
+            .buffers
+            .annotations_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        seqforge_core::reverse_complement_circular(ann, len);
+        buf.version += 1;
+        Ok(())
+    }
+
+    fn require_circular(&self, view_id: ViewId) -> Result<(), DispatchError> {
+        self.topology_of(view_id)
+            .filter(|t| matches!(t, seqforge_core::Topology::Circular))
+            .map(|_| ())
+            .ok_or_else(|| DispatchError::InvalidInput("buffer is not circular".into()))
+    }
+
+    fn require_linear(&self, view_id: ViewId) -> Result<(), DispatchError> {
+        self.topology_of(view_id)
+            .filter(|t| matches!(t, seqforge_core::Topology::Linear))
+            .map(|_| ())
+            .ok_or_else(|| DispatchError::InvalidInput("buffer is not linear".into()))
+    }
+
+    fn topology_of(&self, view_id: ViewId) -> Option<seqforge_core::Topology> {
+        let bid = self.views.get(&view_id)?.buffer_id;
+        let buf = self.buffers.get(bid)?;
+        let t = buf.read().ok()?.topology;
+        Some(t)
+    }
+
     /// The edit entry point for **annotation-only** mutations (feature
     /// add/remove/rename): the sequence bytes are untouched, but the change is
     /// still undoable via the annotation-snapshot half of the history entry.
@@ -650,7 +808,7 @@ mod tests {
         let path = PathBuf::from("/tmp/fake.gb");
         let id = ws
             .buffers
-            .insert_raw("fake".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("fake".into(), b"ATGC".to_vec(), Topology::Linear);
         ws.buffers.by_path.insert(path.clone(), id);
 
         struct ExplodingBio;
@@ -700,7 +858,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
         assert_eq!(ws.active_view, Some(vid));
         assert!(ws.views.contains_key(&vid));
@@ -712,7 +870,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         let outcome = ws
@@ -731,7 +889,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"AT".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         ws.with_buffer_mut(vid, |_view, buf, _ann| {
@@ -759,7 +917,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         // insert "TT" at pos 2
@@ -790,7 +948,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         let err = ws.edit(vid, EditKind::Insert, 0..99, b"X").unwrap_err();
@@ -807,7 +965,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"ATGC".to_vec(), Topology::Linear);
         let v1 = ws.add_view(bid, ViewKind::TextView);
         let v2 = ws.add_view(bid, ViewKind::TextView);
 
@@ -832,7 +990,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"AT".to_vec(), Topology::Linear);
         let vid = ws.add_view(bid, ViewKind::TextView);
 
         assert!(ws.buffers.get(bid).is_some());
@@ -846,7 +1004,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"AT".to_vec(), Topology::Linear);
         let v1 = ws.add_view(bid, ViewKind::TextView);
         let v2 = ws.add_view(bid, ViewKind::TextView);
 
@@ -860,7 +1018,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("shared".into(), b"ATGC".to_vec(), Topology::Linear);
+            .new_scratch("shared".into(), b"ATGC".to_vec(), Topology::Linear);
         let _v1 = ws.add_view(bid, ViewKind::TextView);
         let _v2 = ws.add_view(bid, ViewKind::TextView);
         let arc = ws.buffers.get(bid).unwrap();
@@ -872,7 +1030,7 @@ mod tests {
         let mut ws = Workspace::default();
         let bid = ws
             .buffers
-            .insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+            .new_scratch("x".into(), b"AT".to_vec(), Topology::Linear);
         let v1 = ws.add_view(bid, ViewKind::TextView);
         let v2 = ws.add_view(bid, ViewKind::TextView);
         ws.focus_view(v1);
@@ -889,7 +1047,7 @@ mod tests {
         let path = PathBuf::from("/tmp/q.gb");
         let bid = ws
             .buffers
-            .insert_raw("q".into(), b"AT".to_vec(), Topology::Linear);
+            .new_scratch("q".into(), b"AT".to_vec(), Topology::Linear);
         // Wire the buffer onto a path and onto a view.
         let arc = ws.buffers.get(bid).unwrap();
         arc.write().unwrap().source_path = Some(path.clone());
@@ -901,7 +1059,7 @@ mod tests {
     #[test]
     fn buffer_store_remove_drops_arc() {
         let mut store = BufferStore::new();
-        let id = store.insert_raw("x".into(), b"AT".to_vec(), Topology::Linear);
+        let id = store.new_scratch("x".into(), b"AT".to_vec(), Topology::Linear);
         let _handle = store.get(id).unwrap();
         let strong_before_drop = store.remove(id).unwrap();
         assert!(strong_before_drop >= 2);

@@ -20,7 +20,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{Annotations, Buffer};
+use crate::{Annotations, Buffer, Topology};
 
 /// Default per-buffer history budget in bytes. Deltas are tiny for normal
 /// edits, so ~16 MB is effectively unlimited undo depth; configurable.
@@ -55,6 +55,11 @@ pub struct HistoryEntry {
     pub new_bytes: Vec<u8>,
     /// Annotations as they were before this edit (restored on undo).
     pub annotations: Annotations,
+    /// Buffer topology as it was before this edit, when the edit changed it
+    /// (Linearize / Circularize). `None` for edits that leave topology alone —
+    /// the common case — so undo/redo skip the swap. Stamped via
+    /// [`History::stamp_topology`] after `record`.
+    pub topology_before: Option<Topology>,
 }
 
 impl HistoryEntry {
@@ -181,6 +186,7 @@ impl History {
                 old_bytes,
                 new_bytes,
                 annotations: ann_before.clone(),
+                topology_before: None,
             };
             self.bytes += entry.size_bytes();
             self.past.push_back(entry);
@@ -221,6 +227,16 @@ impl History {
             .is_some_and(|last| start == last.start + last.new_bytes.len())
     }
 
+    /// Record that the just-pushed entry changed the buffer topology from
+    /// `before`, so undo/redo restore it. Call right after [`History::record`]
+    /// for a topology-changing edit (Linearize / Circularize). No-op if the last
+    /// edit coalesced (topology ops use `EditKind::Other`, which never does).
+    pub fn stamp_topology(&mut self, before: Topology) {
+        if let Some(last) = self.past.back_mut() {
+            last.topology_before = Some(before);
+        }
+    }
+
     /// Undo the most recent edit. Returns `false` if there's nothing to undo.
     pub fn undo(&mut self, buf: &mut Buffer, ann: &mut Annotations) -> bool {
         let Some(mut entry) = self.past.pop_back() else {
@@ -234,6 +250,11 @@ impl History {
         // The entry holds the pre-edit annotations; stash the current
         // (post-edit) ones into the entry so redo can restore them.
         std::mem::swap(ann, &mut entry.annotations);
+        // Same swap for topology when this edit changed it.
+        if let Some(tb) = entry.topology_before {
+            entry.topology_before = Some(buf.topology);
+            buf.topology = tb;
+        }
         buf.version += 1;
         buf.dirty = true;
         self.future.push(entry);
@@ -256,6 +277,10 @@ impl History {
         // `entry.annotations` currently holds the post-edit state (stashed by
         // undo); restore it and stash the pre-edit state back for a later undo.
         std::mem::swap(ann, &mut entry.annotations);
+        if let Some(tb) = entry.topology_before {
+            entry.topology_before = Some(buf.topology);
+            buf.topology = tb;
+        }
         buf.version += 1;
         buf.dirty = true;
         self.past.push_back(entry);

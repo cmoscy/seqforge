@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use egui_file_dialog::FileDialog;
-use seqforge_core::{BioOps, DispatchError, ViewId, ViewerResponse};
+use seqforge_core::{BioOps, DispatchError, Topology, ViewId, ViewerResponse};
 
 use super::{active_selection, edit, emit_selection_diff, layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
@@ -90,6 +90,39 @@ pub(super) fn apply_open_file<B: BioOps>(
     }
 
     emit_selection_diff(state, sel_before);
+    Ok(Some(ViewerResponse::Ok))
+}
+
+/// Create a new empty in-memory buffer (not backed by a file) and open it in a
+/// new dock tab — mirrors the tail of [`apply_open_file`]. Enables copy → New →
+/// paste, the bare-metal transport loop.
+pub(super) fn apply_new(
+    state: &mut AppState,
+    circular: bool,
+    name: Option<String>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let topology = if circular {
+        Topology::Circular
+    } else {
+        Topology::Linear
+    };
+    let name = name.unwrap_or_else(|| "untitled".to_string());
+    let view_id = state.workspace.new_buffer(name, Vec::new(), topology);
+
+    layout::place_view_tab(state, view_id);
+    layout::ensure_welcome_invariant(state);
+    layout::dock_activate_view(state, view_id);
+    state.focus.set_scope(FocusScope::View(view_id));
+
+    if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
+        state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
+            arc.read()
+                .ok()
+                .map(|b| (crate::workspace::display_name(&b), b.len()))
+        })
+    }) {
+        state.events.emit(AppEvent::DocOpened { name, len });
+    }
     Ok(Some(ViewerResponse::Ok))
 }
 

@@ -1052,9 +1052,32 @@ impl eframe::App for SeqForgeApp {
             .and_then(|v| v.selection.text_range());
         let sel_range = active_sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
         let paste_pos = active_sel.map(|s| s.ordered().0).unwrap_or(0);
+        // (is_circular, len) of the active buffer — drives the topology menu.
+        let active_topo_len = self
+            .state
+            .workspace
+            .active_view()
+            .and_then(|v| self.state.workspace.buffers.get(v.buffer_id))
+            .and_then(|arc| arc.read().ok().map(|b| (b.is_circular(), b.len())));
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    ui.menu_button("New", |ui| {
+                        if ui.button("Linear sequence").clicked() {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::New {
+                                circular: false,
+                                name: None,
+                            }));
+                            ui.close_menu();
+                        }
+                        if ui.button("Circular plasmid").clicked() {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::New {
+                                circular: true,
+                                name: None,
+                            }));
+                            ui.close_menu();
+                        }
+                    });
                     if ui.button("Open…  ⌘O").clicked() {
                         menu_cmds.push(AppCommand::PromptOpenFile);
                         ui.close_menu();
@@ -1230,6 +1253,58 @@ impl eframe::App for SeqForgeApp {
                         }
                         ui.close_menu();
                     }
+                    ui.separator();
+
+                    // ── Topology (Set Origin / Linearize / Circularize / whole RC) ──
+                    let (is_circular, len) = active_topo_len.unwrap_or((false, 0));
+                    let has_seq = active_topo_len.is_some() && len > 0;
+                    ui.menu_button("Topology", |ui| {
+                        if ui
+                            .add_enabled(
+                                has_seq,
+                                egui::Button::new("Reverse Complement (whole molecule)"),
+                            )
+                            .clicked()
+                        {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::ReverseComplement {
+                                start: 0,
+                                end: len,
+                                view: None,
+                            }));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(is_circular, egui::Button::new("Set Origin at cursor"))
+                            .clicked()
+                        {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::SetOrigin {
+                                index: paste_pos,
+                                view: None,
+                            }));
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(is_circular, egui::Button::new("Linearize at cursor"))
+                            .clicked()
+                        {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Linearize {
+                                at: Some(paste_pos),
+                                view: None,
+                            }));
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_seq && !is_circular, egui::Button::new("Circularize"))
+                            .clicked()
+                        {
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Circularize {
+                                origin: None,
+                                view: None,
+                            }));
+                            ui.close_menu();
+                        }
+                    });
                     ui.separator();
 
                     let can_find = command::is_enabled(&AppCommand::OpenFind, &self.state);

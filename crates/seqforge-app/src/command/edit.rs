@@ -240,6 +240,47 @@ pub(super) fn apply_reverse_complement(
     state
         .workspace
         .edit(vid, EditKind::Other, start..end, &rc)?;
+    // Whole-molecule RC also mirrors the annotation layer (features flip
+    // coordinates + strand), riding this edit's single undo unit. A sub-range
+    // inversion stays byte-only for now (feature mirroring within a window is a
+    // follow-up). RC preserves length, so `end == len` still holds.
+    let len = buffer_len(state, vid);
+    if start == 0 && end == len {
+        state.workspace.reverse_complement_annotations_whole(vid)?;
+    }
+    edited(len)
+}
+
+/// Set Origin: rotate a circular buffer so `index` becomes position 0.
+pub(super) fn apply_set_origin(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    index: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    state.workspace.set_origin(vid, index)?;
+    edited(buffer_len(state, vid))
+}
+
+/// Linearize a circular buffer, cutting at `at` (default position 0).
+pub(super) fn apply_linearize(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    at: Option<usize>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    state.workspace.linearize(vid, at)?;
+    edited(buffer_len(state, vid))
+}
+
+/// Circularize a linear buffer (optionally rotating the origin).
+pub(super) fn apply_circularize(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    origin: Option<usize>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = resolve_target(state, view)?;
+    state.workspace.circularize(vid, origin)?;
     edited(buffer_len(state, vid))
 }
 
@@ -865,10 +906,11 @@ mod tests {
     /// Headless `AppState` with one active view over `seq`.
     fn state_with(seq: &[u8]) -> AppState {
         let mut state = AppState::default();
-        let bid = state
-            .workspace
-            .buffers
-            .insert_raw("test".into(), seq.to_vec(), Topology::Linear);
+        let bid =
+            state
+                .workspace
+                .buffers
+                .new_scratch("test".into(), seq.to_vec(), Topology::Linear);
         state.workspace.add_view(bid, ViewKind::TextView);
         state
     }
@@ -885,6 +927,68 @@ mod tests {
             .workspace
             .with_active_buffer(|_, _, ann| ann.len())
             .unwrap()
+    }
+
+    fn is_circular(state: &mut AppState) -> bool {
+        state
+            .workspace
+            .with_active_buffer(|_, b, _| b.is_circular())
+            .unwrap()
+    }
+
+    #[test]
+    fn copy_new_paste_carries_features_across_buffers() {
+        // The transport foundation smoke test: copy an annotated region, create a
+        // NEW buffer, paste, and confirm the carried feature lands (cross-buffer
+        // via the app-level clipboard).
+        let mut s = state_with(b"ATGCATGCATGCATGCATGC"); // 20 bp
+        add_feat(&mut s, 4, 12, "gene");
+        apply_copy(&mut s, None, 4, 12).unwrap();
+        assert!(s.clipboard.is_some(), "region copy fills the clipboard");
+
+        // New empty circular buffer becomes the active view.
+        crate::command::file::apply_new(&mut s, true, Some("construct".into())).unwrap();
+        assert_eq!(text(&mut s), b"", "new buffer starts empty");
+        assert_eq!(feature_count(&mut s), 0);
+        assert!(is_circular(&mut s), "New --circular");
+
+        // Paste the fragment; its carried feature re-homes via `place`.
+        apply_paste(&mut s, None, 0).unwrap();
+        assert_eq!(text(&mut s), b"ATGCATGC", "copied 8 bp landed");
+        assert_eq!(
+            feature_count(&mut s),
+            1,
+            "carried feature landed in the new buffer"
+        );
+    }
+
+    #[test]
+    fn circularize_set_origin_linearize_with_topology_undo() {
+        let mut s = state_with(b"AAAACCCCGGGGTTTT"); // 16 bp, linear
+        assert!(!is_circular(&mut s));
+
+        apply_circularize(&mut s, None, None).unwrap();
+        assert!(is_circular(&mut s), "circularize flips topology");
+
+        apply_set_origin(&mut s, None, 4).unwrap();
+        assert_eq!(
+            text(&mut s),
+            b"CCCCGGGGTTTTAAAA",
+            "set-origin rotates the bytes"
+        );
+
+        apply_linearize(&mut s, None, Some(0)).unwrap();
+        assert!(!is_circular(&mut s), "linearize flips topology back");
+
+        // Undo restores topology (the history topology-stamp), not just bytes.
+        apply_undo(&mut s, None).unwrap();
+        assert!(is_circular(&mut s), "undo restores circular topology");
+        apply_undo(&mut s, None).unwrap();
+        assert_eq!(
+            text(&mut s),
+            b"AAAACCCCGGGGTTTT",
+            "undo restores the rotation"
+        );
     }
 
     #[test]

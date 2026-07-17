@@ -363,6 +363,46 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Create a new empty in-memory buffer (not backed by a file) and open it.
+    New {
+        /// Create it circular (default: linear).
+        #[arg(long)]
+        #[serde(default)]
+        circular: bool,
+        /// Optional buffer name (defaults to `untitled`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Set the origin of a **circular** molecule: rotate so `index` (0-based)
+    /// becomes position 0. Topology is unchanged; a feature crossing the new
+    /// origin becomes a single wrapping span.
+    SetOrigin {
+        index: usize,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Linearize a **circular** molecule, cutting at `at` (default: position 0).
+    /// A feature straddling the cut is truncated + fuzzy-marked.
+    Linearize {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<usize>,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
+    /// Circularize a **linear** molecule (join the ends); `origin` optionally
+    /// rotates the new circle so that base becomes position 0.
+    Circularize {
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<usize>,
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Add a feature over the half-open range `[start, end)`.
     AddFeature {
         start: usize,
@@ -615,9 +655,13 @@ impl ViewerRequest {
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
             ViewerRequest::Redo { view, .. } => *view,
+            ViewerRequest::SetOrigin { view, .. } => *view,
+            ViewerRequest::Linearize { view, .. } => *view,
+            ViewerRequest::Circularize { view, .. } => *view,
             ViewerRequest::Open { .. }
             | ViewerRequest::Close
             | ViewerRequest::Buffers
+            | ViewerRequest::New { .. } // creates its own view
             | ViewerRequest::Focus { .. } => None,
         }
     }
@@ -857,9 +901,10 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::Open { .. }
         | ViewerRequest::Close
         | ViewerRequest::Buffers
+        | ViewerRequest::New { .. }
         | ViewerRequest::Focus { .. } => {
             unreachable!(
-                "Open/Close/Buffers/Focus are workspace-scoped; the caller must \
+                "Open/Close/Buffers/New/Focus are workspace-scoped; the caller must \
                  handle them before invoking dispatch (see command::apply)"
             )
         }
@@ -888,7 +933,10 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
         | ViewerRequest::Undo { .. }
-        | ViewerRequest::Redo { .. } => {
+        | ViewerRequest::Redo { .. }
+        | ViewerRequest::SetOrigin { .. }
+        | ViewerRequest::Linearize { .. }
+        | ViewerRequest::Circularize { .. } => {
             unreachable!(
                 "editor write-ops are workspace-scoped; the caller routes them \
                  to command/edit.rs before invoking dispatch (see command::apply)"

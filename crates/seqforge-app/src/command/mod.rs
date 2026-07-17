@@ -789,6 +789,14 @@ pub fn apply<B: BioOps>(
             ViewerRequest::Undo { view } => edit::apply_undo(state, view),
             ViewerRequest::Redo { view } => edit::apply_redo(state, view),
 
+            // ── Buffer lifecycle / topology ──
+            ViewerRequest::New { circular, name } => file::apply_new(state, circular, name),
+            ViewerRequest::SetOrigin { index, view } => edit::apply_set_origin(state, view, index),
+            ViewerRequest::Linearize { at, view } => edit::apply_linearize(state, view, at),
+            ViewerRequest::Circularize { origin, view } => {
+                edit::apply_circularize(state, view, origin)
+            }
+
             // ── Read-scoped (GoTo/Find/Enzymes) → core::dispatch ──
             other => {
                 let sel_before = active_selection(state);
