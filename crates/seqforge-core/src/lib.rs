@@ -15,6 +15,7 @@ pub mod document;
 pub mod history;
 pub mod model;
 pub mod mutations;
+pub mod span;
 pub mod transport;
 
 pub use commands::{
@@ -29,4 +30,5 @@ pub use history::{EditKind, History, HistoryEntry};
 pub use model::{
     Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, View, ViewId, ViewKind, ViewSelection,
 };
+pub use span::{Pieces, Span};
 pub use transport::{Orient, PartialPolicy, SeqSlice, extract, place};
