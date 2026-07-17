@@ -400,9 +400,10 @@ fn stack_primers(
         if (p.strand == Strand::Reverse) != want_rev {
             continue;
         }
-        if b.start < block_end && b.end > block_start {
+        let b_end = b.start + b.len;
+        if b.start < block_end && b_end > block_start {
             idx_list.push(i);
-            ranges.push((b.start.max(block_start), b.end.min(block_end)));
+            ranges.push((b.start.max(block_start), b_end.min(block_end)));
         }
     }
     let (rows, n_rows) = greedy_stack(&ranges);
@@ -543,7 +544,7 @@ pub(crate) fn clip_range_rect(
 /// this rect). `None` if the binding doesn't overlap the block. The Primer
 /// tracks paint **and** hit-test from this one rect (co-location invariant).
 pub(crate) fn primer_body_rect(
-    binding: &std::ops::Range<usize>,
+    binding: &seqforge_core::Span,
     block_start: usize,
     block_end: usize,
     row_y: f32,
@@ -551,11 +552,13 @@ pub(crate) fn primer_body_rect(
     char_width: f32,
     row_h: f32,
 ) -> Option<Rect> {
-    if binding.end <= block_start || binding.start >= block_end {
+    // Linear footprint (primers don't yet anneal across the origin).
+    let b_end = binding.start + binding.len;
+    if b_end <= block_start || binding.start >= block_end {
         return None;
     }
     let col_s = binding.start.max(block_start) - block_start;
-    let col_e = binding.end.min(block_end) - block_start;
+    let col_e = b_end.min(block_end) - block_start;
     Some(Rect::from_min_size(
         Pos2::new(seq_x0 + col_s as f32 * char_width, row_y + 1.0),
         Vec2::new((col_e - col_s) as f32 * char_width, row_h - 2.0),
@@ -1390,7 +1393,7 @@ mod tests {
             id: Default::default(),
             name: "p".to_string(),
             sequence: "ACGTAC".to_string(),
-            binding: Some(binding),
+            binding: Some(seqforge_core::Span::from_range(binding)),
             strand,
             qualifiers: Default::default(),
         }
@@ -1455,7 +1458,7 @@ mod tests {
         PrimerForwardTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
         let expected = primer_body_rect(
-            &(2..8),
+            &seqforge_core::Span::from_range(2..8),
             0,
             20,
             geom.y0,

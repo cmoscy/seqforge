@@ -270,7 +270,7 @@ pub(super) fn apply_copy(
             let is_footprint = p
                 .binding
                 .as_ref()
-                .is_some_and(|b| b.start == start && b.end == end);
+                .is_some_and(|b| b.start == start && b.start + b.len == end);
             (start == end || is_footprint).then(|| p.sequence.clone().into_bytes())
         })
         .ok()
@@ -546,15 +546,15 @@ fn parse_oligo(sequence: &str) -> Result<String, DispatchError> {
 fn resolve_binding(
     start: Option<usize>,
     end: Option<usize>,
-    current: Option<&Range<usize>>,
-) -> Result<Option<Range<usize>>, DispatchError> {
+    current: Option<&Span>,
+) -> Result<Option<Span>, DispatchError> {
     match (start, end) {
-        (None, None) => Ok(current.cloned()),
+        (None, None) => Ok(current.copied()),
         (s, e) => {
             let cs = s.or_else(|| current.map(|b| b.start));
-            let ce = e.or_else(|| current.map(|b| b.end));
+            let ce = e.or_else(|| current.map(|b| b.start + b.len));
             match (cs, ce) {
-                (Some(a), Some(b)) => Ok(Some(a..b)),
+                (Some(a), Some(b)) => Ok(Some(Span::from_range(a..b))),
                 _ => Err(DispatchError::InvalidInput(
                     "binding start/end need both ends (no current binding to combine with)".into(),
                 )),
@@ -563,12 +563,14 @@ fn resolve_binding(
     }
 }
 
-/// Validate a binding footprint against the buffer (half-open, within bounds).
-fn check_binding(binding: Option<&Range<usize>>, len: usize) -> Result<(), DispatchError> {
+/// Validate a binding footprint against the buffer (non-empty, within bounds).
+/// Linear check — a primer footprint doesn't yet wrap the origin.
+fn check_binding(binding: Option<&Span>, len: usize) -> Result<(), DispatchError> {
     if let Some(b) = binding {
-        if b.start >= b.end || b.end > len {
+        let end = b.start + b.len;
+        if b.len == 0 || end > len {
             return Err(DispatchError::OutOfRange {
-                position: b.end,
+                position: end,
                 seq_len: len,
             });
         }
@@ -685,7 +687,7 @@ pub(super) fn apply_rescan_primer(
                     ))
                 })?;
         let p = ann.primer_mut(id).expect("present — checked just above");
-        p.binding = Some(best.range);
+        p.binding = Some(Span::from_range(best.range));
         p.strand = best.strand;
         Ok(buf.text.len())
     })?;
@@ -971,7 +973,7 @@ mod tests {
                     id: PrimerId::default(),
                     name: "rev".into(),
                     sequence: "GCA".into(),
-                    binding: Some(5..8),
+                    binding: Some(seqforge_core::Span::from_range(5..8)),
                     strand: Strand::Reverse,
                     qualifiers: Default::default(),
                 });
@@ -1009,7 +1011,7 @@ mod tests {
                     id: PrimerId::default(),
                     name: "rev".into(),
                     sequence: "GCA".into(),
-                    binding: Some(5..8),
+                    binding: Some(seqforge_core::Span::from_range(5..8)),
                     strand: Strand::Reverse,
                     qualifiers: Default::default(),
                 });
@@ -1089,7 +1091,11 @@ mod tests {
     fn primer_bindings(state: &mut AppState) -> Vec<Option<Range<usize>>> {
         state
             .workspace
-            .with_active_buffer(|_, _, ann| ann.primers().map(|p| p.binding.clone()).collect())
+            .with_active_buffer(|_, _, ann| {
+                ann.primers()
+                    .map(|p| p.binding.map(|b| b.start..b.start + b.len))
+                    .collect()
+            })
             .unwrap()
     }
 
@@ -1104,7 +1110,7 @@ mod tests {
                     id: Default::default(),
                     name: "p1".into(),
                     sequence: "GCA".into(),
-                    binding: Some(4..7),
+                    binding: Some(seqforge_core::Span::from_range(4..7)),
                     strand: seqforge_core::Strand::Forward,
                     qualifiers: Default::default(),
                 });
@@ -1385,7 +1391,7 @@ mod tests {
                     (
                         p.name.clone(),
                         p.sequence.clone(),
-                        p.binding.clone(),
+                        p.binding.map(|b| b.start..b.start + b.len),
                         p.strand,
                         p.qualifiers.clone(),
                     )
@@ -1652,7 +1658,7 @@ mod tests {
             (
                 p.name.clone(),
                 p.sequence.clone(),
-                p.binding.clone(),
+                p.binding.map(|b| b.start..b.start + b.len),
                 p.strand,
             )
         });
@@ -1729,15 +1735,22 @@ mod tests {
             false,
         )
         .unwrap();
-        let (name, binding, strand) =
-            first_primer(&mut s, |p| (p.name.clone(), p.binding.clone(), p.strand));
+        let (name, binding, strand) = first_primer(&mut s, |p| {
+            (
+                p.name.clone(),
+                p.binding.map(|b| b.start..b.start + b.len),
+                p.strand,
+            )
+        });
         assert_eq!(name, "orig", "unspecified fields preserved");
         assert_eq!(binding, Some(0..8), "end updated, start kept");
         assert_eq!(strand, Strand::Reverse);
 
         // Undo restores the original binding + strand.
         s.workspace.undo(vid).unwrap();
-        let (binding, strand) = first_primer(&mut s, |p| (p.binding.clone(), p.strand));
+        let (binding, strand) = first_primer(&mut s, |p| {
+            (p.binding.map(|b| b.start..b.start + b.len), p.strand)
+        });
         assert_eq!(binding, Some(0..4));
         assert_eq!(strand, Strand::Forward);
     }
@@ -1792,13 +1805,13 @@ mod tests {
         let id = add_primer(&mut s, Some("p"), "ATGC", Some(0), Some(4), "+");
         apply_update_primer(&mut s, None, id, None, None, None, None, None, true).unwrap();
         assert_eq!(
-            first_primer(&mut s, |p| p.binding.clone()),
+            first_primer(&mut s, |p| p.binding.map(|b| b.start..b.start + b.len)),
             None,
             "detach clears the footprint → floating oligo"
         );
         s.workspace.undo(vid).unwrap();
         assert_eq!(
-            first_primer(&mut s, |p| p.binding.clone()),
+            first_primer(&mut s, |p| p.binding.map(|b| b.start..b.start + b.len)),
             Some(0..4),
             "undo restores the binding"
         );
@@ -1821,12 +1834,14 @@ mod tests {
         let mut s = state_with(b"ATGCGTACCA");
         let id = add_primer(&mut s, Some("p"), "GCGTAC", None, None, "+");
         assert_eq!(
-            first_primer(&mut s, |p| p.binding.clone()),
+            first_primer(&mut s, |p| p.binding.map(|b| b.start..b.start + b.len)),
             None,
             "starts floating"
         );
         apply_rescan_primer(&mut s, None, id).unwrap();
-        let (binding, strand) = first_primer(&mut s, |p| (p.binding.clone(), p.strand));
+        let (binding, strand) = first_primer(&mut s, |p| {
+            (p.binding.map(|b| b.start..b.start + b.len), p.strand)
+        });
         assert_eq!(binding, Some(2..8), "re-anchored to the forward site");
         assert_eq!(strand, Strand::Forward);
     }
@@ -1840,7 +1855,7 @@ mod tests {
             DispatchError::InvalidInput(_)
         ));
         assert_eq!(
-            first_primer(&mut s, |p| p.binding.clone()),
+            first_primer(&mut s, |p| p.binding.map(|b| b.start..b.start + b.len)),
             None,
             "failed rescan leaves the primer untouched"
         );
@@ -1861,7 +1876,12 @@ mod tests {
             Some("".into()),
         )
         .unwrap();
-        let (seq, binding) = first_primer(&mut s, |p| (p.sequence.clone(), p.binding.clone()));
+        let (seq, binding) = first_primer(&mut s, |p| {
+            (
+                p.sequence.clone(),
+                p.binding.map(|b| b.start..b.start + b.len),
+            )
+        });
         assert_eq!(seq, "GGTCTCAAATGGCGTAC", "tail prepended to the oligo");
         assert_eq!(
             binding,

@@ -1023,7 +1023,12 @@ impl SequenceView {
         let primer_decomps: Vec<seqforge_bio::PrimerDecomposition> = render_ann
             .primers()
             .map(|p| match &p.binding {
-                Some(b) => seqforge_bio::decompose_primer(&p.sequence, b, p.strand, seq),
+                Some(b) => seqforge_bio::decompose_primer(
+                    &p.sequence,
+                    &(b.start..b.start + b.len),
+                    p.strand,
+                    seq,
+                ),
                 None => seqforge_bio::PrimerDecomposition::default(),
             })
             .collect();
@@ -1396,14 +1401,14 @@ impl SequenceView {
             let hover_footprint = hover_pos
                 .and_then(|p| find_hit(&hits, p, Hit::as_primer))
                 .and_then(|id| render_ann.primer(id))
-                .and_then(|pr| pr.binding.clone().map(|b| (b, pr.strand)))
+                .and_then(|pr| pr.binding.map(|b| (b, pr.strand)))
                 .map(|(b, strand)| {
                     let strands = if matches!(strand, Strand::Reverse) {
                         FootprintStrands::Bottom
                     } else {
                         FootprintStrands::Top
                     };
-                    (b.start, b.end, strands)
+                    (b.start, b.start + b.len, strands)
                 })
                 .or_else(|| {
                     hovered_site_idx.map(|i| {

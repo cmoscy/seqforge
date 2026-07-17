@@ -219,7 +219,7 @@ pub(super) fn apply_reveal_primer(
     // Look up the authored footprint in the active buffer's annotations.
     let binding = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| ann.primer(id).and_then(|p| p.binding.clone()))
+        .with_active_buffer(|_v, _b, ann| ann.primer(id).and_then(|p| p.binding))
         .ok()
         .flatten();
     if let Some(view) = state.workspace.active_view_mut() {
@@ -360,7 +360,7 @@ pub(super) fn apply_edit_primer_in_inspector(
                     p.name.clone(),
                     p.sequence.clone(),
                     flag.to_string(),
-                    p.binding.clone(),
+                    p.binding,
                 )
             })
         })
@@ -521,7 +521,7 @@ mod tests {
                     id: PrimerId::default(),
                     name: "p".into(),
                     sequence: "GCGTAC".into(),
-                    binding,
+                    binding: binding.map(seqforge_core::Span::from_range),
                     strand: Strand::Forward,
                     qualifiers: Default::default(),
                 })

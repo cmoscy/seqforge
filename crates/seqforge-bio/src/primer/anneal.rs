@@ -136,15 +136,18 @@ pub fn classify_attachment(
     circular: bool,
     settings: AnnealSettings,
 ) -> PrimerAttachment {
-    let Some(binding) = primer.binding.clone() else {
+    let Some(binding) = primer.binding else {
         return PrimerAttachment {
             state: AttachmentState::Detached,
             off_target_sites: vec![],
         };
     };
 
+    // The authored footprint as a linear range for the (linear) anneal engine —
+    // primers don't yet anneal across the origin.
+    let binding_range = binding.start..binding.start + binding.len;
     let k = settings.min_three_prime_match.min(primer.sequence.len());
-    let stored_decomp = decompose_primer(&primer.sequence, &binding, primer.strand, template);
+    let stored_decomp = decompose_primer(&primer.sequence, &binding_range, primer.strand, template);
     let stored_ok = three_prime_matches(&stored_decomp, k)
         && stored_decomp.mismatches <= settings.max_mismatches;
 
@@ -153,14 +156,14 @@ pub fn classify_attachment(
     if stored_ok {
         let off_target_sites: Vec<_> = all_sites
             .iter()
-            .filter(|s| !same_site(s, &binding, primer.strand))
+            .filter(|s| !same_site(s, &binding_range, primer.strand))
             .cloned()
             .collect();
 
         let confirmed = stored_decomp.mismatches == 0
             && all_sites
                 .iter()
-                .any(|s| same_site(s, &binding, primer.strand) && s.mismatches == 0);
+                .any(|s| same_site(s, &binding_range, primer.strand) && s.mismatches == 0);
 
         let state = if confirmed {
             AttachmentState::Confirmed
@@ -393,7 +396,7 @@ mod tests {
             id: PrimerId(1),
             name: "p1".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(2..8),
+            binding: Some(seqforge_core::Span::from_range(2..8)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -408,7 +411,7 @@ mod tests {
             id: PrimerId(1),
             name: "p1".into(),
             sequence: "GAGTAC".into(),
-            binding: Some(2..8),
+            binding: Some(seqforge_core::Span::from_range(2..8)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -423,7 +426,7 @@ mod tests {
             id: PrimerId(1),
             name: "p1".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(0..6),
+            binding: Some(seqforge_core::Span::from_range(0..6)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -438,7 +441,7 @@ mod tests {
             id: PrimerId(1),
             name: "p1".into(),
             sequence: "ZZZZZZ".into(),
-            binding: Some(2..8),
+            binding: Some(seqforge_core::Span::from_range(2..8)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -468,7 +471,7 @@ mod tests {
             id: PrimerId(1),
             name: "p1".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(0..6),
+            binding: Some(seqforge_core::Span::from_range(0..6)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };

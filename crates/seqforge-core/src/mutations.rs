@@ -191,7 +191,8 @@ fn shift_primers(ann: &mut Annotations, start: usize, removed: usize, inserted: 
 
     for p in &mut ann.primers {
         let (bs, be) = match &p.binding {
-            Some(r) => (r.start, r.end),
+            // Linear footprint end (`start + len`); primers don't wrap yet.
+            Some(s) => (s.start, s.start + s.len),
             None => continue, // already detached — nothing to track
         };
 
@@ -200,9 +201,9 @@ fn shift_primers(ann: &mut Annotations, start: usize, removed: usize, inserted: 
             continue;
         }
 
-        // Fully right of the removed region — shift both ends by delta.
+        // Fully right of the removed region — translate the whole footprint.
         if bs >= end {
-            p.binding = Some((bs as isize + delta) as usize..(be as isize + delta) as usize);
+            p.binding = p.binding.map(|s| s.shift(delta));
             continue;
         }
 
@@ -234,7 +235,7 @@ fn shift_primers(ann: &mut Annotations, start: usize, removed: usize, inserted: 
         };
         // The surviving-anchor cases never collapse (the anchor lies outside the
         // removed region), but guard defensively: a collapse detaches, never drops.
-        p.binding = (new_end > new_start).then_some(new_start..new_end);
+        p.binding = (new_end > new_start).then_some(Span::from_range(new_start..new_end));
     }
 }
 
@@ -269,7 +270,7 @@ mod tests {
             id: Default::default(),
             name: "p".into(),
             sequence: "ACGT".into(),
-            binding,
+            binding: binding.map(Span::from_range),
             strand,
             qualifiers: BTreeMap::new(),
         }
@@ -282,9 +283,13 @@ mod tests {
         a
     }
 
-    /// The (only) primer's current binding.
+    /// The (only) primer's current binding, as a linear range for comparison.
     fn binding0(a: &Annotations) -> Option<Range<usize>> {
-        a.primers().next().unwrap().binding.clone()
+        a.primers()
+            .next()
+            .unwrap()
+            .binding
+            .map(|s| s.start..s.start + s.len)
     }
 
     // ── version / dirty ───────────────────────────────────────────────────────

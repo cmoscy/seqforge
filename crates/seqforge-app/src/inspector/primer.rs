@@ -6,11 +6,12 @@
 //! and reconciles the draft by struct literal; the methods and most free
 //! functions stay private (only `draft_anneal_tm`, used by `refresh`, is shared).
 
-use std::ops::Range;
 use std::sync::OnceLock;
 
 use seqforge_bio::EnzymeSpec;
-use seqforge_core::{PrimerId, PrimerInfo, PrimerState, Strand, ViewSelection, ViewerRequest};
+use seqforge_core::{
+    PrimerId, PrimerInfo, PrimerState, Span, Strand, ViewSelection, ViewerRequest,
+};
 
 use super::row::{
     DetailLine, EditOutcome, Row, binding_label, detail_frame, row_shell, strand_flag, strand_glyph,
@@ -74,7 +75,7 @@ impl PrimerDraft {
     /// Seed an edit draft from the projection row (`UpdatePrimer` on commit).
     fn from_info(p: &PrimerInfo) -> Self {
         let (attached, start, end) = match &p.binding {
-            Some(b) => (true, b.start, b.end),
+            Some(b) => (true, b.start, b.start + b.len),
             None => (false, 0, 0),
         };
         Self {
@@ -95,9 +96,9 @@ impl PrimerDraft {
 
     /// Seed a create draft (`AddPrimer` on commit). `binding` + `oligo` come from
     /// the current selection when creating from a range (else a floating oligo).
-    pub(super) fn create(name: String, oligo: String, binding: Option<Range<usize>>) -> Self {
+    pub(super) fn create(name: String, oligo: String, binding: Option<Span>) -> Self {
         let (attached, start, end) = match binding {
-            Some(b) => (true, b.start, b.end),
+            Some(b) => (true, b.start, b.start + b.len),
             None => (false, 0, 0),
         };
         Self {
@@ -681,7 +682,7 @@ impl InspectorState {
     pub(super) fn begin_primer_create(&mut self, pending: &mut Vec<PendingCommand>) {
         self.tab = InspectorTab::Primers;
         let (oligo, binding) = match &self.selection_seed {
-            Some((range, oligo)) => (oligo.clone(), Some(range.clone())),
+            Some((range, oligo)) => (oligo.clone(), Some(Span::from_range(range.clone()))),
             None => (String::new(), None),
         };
         self.editing_primer = Some(PrimerDraft::create(
@@ -699,12 +700,12 @@ impl InspectorState {
 mod tests {
     use super::*;
 
-    fn primer_info(binding: Option<Range<usize>>, strand: Strand) -> PrimerInfo {
+    fn primer_info(binding: Option<std::ops::Range<usize>>, strand: Strand) -> PrimerInfo {
         PrimerInfo {
             id: PrimerId(4),
             name: "P1".into(),
             sequence: "ATGCGT".into(),
-            binding,
+            binding: binding.map(Span::from_range),
             strand,
             len: 6,
             tm: Some(42.0),
@@ -781,7 +782,11 @@ mod tests {
 
     #[test]
     fn primer_create_commits_to_add_primer_verb() {
-        let d = PrimerDraft::create("Primer 1".into(), "ATGC".into(), Some(0..4));
+        let d = PrimerDraft::create(
+            "Primer 1".into(),
+            "ATGC".into(),
+            Some(Span::from_range(0..4)),
+        );
         match d.to_request() {
             ViewerRequest::AddPrimer {
                 name,
@@ -804,7 +809,7 @@ mod tests {
 
     #[test]
     fn primer_draft_validity() {
-        let mut d = PrimerDraft::create("p".into(), "ATGC".into(), Some(0..4));
+        let mut d = PrimerDraft::create("p".into(), "ATGC".into(), Some(Span::from_range(0..4)));
         assert!(d.is_valid());
         d.sequence = "   ".into();
         assert!(!d.is_valid(), "empty oligo is invalid");

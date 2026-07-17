@@ -203,7 +203,7 @@ fn tone_color(ui: &egui::Ui, tone: &Tone) -> egui::Color32 {
 /// 1-based inclusive display range, or `Unattached` for a floating oligo.
 pub(super) fn binding_label(p: &PrimerInfo) -> String {
     match &p.binding {
-        Some(b) => format!("{}–{}", b.start + 1, b.end),
+        Some(b) => format!("{}–{}", b.start + 1, b.start + b.len),
         None => "Unattached".to_string(),
     }
 }

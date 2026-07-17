@@ -178,7 +178,7 @@ fn map_primer(f: &GbFeature, seq: &[u8]) -> Option<Primer> {
         id: Default::default(),
         name,
         sequence,
-        binding: Some(start..end),
+        binding: Some(CoreSpan::from_range(start..end)),
         strand,
         qualifiers,
     })
@@ -393,10 +393,13 @@ fn feature_to_gb(f: &Feature, len: usize) -> GbFeature {
 /// freshly-loaded file has none.) The full authored oligo, including any 5'
 /// tail, is preserved in the `/seqforge_primer` note.
 fn primer_to_gb(p: &Primer) -> Option<GbFeature> {
-    let binding = p.binding.clone()?;
+    let binding = p.binding?;
+    // Linear footprint end (`start + len`). Primers don't yet anneal across the
+    // origin; a wrapping binding would need the join(...) split (as features do)
+    // once that lands.
     let base = Location::Range(
         (binding.start as i64, Before(false)),
-        (binding.end as i64, After(false)),
+        ((binding.start + binding.len) as i64, After(false)),
     );
     let location = match p.strand {
         Strand::Reverse => Location::Complement(Box::new(base)),

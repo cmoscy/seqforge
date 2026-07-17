@@ -385,14 +385,16 @@ pub struct Primer {
     /// tail). A reverse primer's bases are the revcomp of the top strand at
     /// `binding`.
     pub sequence: String,
-    /// Last-known annealing footprint on the top strand, AUTHORED relational
-    /// state (like a `Feature.range`) — but the load-bearing anchor is the **3'
-    /// terminus** (where priming/extension begins), NOT the range length. Rides
-    /// a primer-specific shift handler that tracks edits and **never drops** the
-    /// primer: an edit destroying the 3' anchor sets `binding = None`
-    /// (`Detached`), it does not delete the reagent. `None` = a detached/floating
-    /// oligo. Matches a GenBank `primer_bind` location when present.
-    pub binding: Option<Range<usize>>,
+    /// Last-known annealing footprint on the top strand as a [`Span`]
+    /// (circular-native, so an oligo annealing across the origin is one wrapping
+    /// span), AUTHORED relational state (like a `Feature`'s location) — but the
+    /// load-bearing anchor is the **3' terminus** (where priming/extension
+    /// begins), NOT the footprint length. Rides a primer-specific shift handler
+    /// that tracks edits and **never drops** the primer: an edit destroying the 3'
+    /// anchor sets `binding = None` (`Detached`), it does not delete the reagent.
+    /// `None` = a detached/floating oligo. Matches a GenBank `primer_bind`
+    /// location when present.
+    pub binding: Option<Span>,
     /// Extension direction. `Forward` extends toward higher coordinates (3'
     /// anchor at `binding.end`); `Reverse` toward lower (3' anchor at
     /// `binding.start`).

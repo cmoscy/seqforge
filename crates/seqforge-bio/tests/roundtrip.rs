@@ -389,7 +389,7 @@ fn authored_primer_with_five_prime_tail_round_trips_losslessly() {
         id: Default::default(),
         name: "tailed_fwd".into(),
         sequence: "GGGGGCGTACGT".into(), // tail + footprint
-        binding: Some(4..10),
+        binding: Some(seqforge_core::Span::from_range(4..10)),
         strand: Strand::Forward,
         qualifiers: std::collections::BTreeMap::new(),
     });
@@ -401,7 +401,7 @@ fn authored_primer_with_five_prime_tail_round_trips_losslessly() {
     assert_eq!(doc2.primers.len(), 1);
     let p = &doc2.primers[0];
     assert_eq!(p.sequence, "GGGGGCGTACGT", "5' tail must survive verbatim");
-    assert_eq!(p.binding, Some(4..10));
+    assert_eq!(p.binding, Some(seqforge_core::Span::from_range(4..10)));
     assert_eq!(p.strand, Strand::Forward);
     assert_eq!(p.name, "tailed_fwd");
 }
@@ -429,7 +429,7 @@ fn detached_primer_is_skipped_on_write() {
         id: Default::default(),
         name: "attached".into(),
         sequence: "ACGT".into(),
-        binding: Some(0..4),
+        binding: Some(seqforge_core::Span::from_range(0..4)),
         strand: Strand::Forward,
         qualifiers: std::collections::BTreeMap::new(),
     });

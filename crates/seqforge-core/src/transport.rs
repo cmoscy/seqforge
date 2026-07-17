@@ -240,14 +240,14 @@ fn localize_feature(f: &Feature, map: &PosMap, policy: PartialPolicy) -> Option<
 /// already-detached primers are not carried. `sequence`/`strand` ride verbatim.
 fn localize_primer(p: &Primer, map: &PosMap, _slice_len: usize) -> Option<Primer> {
     let binding = p.binding.as_ref()?;
-    if map.contains(binding.start, binding.end) {
-        let base = map.pos(binding.start)?;
-        let len = binding.end - binding.start;
+    let (b_start, b_end) = (binding.start, binding.start + binding.len);
+    if map.contains(b_start, b_end) {
+        let base = map.pos(b_start)?;
         Some(Primer {
-            binding: Some(base..base + len),
+            binding: Some(Span::new(base, binding.len)),
             ..p.clone()
         })
-    } else if map.overlaps_linear(binding.start, binding.end) {
+    } else if map.overlaps_linear(b_start, b_end) {
         // Straddler — detach but keep the reagent.
         Some(Primer {
             binding: None,
@@ -297,10 +297,13 @@ pub fn place(
     }
 
     for p in &slice.primers {
-        let binding = p.binding.as_ref().map(|b| match orient {
-            Orient::Identity => (b.start + at)..(b.end + at),
-            // Mirror within the slice, then offset.
-            Orient::Rev => (l - b.end + at)..(l - b.start + at),
+        let binding = p.binding.as_ref().map(|b| {
+            let (bs, be) = (b.start, b.start + b.len);
+            match orient {
+                Orient::Identity => Span::new(bs + at, b.len),
+                // Mirror within the slice, then offset.
+                Orient::Rev => Span::from_range((l - be + at)..(l - bs + at)),
+            }
         });
         let strand = match orient {
             Orient::Identity => p.strand,
@@ -463,7 +466,7 @@ mod tests {
             id: Default::default(),
             name: "p".into(),
             sequence: "ACGT".into(),
-            binding,
+            binding: binding.map(Span::from_range),
             strand,
             qualifiers: BTreeMap::new(),
         }
@@ -550,7 +553,7 @@ mod tests {
             "src",
         );
         assert_eq!(s.primers.len(), 1);
-        assert_eq!(s.primers[0].binding, Some(2..6));
+        assert_eq!(s.primers[0].binding, Some(Span::new(2, 4)));
         assert_eq!(s.primers[0].sequence, "ACGT"); // verbatim
     }
 
@@ -629,7 +632,7 @@ mod tests {
         let mut dst = ann(vec![], vec![]);
         place(&mut dst, &slice, 0, Orient::Rev, false, 10);
         let p = dst.primers().next().unwrap();
-        assert_eq!(p.binding, Some(6..9));
+        assert_eq!(p.binding, Some(Span::new(6, 3)));
         assert_eq!(p.strand, Strand::Reverse);
         assert_eq!(p.sequence, "ACGT"); // physical oligo unchanged
     }
@@ -751,6 +754,6 @@ mod tests {
         place(&mut dst, &s, 0, Orient::Identity, false, 30);
         let spans: Vec<_> = dst.iter().map(|f| f.hull(30)).collect();
         assert_eq!(spans, vec![3..9, 20..25]);
-        assert_eq!(dst.primers().next().unwrap().binding, Some(4..8));
+        assert_eq!(dst.primers().next().unwrap().binding, Some(Span::new(4, 4)));
     }
 }

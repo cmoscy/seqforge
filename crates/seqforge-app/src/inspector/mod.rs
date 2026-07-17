@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use seqforge_core::{
-    CutSite, CutSiteKey, FeatureId, MethylContext, MethylState, PrimerId, PrimerInfo, ViewId,
+    CutSite, CutSiteKey, FeatureId, MethylContext, MethylState, PrimerId, PrimerInfo, Span, ViewId,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -344,12 +344,12 @@ impl InspectorState {
         name: String,
         sequence: String,
         strand: String,
-        binding: Option<Range<usize>>,
+        binding: Option<Span>,
         arm_delete: bool,
     ) {
         self.tab = InspectorTab::Primers;
         let (attached, start, end) = match binding {
-            Some(b) => (true, b.start, b.end),
+            Some(b) => (true, b.start, b.start + b.len),
             None => (false, 0, 0),
         };
         self.editing_primer = Some(PrimerDraft {

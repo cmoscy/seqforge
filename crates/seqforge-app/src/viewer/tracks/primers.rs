@@ -224,7 +224,7 @@ fn paint_band(
                     body_color,
                 );
             }
-        } else if binding.end <= block_end {
+        } else if binding.start + binding.len <= block_end {
             let tip_x = body.max.x + head_len;
             filled_triangle(
                 painter,
@@ -245,7 +245,7 @@ fn paint_band(
         // holding the 5' end. Long tails are capped with a "+N" stub.
         let tail = decomp.map(|d| d.tail.as_slice()).unwrap_or(&[]);
         let five_prime_in_block = if reverse {
-            binding.end <= block_end
+            binding.start + binding.len <= block_end
         } else {
             binding.start >= block_start
         };

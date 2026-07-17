@@ -85,10 +85,14 @@ pub fn primer_qc(oligo: &str) -> PrimerQc {
 /// [`primer_qc`] plus [`anneal_tm`] when `primer.binding` is present.
 pub fn primer_qc_with_anneal(primer: &Primer, template: &[u8]) -> PrimerQcPlusAnneal {
     let qc = primer_qc(&primer.sequence);
-    let anneal_tm = primer
-        .binding
-        .as_ref()
-        .map(|b| anneal_tm(&primer.sequence, b, primer.strand, template));
+    let anneal_tm = primer.binding.as_ref().map(|b| {
+        anneal_tm(
+            &primer.sequence,
+            &(b.start..b.start + b.len),
+            primer.strand,
+            template,
+        )
+    });
     PrimerQcPlusAnneal { qc, anneal_tm }
 }
 
@@ -119,7 +123,15 @@ fn primer_info(
     let mismatches = primer
         .binding
         .as_ref()
-        .map(|b| decompose_primer(&primer.sequence, b, primer.strand, template).mismatches)
+        .map(|b| {
+            decompose_primer(
+                &primer.sequence,
+                &(b.start..b.start + b.len),
+                primer.strand,
+                template,
+            )
+            .mismatches
+        })
         .unwrap_or(0);
     let qc = primer_qc_with_anneal(primer, template);
 
@@ -131,10 +143,9 @@ fn primer_info(
         find_primer_binding_sites(&primer.sequence, template, circular, settings)
             .into_iter()
             .map(|s| {
-                let attached = primer
-                    .binding
-                    .as_ref()
-                    .is_some_and(|b| s.range == *b && s.strand == primer.strand);
+                let attached = primer.binding.as_ref().is_some_and(|b| {
+                    s.range == (b.start..b.start + b.len) && s.strand == primer.strand
+                });
                 PrimerSiteInfo {
                     anneal_tm: anneal_tm(&primer.sequence, &s.range, s.strand, template).ok(),
                     range: s.range,
@@ -150,7 +161,7 @@ fn primer_info(
         id: primer.id,
         name: primer.name.clone(),
         sequence: primer.sequence.clone(),
-        binding: primer.binding.clone(),
+        binding: primer.binding,
         strand: primer.strand,
         len: primer.sequence.len(),
         tm: qc.qc.tm.ok(),
@@ -219,7 +230,7 @@ mod tests {
             id: PrimerId(1),
             name: "fwd".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(2..8),
+            binding: Some(seqforge_core::Span::from_range(2..8)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -236,7 +247,7 @@ mod tests {
             id: PrimerId(1),
             name: "fwd".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(0..6),
+            binding: Some(seqforge_core::Span::from_range(0..6)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -299,7 +310,7 @@ mod tests {
             id: PrimerId(1),
             name: "fwd".into(),
             sequence: "GCGTAC".into(),
-            binding: Some(2..8),
+            binding: Some(seqforge_core::Span::from_range(2..8)),
             strand: Strand::Forward,
             qualifiers: Default::default(),
         };
@@ -318,7 +329,10 @@ mod tests {
         assert_eq!(infos.len(), 2);
         assert_eq!(infos[0].id, PrimerId(1));
         assert_eq!(infos[0].state, PrimerState::Confirmed);
-        assert_eq!(infos[0].binding, Some(2..8));
+        assert_eq!(
+            infos[0].binding,
+            Some(seqforge_core::Span::from_range(2..8))
+        );
         assert_eq!(infos[0].len, 6);
         assert_eq!(infos[0].mismatches, 0);
         assert!(infos[0].tm.is_some());

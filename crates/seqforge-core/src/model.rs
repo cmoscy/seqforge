@@ -741,7 +741,7 @@ mod tests {
             id: Default::default(),
             name: name.into(),
             sequence: "ACGTACGT".into(),
-            binding: Some(0..8),
+            binding: Some(crate::Span::from_range(0..8)),
             strand: crate::Strand::Forward,
             qualifiers: Default::default(),
         }

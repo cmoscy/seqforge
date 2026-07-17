@@ -719,9 +719,10 @@ pub struct PrimerInfo {
     pub name: String,
     /// Full authored oligo 5'→3' (5' tail included).
     pub sequence: String,
-    /// 0-based half-open annealing footprint on the top strand; `None` for a
-    /// detached/floating oligo. Display layers convert to 1-based.
-    pub binding: Option<Range<usize>>,
+    /// Annealing footprint on the top strand as a [`Span`] (wraps the origin
+    /// natively); `None` for a detached/floating oligo. Display layers convert to
+    /// 1-based.
+    pub binding: Option<Span>,
     pub strand: Strand,
     /// Oligo length in bp (full oligo, 5' tail included).
     pub len: usize,
@@ -1213,7 +1214,7 @@ mod tests {
                     id: p.id,
                     name: p.name.clone(),
                     sequence: p.sequence.clone(),
-                    binding: p.binding.clone(),
+                    binding: p.binding,
                     strand: p.strand,
                     len: p.sequence.chars().count(),
                     tm: None,
@@ -1575,7 +1576,7 @@ mod tests {
             id: Default::default(),
             name: "p1".into(),
             sequence: "ATGC".into(),
-            binding: Some(0..4),
+            binding: Some(Span::from_range(0..4)),
             strand: crate::Strand::Forward,
             qualifiers: Default::default(),
         });
@@ -1592,7 +1593,7 @@ mod tests {
                 assert_eq!(primers.len(), 1);
                 assert_eq!(primers[0].id, minted);
                 assert_eq!(primers[0].name, "p1");
-                assert_eq!(primers[0].binding, Some(0..4));
+                assert_eq!(primers[0].binding, Some(Span::from_range(0..4)));
                 assert_eq!(primers[0].len, 4);
             }
             other => panic!("expected Primers, got {other:?}"),
