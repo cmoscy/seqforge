@@ -241,17 +241,22 @@ pub(super) fn apply_reveal_feature(
     id: FeatureId,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let before = active_selection(state);
-    let range = state
+    // Wrap-aware selection span (origin-spanning feature → its arc, not the whole
+    // molecule), paired with the length for `Selection::from_span`.
+    let span = state
         .workspace
-        .with_active_buffer(|_v, b, ann| ann.get(id).map(|f| f.hull(b.text.len())))
+        .with_active_buffer(|_v, b, ann| {
+            ann.get(id)
+                .map(|f| (f.selection_span(b.text.len()), b.text.len()))
+        })
         .ok()
         .flatten();
-    if let (Some(view), Some(r)) = (state.workspace.active_view_mut(), range) {
+    if let (Some(view), Some((span, len))) = (state.workspace.active_view_mut(), span) {
         view.selection = ViewSelection::Feature {
             id,
-            range: Selection::range(r.start, r.end),
+            range: Selection::from_span(span, len),
         };
-        view.scroll_to = Some(r.start);
+        view.scroll_to = Some(span.start);
     }
     emit_selection_diff(state, before);
     Ok(None)
@@ -299,21 +304,25 @@ pub(super) fn apply_edit_feature_in_inspector(
                     Strand::Reverse => "-",
                     _ => ".",
                 };
-                let span = f.hull(b.text.len());
+                // Wrap-aware span (exact arc for an origin-spanning feature, not
+                // the whole-molecule flatten) plus the length for the selection.
                 (
                     f.label.clone(),
                     f.raw_kind.clone(),
                     flag.to_string(),
-                    span.start,
-                    span.end,
+                    f.selection_span(b.text.len()),
+                    b.text.len(),
                 )
             })
         })
         .ok()
         .flatten();
-    let Some((label, kind, strand, start, end)) = fields else {
+    let Some((label, kind, strand, span, len)) = fields else {
         return Ok(None); // feature vanished — nothing to edit
     };
+    // The inline editor is a linear start/end form; a wrapping feature shows its
+    // span's raw extent and, on commit with both endpoints, redefines linearly.
+    let (start, end) = (span.start, span.start + span.len);
 
     let before = active_selection(state);
     super::layout::ensure_inspector_visible(state);
@@ -323,9 +332,9 @@ pub(super) fn apply_edit_feature_in_inspector(
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = ViewSelection::Feature {
             id,
-            range: Selection::range(start, end),
+            range: Selection::from_span(span, len),
         };
-        view.scroll_to = Some(start);
+        view.scroll_to = Some(span.start);
     }
     emit_selection_diff(state, before);
     state.focus.set_scope(FocusScope::Inspector);

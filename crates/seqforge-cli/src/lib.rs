@@ -156,8 +156,10 @@ pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
         .iter()
         .map(|s| {
             serde_json::json!({
-                "start": s.range.start,
-                "end": s.range.end,
+                // Wrap-aware footprint as {start, len} (P5b: a site crossing the
+                // origin is one wrapping span, not an end > len overflow).
+                "start": s.span.start,
+                "len": s.span.len,
                 "strand": s.strand,
                 "mismatches": s.mismatches,
                 "three_prime_match": s.three_prime_match,

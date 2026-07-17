@@ -4,9 +4,7 @@
 //! `begin_feature_edit`) constructs them by struct literal; the methods and free
 //! functions stay private to this module.
 
-use std::ops::Range;
-
-use seqforge_core::{FeatureId, FeatureKind, Strand, ViewerRequest};
+use seqforge_core::{FeatureId, FeatureKind, Span, Strand, ViewerRequest};
 
 use super::InspectorState;
 use super::row::{
@@ -21,7 +19,9 @@ pub(super) struct FeatureRow {
     pub(super) id: FeatureId,
     pub(super) label: String,
     pub(super) kind: String,
-    pub(super) range: Range<usize>,
+    /// Footprint as a wrap-aware [`Span`] (exact for a single-region feature,
+    /// bounding span for a spliced `Join` — see `Feature::selection_span`).
+    pub(super) span: Span,
     pub(super) strand: Strand,
 }
 
@@ -52,8 +52,12 @@ impl FeatureDraft {
             label: f.label.clone(),
             kind: f.kind.clone(),
             strand: strand_flag(f.strand).to_string(),
-            start: f.range.start,
-            end: f.range.end,
+            // The inline editor is a linear start/end form; a wrapping feature
+            // shows its span's raw extent and, on commit, redefines to a crisp
+            // linear region (the same path P5a's `UpdateFeature` gate allows when
+            // both endpoints are given).
+            start: f.span.start,
+            end: f.span.start + f.span.len,
             needs_focus: true,
             confirm_delete: false,
         }
@@ -103,7 +107,7 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
         },
         dim_name: unnamed,
         right: vec![
-            format!("{}–{}", f.range.start + 1, f.range.end),
+            format!("{}–{}", f.span.start + 1, f.span.start + f.span.len),
             f.kind.clone(),
         ],
     }
@@ -118,8 +122,8 @@ fn feature_viewer(ui: &mut egui::Ui, f: &FeatureRow) -> bool {
         ui.weak(format!(
             "{} · {}–{}",
             f.kind,
-            f.range.start + 1,
-            f.range.end
+            f.span.start + 1,
+            f.span.start + f.span.len
         ));
         ui.horizontal(|ui| {
             if ui.small_button("Edit").clicked() {
@@ -254,7 +258,7 @@ impl InspectorState {
         }
         // Local, sorted snapshot so the loop can mutate `self.editing` freely.
         let mut feats = self.features.clone();
-        feats.sort_by_key(|f| f.range.start);
+        feats.sort_by_key(|f| f.span.start);
         let selected = match &self.selected {
             Some(super::SelectedNoun::Feature(id)) => Some(*id),
             _ => None,
@@ -334,7 +338,7 @@ mod tests {
             id: FeatureId(7),
             label: "lacZ".into(),
             kind: "CDS".into(),
-            range: 10..40,
+            span: Span::from_range(10..40),
             strand: Strand::Reverse,
         }
     }

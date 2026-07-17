@@ -1,4 +1,3 @@
-use std::ops::Range;
 use std::path::PathBuf;
 
 use clap::Subcommand;
@@ -77,10 +76,17 @@ impl Selection {
 
     /// A selection covering `span` on a molecule of length `len` — the inverse of
     /// [`Selection::to_span`]. Anchor at the span start, focus at its (mod-`len`)
-    /// end, `wrap` set iff the span crosses the origin. (A whole-molecule span is
-    /// not representable here — it collapses to a cursor — but callers building a
-    /// selection from a sub-region span, e.g. a search hit, never hit that.)
+    /// end, `wrap` set iff the span crosses the origin. A whole-molecule span
+    /// (`len == len_total`) maps to a **full-circle** selection (`anchor == focus`
+    /// with `wrap`), not the empty cursor that `anchor == focus` alone would mean.
     pub fn from_span(span: Span, len: usize) -> Selection {
+        if len > 0 && span.len == len {
+            return Selection {
+                anchor: span.start,
+                focus: span.start,
+                wrap: true,
+            };
+        }
         Selection {
             anchor: span.start,
             focus: span.end(len),
@@ -300,6 +306,14 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    // The linear edit-command boundary (`plans/span.md` P5d): `Delete` /
+    // `Replace` / `ReverseComplement` / `Cut` / `Copy` take `start, end` — these
+    // are *transient parameters to a linear splice*, not a stored region identity,
+    // so they are a deliberate `Range`-tier survivor per the three-tier rule
+    // (`docs/architecture.md`), NOT drift. Cross-origin copy is still expressible
+    // in the GUI (a wrapping selection recovered in `extract_region`, which passes
+    // a `Span` to `transport::extract`); a headless wrapping cut/copy is a
+    // deferrable feature, addable later without disturbing this boundary.
     /// Delete the bases in the half-open range `[start, end)`.
     Delete {
         start: usize,
@@ -667,9 +681,11 @@ pub struct FeatureInfo {
     /// Verbatim GenBank feature-type string (e.g. `CDS`, `misc_feature`).
     pub kind: String,
     pub label: String,
-    /// 0-based half-open range `[start, end)`.
-    pub start: usize,
-    pub end: usize,
+    /// The feature's footprint as a [`Span`] (circular-native — an
+    /// origin-spanning feature is one wrapping span; a spliced `Join` reports its
+    /// bounding span). Serializes as `{start, len}`. Display layers convert to
+    /// 1-based and render both arms on wrap.
+    pub span: Span,
     pub strand: Strand,
 }
 
@@ -694,8 +710,10 @@ pub enum PrimerState {
 /// lists them and the CLI emits them so mispriming is visible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrimerSiteInfo {
-    /// 0-based half-open footprint on the top strand.
-    pub range: Range<usize>,
+    /// Annealing footprint on the top strand as a [`Span`] (circular-native, so a
+    /// site crossing the origin is one wrapping span). Serializes as `{start,
+    /// len}`; display layers convert to 1-based.
+    pub span: Span,
     pub strand: Strand,
     /// Mismatches within the footprint (0 = perfect anneal).
     pub mismatches: usize,
@@ -926,16 +944,14 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::ListFeatures { view: _ } => {
             let features = annotations
                 .iter()
-                .map(|f| {
-                    let span = f.hull(buffer.text.len());
-                    FeatureInfo {
-                        id: f.id,
-                        kind: f.raw_kind.clone(),
-                        label: f.label.clone(),
-                        start: span.start,
-                        end: span.end,
-                        strand: f.strand,
-                    }
+                .map(|f| FeatureInfo {
+                    id: f.id,
+                    kind: f.raw_kind.clone(),
+                    label: f.label.clone(),
+                    // Exact wrap-aware span for a single-region feature; bounding
+                    // span for a spliced `Join` (`selection_span`).
+                    span: f.selection_span(buffer.text.len()),
+                    strand: f.strand,
                 })
                 .collect();
             Ok(ViewerResponse::Features { features })
@@ -1029,6 +1045,21 @@ mod selection_tests {
         assert!(span.contains(18, 20));
         assert!(span.contains(2, 20));
         assert!(!span.contains(10, 20));
+    }
+
+    #[test]
+    fn from_span_round_trips_wrapping_and_full() {
+        // Wrapping arc (pUC19 ori shape): from_span → wrap selection → to_span
+        // recovers the same span (the two arms), NOT the whole molecule.
+        let ori = Span::new(16, 8); // [16..20) ∪ [0..4) on L=20
+        let sel = Selection::from_span(ori, 20);
+        assert!(sel.wrap);
+        assert_eq!(sel.to_span(20), ori);
+        assert_eq!(sel.to_span(20).linear_pieces(20), Pieces::Two(16..20, 0..4));
+        // A whole-molecule span is a full-circle selection, not an empty cursor.
+        let full = Selection::from_span(Span::full(20), 20);
+        assert!(full.wrap && !full.is_cursor());
+        assert_eq!(full.to_span(20), Span::full(20));
     }
 
     #[test]
@@ -1562,10 +1593,36 @@ mod tests {
                 assert_eq!(features.len(), 1);
                 assert_eq!(features[0].id, minted);
                 assert_eq!(features[0].kind, "CDS");
-                assert_eq!((features[0].start, features[0].end), (1, 4));
+                assert_eq!(features[0].span, Span::from_range(1..4));
             }
             other => panic!("expected Features, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dto_span_serializes_as_start_len() {
+        // P5b: FeatureInfo/PrimerSiteInfo carry a `span` that serializes natively
+        // as `{start, len}` (the pre-release wire shape — no adapter). A wrapping
+        // span round-trips exactly, unlike the old `{start, end}` which couldn't
+        // represent an origin-crossing footprint.
+        let fi = FeatureInfo {
+            id: FeatureId(3),
+            kind: "CDS".into(),
+            label: "ori".into(),
+            span: Span::new(16, 8), // wraps on L=20
+            strand: Strand::Forward,
+        };
+        let json = serde_json::to_string(&fi).unwrap();
+        assert!(
+            json.contains("\"span\":{\"start\":16,\"len\":8}"),
+            "span serializes as {{start,len}}: {json}"
+        );
+        let back: FeatureInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.span, Span::new(16, 8));
+        assert_eq!(
+            back.span.linear_pieces(20),
+            crate::span::Pieces::Two(16..20, 0..4)
+        );
     }
 
     #[test]

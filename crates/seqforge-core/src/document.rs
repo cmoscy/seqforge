@@ -196,11 +196,11 @@ pub struct Provenance {
 ///   normalizes the outer complement into it. A **mixed-strand** `Join` (inner
 ///   complements) is stubbed to single-strand for now.
 ///
-/// The bounding hull is the **derived** [`Location::hull`] — never stored
-/// (decision 8): the hull is a pure function of the location, so storing it
+/// The bounding box is the **derived** [`Location::bounds`] — never stored
+/// (decision 8): it is a pure function of the location, so storing it
 /// would denormalize with a sync invariant. Geometry consumers pick the
 /// wrap-aware primitive they mean: [`Location::pieces`] (linear render runs),
-/// [`Location::contains`] (hit-test), or [`Location::hull`] (bounds-only).
+/// [`Location::contains`] (hit-test), or [`Location::bounds`] (bounds-only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Location {
     /// A single contiguous region ([`Span`], which may wrap the origin on a
@@ -269,11 +269,25 @@ impl Location {
         }
     }
 
-    /// Linear bounding hull `[min, max)` — the **explicit, opt-in** accessor for
+    /// The single contiguous [`Span`] this location covers, if it is **one
+    /// region** — a `Simple` (possibly wrapping the origin) or a `Complement` of
+    /// one. `None` for a genuinely multi-segment `Join`: a spliced feature has no
+    /// single-arc representation, so callers fall back to [`Location::bounds`].
+    /// This is what lets a wrap-aware `Selection` be built from a feature without
+    /// flattening an origin-spanning region to the whole molecule.
+    pub fn as_span(&self) -> Option<Span> {
+        match self {
+            Location::Simple { span, .. } => Some(*span),
+            Location::Complement(inner) => inner.as_span(),
+            Location::Join(_) => None,
+        }
+    }
+
+    /// Linear bounding box `[min, max)` — the **explicit, opt-in** accessor for
     /// genuine bounds-only consumers (interval stacking / LOD). Lossy for a
     /// wrapping location (returns `0..len`). Prefer [`Location::pieces`] /
     /// [`Location::contains`] everywhere else.
-    pub fn hull(&self, len: usize) -> Range<usize> {
+    pub fn bounds(&self, len: usize) -> Range<usize> {
         let pieces = self.pieces(len);
         match (
             pieces.iter().map(|r| r.start).min(),
@@ -335,8 +349,8 @@ pub struct Feature {
     /// by [`crate::Annotations`] on load. See [`FeatureId`].
     #[serde(skip)]
     pub id: FeatureId,
-    /// GenBank-native geometry. The bounding hull is the derived
-    /// [`Feature::hull`]; segment-aware code matches on [`Location`] variants.
+    /// GenBank-native geometry. The bounding box is the derived
+    /// [`Feature::bounds`]; segment-aware code matches on [`Location`] variants.
     pub location: Location,
     /// Verbatim GenBank feature-type string (the authoritative type).
     /// Display kind is derived via [`FeatureKind::classify`].
@@ -360,9 +374,20 @@ impl Feature {
         self.location.contains(pos, len)
     }
 
-    /// Explicit bounds-only hull (lossy on wrap). Delegates to [`Location::hull`].
-    pub fn hull(&self, len: usize) -> Range<usize> {
-        self.location.hull(len)
+    /// Explicit bounds-only box (lossy on wrap). Delegates to [`Location::bounds`].
+    pub fn bounds(&self, len: usize) -> Range<usize> {
+        self.location.bounds(len)
+    }
+
+    /// The [`Span`] to select when this feature is picked (map click / Inspector
+    /// reveal): the **exact wrap-aware** region for a single-`Simple` feature — so
+    /// clicking an origin-spanning feature selects its two arms, not the whole
+    /// molecule — falling back to the bounding hull for a spliced `Join` (which
+    /// has no single-arc selection). Pairs with [`crate::Selection::from_span`].
+    pub fn selection_span(&self, len: usize) -> Span {
+        self.location
+            .as_span()
+            .unwrap_or_else(|| Span::from_range(self.bounds(len)))
     }
 }
 
@@ -433,21 +458,21 @@ mod location_tests {
     use super::*;
 
     #[test]
-    fn hull_of_simple_is_the_range() {
-        assert_eq!(Location::simple(3..9).hull(50), 3..9);
+    fn bounds_of_simple_is_the_range() {
+        assert_eq!(Location::simple(3..9).bounds(50), 3..9);
     }
 
     #[test]
-    fn hull_of_join_is_the_bounding_box() {
+    fn bounds_of_join_is_the_bounding_box() {
         let j = Location::Join(vec![Location::simple(30..40), Location::simple(11..20)]);
         // Hull spans min start .. max end, regardless of segment order.
-        assert_eq!(j.hull(50), 11..40);
+        assert_eq!(j.bounds(50), 11..40);
     }
 
     #[test]
-    fn hull_of_complement_is_inner_hull() {
+    fn bounds_of_complement_is_inner() {
         let c = Location::Complement(Box::new(Location::simple(5..8)));
-        assert_eq!(c.hull(50), 5..8);
+        assert_eq!(c.bounds(50), 5..8);
     }
 
     #[test]
@@ -461,7 +486,7 @@ mod location_tests {
         // A single origin-spanning Simple on a len-20 molecule → two runs.
         let w = Location::from_span(Span::new(16, 8));
         assert_eq!(w.pieces(20), vec![16..20, 0..4]);
-        assert_eq!(w.hull(20), 0..20); // lossy on wrap
+        assert_eq!(w.bounds(20), 0..20); // lossy on wrap
         assert!(w.contains(18, 20));
         assert!(w.contains(2, 20));
         assert!(!w.contains(10, 20));
@@ -485,5 +510,42 @@ mod location_tests {
         assert_eq!(j.fuzzy_ends(), (true, true));
         assert!(j.is_fuzzy());
         assert_eq!(Location::simple(0..3).fuzzy_ends(), (false, false));
+    }
+
+    #[test]
+    fn as_span_is_some_for_single_region_none_for_join() {
+        // A wrapping Simple (pUC19 ori shape) exposes its exact span — NOT the
+        // whole-molecule hull — so a feature click selects the arc, not the ring.
+        let ori = Location::from_span(Span::new(2314, 589));
+        assert_eq!(ori.as_span(), Some(Span::new(2314, 589)));
+        assert_eq!(ori.bounds(2686), 0..2686); // hull is lossy — the old bug
+        // Complement of a Simple still resolves to the inner span.
+        let c = Location::Complement(Box::new(Location::simple(5..8)));
+        assert_eq!(c.as_span(), Some(Span::from_range(5..8)));
+        // A spliced Join has no single-arc representation.
+        let j = Location::Join(vec![Location::simple(0..3), Location::simple(6..9)]);
+        assert_eq!(j.as_span(), None);
+    }
+
+    #[test]
+    fn feature_selection_span_prefers_exact_over_bounds() {
+        let feat = |loc| Feature {
+            id: Default::default(),
+            location: loc,
+            raw_kind: "rep_origin".into(),
+            label: "ori".into(),
+            strand: Strand::Forward,
+            qualifiers: BTreeMap::new(),
+            provenance: None,
+        };
+        // Origin-spanning feature → its wrapping span (not 0..len).
+        let ori = feat(Location::from_span(Span::new(2314, 589)));
+        assert_eq!(ori.selection_span(2686), Span::new(2314, 589));
+        // Spliced Join → hull as a (non-wrapping) span fallback.
+        let spliced = feat(Location::Join(vec![
+            Location::simple(10..20),
+            Location::simple(30..40),
+        ]));
+        assert_eq!(spliced.selection_span(100), Span::from_range(10..40));
     }
 }

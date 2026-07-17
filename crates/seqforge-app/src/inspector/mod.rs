@@ -145,7 +145,9 @@ impl InspectorState {
                     id: f.id,
                     label: f.label.clone(),
                     kind: f.raw_kind.clone(),
-                    range: f.hull(buf.text.len()),
+                    // Exact wrap-aware span for a single region; bounding span for
+                    // a spliced `Join` (`Feature::selection_span`).
+                    span: f.selection_span(buf.text.len()),
                     strand: f.strand,
                 })
                 .collect();

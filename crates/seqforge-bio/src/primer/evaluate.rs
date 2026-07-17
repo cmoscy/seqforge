@@ -143,12 +143,15 @@ fn primer_info(
         find_primer_binding_sites(&primer.sequence, template, circular, settings)
             .into_iter()
             .map(|s| {
-                let attached = primer.binding.as_ref().is_some_and(|b| {
-                    s.range == (b.start..b.start + b.len) && s.strand == primer.strand
-                });
+                let attached = primer
+                    .binding
+                    .is_some_and(|b| b == s.span && s.strand == primer.strand);
+                // Linear range into the template for the thermo engine (the
+                // documented linear-engine `Range` survivor).
+                let binding = s.span.start..s.span.start + s.span.len;
                 PrimerSiteInfo {
-                    anneal_tm: anneal_tm(&primer.sequence, &s.range, s.strand, template).ok(),
-                    range: s.range,
+                    anneal_tm: anneal_tm(&primer.sequence, &binding, s.strand, template).ok(),
+                    span: s.span,
                     strand: s.strand,
                     mismatches: s.mismatches,
                     attached,
@@ -179,7 +182,7 @@ fn primer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqforge_core::PrimerId;
+    use seqforge_core::{PrimerId, Span};
 
     const T: &[u8] = b"ATGCGTACCA";
 
@@ -260,7 +263,7 @@ mod tests {
             1,
             "exactly one site is the attached footprint"
         );
-        assert_eq!(attached[0].range, 0..6);
+        assert_eq!(attached[0].span, Span::from_range(0..6));
         assert_eq!(
             infos[0].off_targets,
             sites.iter().filter(|s| !s.attached).count(),

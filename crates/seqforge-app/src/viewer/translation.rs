@@ -282,7 +282,13 @@ pub(crate) fn build_translation_cache(
             let is_cds = matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds);
             display.wants_feature(f.id, is_cds)
         })
-        .map(|f| {
+        .filter_map(|f| {
+            // Paint AA glyphs only for a single, non-wrapping CDS: a spliced
+            // (`Join`) or origin-wrapping CDS has no single linear reading frame,
+            // and flattening it to `bounds` (`0..len`) would render a wrong frame.
+            // Omit it instead (`plans/span.md` P5a). Segment-aware CDS translation
+            // is a feature-model follow-up.
+            let span = f.location.as_span().filter(|s| !s.wraps(seq.len()))?;
             let cs = f
                 .qualifiers
                 .get("codon_start")
@@ -290,12 +296,12 @@ pub(crate) fn build_translation_cache(
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .filter(|n| (1..=3).contains(n))
                 .unwrap_or(1);
-            FeatureAa {
-                // Hull translation (behavior-preserving); segment-aware CDS
-                // translation is a feature-model F0 follow-up.
+            // Non-wrapping (filtered above) → linear extent is `start..start+len`
+            // (not `end(len)`, which is `0` for a feature ending exactly at `len`).
+            Some(FeatureAa {
                 id: f.id,
-                glyphs: cds_glyphs(seq, f.hull(seq.len()), f.strand, cs),
-            }
+                glyphs: cds_glyphs(seq, span.start..span.start + span.len, f.strand, cs),
+            })
         })
         .collect();
 
@@ -426,5 +432,43 @@ mod tests {
         assert_eq!(cache.feature_glyphs.len(), 2);
         assert!(cache.feature_has_aa(id0));
         assert!(cache.feature_has_aa(id1));
+    }
+
+    #[test]
+    fn wrapping_or_spliced_cds_is_omitted_not_mistranslated() {
+        // P5a correct-by-omission: a spliced (`Join`) or origin-wrapping CDS has
+        // no single linear reading frame, so it produces NO glyphs rather than a
+        // wrong frame flattened through `bounds` (`0..len`).
+        use seqforge_core::{Feature, Location, Span, Strand};
+        let seq = b"ATGAAATAAATGCCCTAA"; // len 18
+        let cds = |loc: Location| Feature {
+            id: Default::default(),
+            location: loc,
+            raw_kind: "CDS".to_string(),
+            label: "c".to_string(),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+            provenance: None,
+        };
+        let mut ann = seqforge_core::Annotations::new(vec![]);
+        let linear = ann.add(cds(Location::simple(0..12)));
+        let wrapping = ann.add(cds(Location::from_span(Span::new(15, 6)))); // 15..18 ∪ 0..3
+        let spliced = ann.add(cds(Location::Join(vec![
+            Location::simple(0..6),
+            Location::simple(9..15),
+        ])));
+        let d = TranslationDisplay {
+            show_cds: true,
+            ..Default::default()
+        };
+        let cache = build_translation_cache(seq, &ann, 1, d);
+        assert!(cache.feature_has_aa(linear), "single linear CDS translates");
+        assert!(
+            !cache.feature_has_aa(wrapping),
+            "origin-wrapping CDS omitted"
+        );
+        assert!(!cache.feature_has_aa(spliced), "spliced Join CDS omitted");
+        // Only the one translatable feature appears at all.
+        assert_eq!(cache.feature_glyphs.len(), 1);
     }
 }

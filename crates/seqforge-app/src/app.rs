@@ -1418,12 +1418,19 @@ impl eframe::App for SeqForgeApp {
                         if !matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds) {
                             return None;
                         }
-                        // Hull translation (behavior-preserving): a joined CDS
-                        // still translates through its hull. Segment-aware CDS
-                        // translation is a follow-up (feature-model track F0 note).
-                        let span = f.hull(buf.text.len());
-                        let end = span.end.min(buf.text.len());
-                        if span.start >= end {
+                        // Translate only a single, non-wrapping CDS. A spliced
+                        // (`Join`) or origin-wrapping CDS has no single linear
+                        // reading frame here; flattening it to `bounds` (`0..len`)
+                        // would translate a wrong frame (introns / the whole
+                        // molecule). Omit rather than mislead (`plans/span.md`
+                        // P5a). Segment-aware CDS translation is a follow-up.
+                        let total = buf.text.len();
+                        let span = f.location.as_span().filter(|s| !s.wraps(total))?;
+                        // Non-wrapping (filtered above) → linear extent is
+                        // `start..start+len` (not `end(len)`, which is `0` for a
+                        // feature ending exactly at `len`).
+                        let (start, end) = (span.start, (span.start + span.len).min(total));
+                        if start >= end {
                             return None;
                         }
                         let codon_start = f
@@ -1433,11 +1440,8 @@ impl eframe::App for SeqForgeApp {
                             .and_then(|s| s.trim().parse::<usize>().ok())
                             .filter(|n| (1..=3).contains(n))
                             .unwrap_or(1);
-                        let protein = seqforge_bio::translate(
-                            &buf.text[span.start..end],
-                            f.strand,
-                            codon_start,
-                        );
+                        let protein =
+                            seqforge_bio::translate(&buf.text[start..end], f.strand, codon_start);
                         Some((f.label.clone(), protein))
                     });
                     // Tm/%GC of the selected region (Phase 0.5), derived — decision

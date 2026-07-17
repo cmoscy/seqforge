@@ -141,7 +141,7 @@ fn build_linear_geom(
     let ranges: Vec<(usize, usize)> = visible
         .iter()
         .map(|f| {
-            let s = f.hull(seq_len);
+            let s = f.bounds(seq_len);
             (s.start, s.end)
         })
         .collect();
@@ -151,9 +151,9 @@ fn build_linear_geom(
     // `feat_idx` is a within-frame render detail (indexes `row_assign`); the
     // stored handle is the stable `feat.id`.
     for (feat_idx, feat) in visible.iter().enumerate() {
-        let hull = feat.hull(seq_len);
-        let x = (hull.start as f32 / seq_len as f32) * panel_width;
-        let w = ((hull.end - hull.start) as f32 / seq_len as f32) * panel_width;
+        let bounds = feat.bounds(seq_len);
+        let x = (bounds.start as f32 / seq_len as f32) * panel_width;
+        let w = ((bounds.end - bounds.start) as f32 / seq_len as f32) * panel_width;
 
         if w < settings.min_bar_width {
             continue; // LOD: sub-pixel

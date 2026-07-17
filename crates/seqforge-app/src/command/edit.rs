@@ -463,24 +463,44 @@ pub(super) fn apply_update_feature(
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
     let len = state.workspace.edit_annotations(vid, |ann, buf| {
+        let total = buf.text.len();
         let cur = ann
             .get(id)
             .ok_or_else(|| DispatchError::InvalidInput(format!("no feature with id {id}")))?;
-        let cur_span = cur.hull(buf.text.len());
-        let new_start = start.unwrap_or(cur_span.start);
-        let new_end = end.unwrap_or(cur_span.end);
-        if new_start >= new_end || new_end > buf.text.len() {
-            return Err(DispatchError::OutOfRange {
-                position: new_end,
-                seq_len: buf.text.len(),
-            });
-        }
+        // The feature's current *linear* extent, used only to default an
+        // unspecified endpoint. A wrapping or spliced (`Join`) feature has no
+        // single linear extent — its `bounds` are the lossy `0..len` — so a
+        // partial re-range there is ill-defined and we require both endpoints
+        // explicitly rather than resizing from a phantom range (`plans/span.md`
+        // P5a: correct-by-omission, not a silent flatten). `Span` is `Copy`, so
+        // this drops the immutable borrow before `get_mut` below.
+        let cur_linear = cur.location.as_span().filter(|s| !s.wraps(total));
         // Rebuild the geometry to a single crisp range only when the caller
         // actually re-ranged the feature; a label/kind/strand-only edit must not
-        // flatten a multi-segment `Join` to its hull.
+        // touch a multi-segment `Join`.
         let re_range = start.is_some() || end.is_some();
         let f = ann.get_mut(id).expect("present — checked just above");
         if re_range {
+            let (new_start, new_end) = match (
+                start.or(cur_linear.map(|s| s.start)),
+                // Non-wrapping (filtered into `cur_linear`) → `start+len`, not
+                // `end(total)` (which is `0` for a feature ending at `len`).
+                end.or(cur_linear.map(|s| s.start + s.len)),
+            ) {
+                (Some(s), Some(e)) => (s, e),
+                _ => {
+                    return Err(DispatchError::InvalidInput(format!(
+                        "feature {id} wraps the origin or is spliced; \
+                         resize requires explicit start and end"
+                    )));
+                }
+            };
+            if new_start >= new_end || new_end > total {
+                return Err(DispatchError::OutOfRange {
+                    position: new_end,
+                    seq_len: total,
+                });
+            }
             f.location = Location::simple(new_start..new_end);
         }
         if let Some(k) = kind {
@@ -492,7 +512,7 @@ pub(super) fn apply_update_feature(
         if let Some(s) = strand {
             f.strand = parse_strand(&s);
         }
-        Ok(buf.text.len())
+        Ok(total)
     })?;
     // If this feature is the current selection, re-sync the stored range from the
     // live annotations — `edit_annotations` doesn't reset selection (unlike text
@@ -504,15 +524,18 @@ pub(super) fn apply_update_feature(
         .and_then(|v| v.selection.selected_feature())
         == Some(id)
     {
-        let range = state
+        let span = state
             .workspace
-            .with_buffer(vid, |_, b, ann| ann.get(id).map(|f| f.hull(b.text.len())))
+            .with_buffer(vid, |_, b, ann| {
+                ann.get(id)
+                    .map(|f| (f.selection_span(b.text.len()), b.text.len()))
+            })
             .ok()
             .flatten();
-        if let (Some(r), Some(view)) = (range, state.workspace.view_mut(vid)) {
+        if let (Some((span, buf_len)), Some(view)) = (span, state.workspace.view_mut(vid)) {
             view.selection = ViewSelection::Feature {
                 id,
-                range: Selection::range(r.start, r.end),
+                range: Selection::from_span(span, buf_len),
             };
         }
     }
@@ -687,7 +710,7 @@ pub(super) fn apply_rescan_primer(
                     ))
                 })?;
         let p = ann.primer_mut(id).expect("present — checked just above");
-        p.binding = Some(Span::from_range(best.range));
+        p.binding = Some(best.span);
         p.strand = best.strand;
         Ok(buf.text.len())
     })?;
@@ -1083,7 +1106,7 @@ mod tests {
     fn feature_spans(state: &mut AppState) -> Vec<Range<usize>> {
         state
             .workspace
-            .with_active_buffer(|_, b, ann| ann.iter().map(|f| f.hull(b.text.len())).collect())
+            .with_active_buffer(|_, b, ann| ann.iter().map(|f| f.bounds(b.text.len())).collect())
             .unwrap()
     }
 
@@ -1275,7 +1298,7 @@ mod tests {
             .workspace
             .with_active_buffer(|_, b, ann| {
                 let f = ann.get(id).unwrap();
-                (f.label.clone(), f.hull(b.text.len()))
+                (f.label.clone(), f.bounds(b.text.len()))
             })
             .unwrap();
         assert_eq!(label, "renamed");
@@ -1368,7 +1391,7 @@ mod tests {
             fs.iter()
                 .map(|f| {
                     (
-                        f.hull(len),
+                        f.bounds(len),
                         f.raw_kind.clone(),
                         f.label.clone(),
                         f.strand,
@@ -1537,7 +1560,7 @@ mod tests {
             .workspace
             .with_active_buffer(|_, b, ann| {
                 let f = ann.get(id).unwrap();
-                (f.hull(b.text.len()), f.raw_kind.clone(), f.label.clone())
+                (f.bounds(b.text.len()), f.raw_kind.clone(), f.label.clone())
             })
             .unwrap();
         assert_eq!(range, 4..9);
@@ -1548,7 +1571,7 @@ mod tests {
         s.workspace.undo(vid).unwrap();
         let range = s
             .workspace
-            .with_active_buffer(|_, b, ann| ann.get(id).unwrap().hull(b.text.len()))
+            .with_active_buffer(|_, b, ann| ann.get(id).unwrap().bounds(b.text.len()))
             .unwrap();
         assert_eq!(range, 0..3);
     }
@@ -1560,6 +1583,47 @@ mod tests {
         let err = apply_update_feature(&mut s, None, id, None, None, None, Some(2), Some(99))
             .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn resize_of_wrapping_feature_requires_both_endpoints() {
+        // P5a correct-by-omission: a wrapping (or spliced) feature has no single
+        // linear extent, so a *partial* re-range can't default the missing
+        // endpoint — it's rejected rather than flattened through `0..len`.
+        use seqforge_core::{Location, Span};
+        let mut s = state_with(b"ATGCATGCATGC"); // len 12
+        let id = add_feat(&mut s, 0, 3, "w");
+        let vid = s.workspace.active_view().unwrap().id;
+        // Re-home the feature onto an origin-wrapping span (10..12 ∪ 0..2).
+        s.workspace
+            .edit_annotations(vid, |ann, _buf| {
+                ann.get_mut(id).unwrap().location = Location::from_span(Span::new(10, 4));
+                Ok::<_, DispatchError>(())
+            })
+            .unwrap();
+        // Only `start` given → no linear default for `end` → rejected.
+        let err =
+            apply_update_feature(&mut s, None, id, None, None, None, Some(5), None).unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidInput(_)));
+        // A label-only edit (no re-range) still works on a wrapping feature.
+        apply_update_feature(
+            &mut s,
+            None,
+            id,
+            Some("gene".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // Both endpoints given → redefines to a crisp linear region, succeeds.
+        apply_update_feature(&mut s, None, id, None, None, None, Some(2), Some(6)).unwrap();
+        let span = s
+            .workspace
+            .with_buffer(vid, |_, b, ann| ann.get(id).unwrap().bounds(b.text.len()))
+            .unwrap();
+        assert_eq!(span, 2..6);
     }
 
     #[test]

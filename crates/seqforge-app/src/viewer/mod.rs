@@ -1181,10 +1181,12 @@ impl SequenceView {
                                 cmds,
                                 ViewSelection::Feature {
                                     id: feat.id,
-                                    range: {
-                                        let s = feat.hull(seq_len);
-                                        Selection::range(s.start, s.end)
-                                    },
+                                    // Wrap-aware: an origin-spanning feature selects
+                                    // its two arms, not the whole molecule.
+                                    range: Selection::from_span(
+                                        feat.selection_span(seq_len),
+                                        seq_len,
+                                    ),
                                 },
                             );
                         } else if let Some(hit_idx) = find_hit(&hits, pos, Hit::as_search) {

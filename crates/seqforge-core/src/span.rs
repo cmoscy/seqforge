@@ -158,10 +158,11 @@ impl Span {
         }
     }
 
-    /// Linear bounding hull `[min, max)`. **Lossy** for a wrapping span (returns
+    /// Linear bounding box `[min, max)`. **Lossy** for a wrapping span (returns
     /// `0..L`). Explicit so bounds-only consumers (stacking / LOD) opt in rather
-    /// than getting hull semantics by default.
-    pub fn hull(&self, len_total: usize) -> Range<usize> {
+    /// than getting bounding-box semantics by default; every other consumer wants
+    /// [`Span::linear_pieces`] (lossless) or [`Span::contains`].
+    pub fn bounds(&self, len_total: usize) -> Range<usize> {
         match self.linear_pieces(len_total) {
             Pieces::None => self.start..self.start,
             Pieces::One(r) => r,
@@ -189,7 +190,7 @@ mod tests {
         let s = Span::from_range(3..9);
         assert_eq!(s, Span::new(3, 6));
         assert_eq!(s.linear_pieces(20), Pieces::One(3..9));
-        assert_eq!(s.hull(20), 3..9);
+        assert_eq!(s.bounds(20), 3..9);
         assert!(!s.wraps(20));
         assert_eq!(s.end(20), 9);
     }
@@ -260,13 +261,13 @@ mod tests {
         // len == L but anchored off-origin → covers the whole circle as two runs.
         let s = Span::new(5, 20);
         assert_eq!(s.linear_pieces(20), Pieces::Two(5..20, 0..5));
-        assert_eq!(s.hull(20), 0..20);
+        assert_eq!(s.bounds(20), 0..20);
     }
 
     #[test]
     fn hull_is_lossy_on_wrap() {
-        assert_eq!(Span::new(5, 5).hull(20), 5..10); // non-wrap: exact
-        assert_eq!(Span::new(16, 8).hull(20), 0..20); // wrap: lossy whole molecule
+        assert_eq!(Span::new(5, 5).bounds(20), 5..10); // non-wrap: exact
+        assert_eq!(Span::new(16, 8).bounds(20), 0..20); // wrap: lossy whole molecule
     }
 
     #[test]

@@ -1,9 +1,7 @@
 //! Seed-and-extend primer binding-site find + attachment-state classification
 //! (Phase 1.1). Own result type [`PrimerBinding`] — never [`seqforge_core::SearchHit`].
 
-use std::ops::Range;
-
-use seqforge_core::{Primer, Strand};
+use seqforge_core::{Primer, Span, Strand};
 
 use super::{PrimerDecomposition, decompose_primer};
 use crate::dna::reverse_complement;
@@ -34,7 +32,12 @@ impl Default for AnnealSettings {
 /// mismatch/anchor data).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimerBinding {
-    pub range: Range<usize>,
+    /// Footprint on the template as a wrap-aware [`Span`] (a site crossing the
+    /// origin is one wrapping span, not an `end > len` overflow range). The
+    /// linear thermo engine ([`decompose_primer`] / [`super::anneal_tm`]) derives
+    /// its contiguous `Range` from this at the call boundary — a documented
+    /// linear-engine survivor per the three-tier rule (`docs/architecture.md`).
+    pub span: Span,
     pub strand: Strand,
     pub mismatches: usize,
     pub three_prime_match: bool,
@@ -57,8 +60,9 @@ pub struct PrimerAttachment {
 /// Find all binding sites for `oligo` on `template` via 3'-terminal k-mer seeding
 /// and full-footprint scoring with [`decompose_primer`].
 ///
-/// For circular sequences, pass `circular = true`; wrap-around hits may have
-/// `range.end > template.len()` (same convention as [`crate::find_iupac_matches`]).
+/// For circular sequences, pass `circular = true`; a wrap-around hit is reported
+/// as one wrapping [`Span`] (`span.wraps(template.len())`), not an `end > len`
+/// overflow range.
 pub fn find_primer_binding_sites(
     oligo: &str,
     template: &[u8],
@@ -99,14 +103,13 @@ pub fn find_primer_binding_sites(
     for p in find_exact_matches(search_seq, seed_fwd) {
         let end = p + k;
         let start = end.saturating_sub(oligo_len);
-        let range = report_range(start, oligo_len, template_len, circular);
+        let span = report_span(start, oligo_len, template_len, circular);
         try_add_candidate(
             &mut candidates,
             oligo_str,
-            range,
+            span,
             Strand::Forward,
             template,
-            circular,
             settings,
         );
     }
@@ -114,14 +117,13 @@ pub fn find_primer_binding_sites(
     // Reverse: revcomp(3' k-mer) seeds at `p..p+k`; 3' anchor at `p`.
     for p in find_exact_matches(search_seq, &seed_rev) {
         let start = p;
-        let range = report_range(start, oligo_len, template_len, circular);
+        let span = report_span(start, oligo_len, template_len, circular);
         try_add_candidate(
             &mut candidates,
             oligo_str,
-            range,
+            span,
             Strand::Reverse,
             template,
-            circular,
             settings,
         );
     }
@@ -156,14 +158,14 @@ pub fn classify_attachment(
     if stored_ok {
         let off_target_sites: Vec<_> = all_sites
             .iter()
-            .filter(|s| !same_site(s, &binding_range, primer.strand))
+            .filter(|s| !same_site(s, binding, primer.strand))
             .cloned()
             .collect();
 
         let confirmed = stored_decomp.mismatches == 0
             && all_sites
                 .iter()
-                .any(|s| same_site(s, &binding_range, primer.strand) && s.mismatches == 0);
+                .any(|s| same_site(s, binding, primer.strand) && s.mismatches == 0);
 
         let state = if confirmed {
             AttachmentState::Confirmed
@@ -188,8 +190,8 @@ pub fn classify_attachment(
     }
 }
 
-fn same_site(site: &PrimerBinding, binding: &Range<usize>, strand: Strand) -> bool {
-    site.range == *binding && site.strand == strand
+fn same_site(site: &PrimerBinding, binding: Span, strand: Strand) -> bool {
+    site.span == binding && site.strand == strand
 }
 
 fn three_prime_matches(decomp: &PrimerDecomposition, k: usize) -> bool {
@@ -221,40 +223,34 @@ fn find_exact_matches(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
     hits
 }
 
-/// Map a search position in the (possibly extended) haystack to a reported range.
-fn report_range(
-    start: usize,
-    oligo_len: usize,
-    template_len: usize,
-    circular: bool,
-) -> Range<usize> {
+/// Map a search position in the (possibly extended) haystack to a reported span.
+/// A circular wrap-around site is a [`Span`] whose `start + len > template_len`
+/// (it wraps) — no `end > len` overflow encoding.
+fn report_span(start: usize, oligo_len: usize, template_len: usize, circular: bool) -> Span {
     if circular {
-        let start = start % template_len;
-        start..start + oligo_len
+        Span::new(start % template_len, oligo_len)
     } else {
         let end = (start + oligo_len).min(template_len);
-        let start = end.saturating_sub(oligo_len);
-        start..end
+        Span::from_range(end.saturating_sub(oligo_len)..end)
     }
 }
 
 fn try_add_candidate(
     candidates: &mut Vec<PrimerBinding>,
     oligo: &str,
-    range: Range<usize>,
+    span: Span,
     strand: Strand,
     template: &[u8],
-    circular: bool,
     settings: AnnealSettings,
 ) {
     if candidates
         .iter()
-        .any(|c| c.range == range && c.strand == strand)
+        .any(|c| c.span == span && c.strand == strand)
     {
         return;
     }
 
-    let Some(binding) = score_candidate(oligo, &range, strand, template, circular, settings) else {
+    let Some(binding) = score_candidate(oligo, span, strand, template, settings) else {
         return;
     };
 
@@ -263,26 +259,29 @@ fn try_add_candidate(
 
 fn score_candidate(
     oligo: &str,
-    range: &Range<usize>,
+    span: Span,
     strand: Strand,
     template: &[u8],
-    circular: bool,
     settings: AnnealSettings,
 ) -> Option<PrimerBinding> {
     let template_len = template.len();
     let k = settings.min_three_prime_match.min(oligo.len());
 
+    // Derive the linear binding `Range` the thermo engine needs. A wrapping span
+    // (`start + len > template_len`) reads through the origin, so extend the
+    // template by its tail and index it as one contiguous `start..start+len`.
+    let end = span.start + span.len;
     let extended_storage;
-    let (decomp_template, decomp_binding) = if circular && range.end > template_len {
-        let extend = range.end - template_len;
+    let (decomp_template, decomp_binding) = if end > template_len {
+        let extend = end - template_len;
         extended_storage = template
             .iter()
             .chain(&template[..extend.min(template_len)])
             .copied()
             .collect::<Vec<_>>();
-        (&extended_storage[..], range.clone())
+        (&extended_storage[..], span.start..end)
     } else {
-        (template, range.clone())
+        (template, span.start..end)
     };
 
     let decomp = decompose_primer(oligo, &decomp_binding, strand, decomp_template);
@@ -293,7 +292,7 @@ fn score_candidate(
     }
 
     Some(PrimerBinding {
-        range: range.clone(),
+        span,
         strand,
         mismatches: decomp.mismatches,
         three_prime_match,
@@ -322,7 +321,7 @@ mod tests {
             .iter()
             .find(|s| s.strand == Strand::Forward)
             .expect("forward site");
-        assert_eq!(fwd.range, 2..8);
+        assert_eq!(fwd.span, Span::from_range(2..8));
         assert_eq!(fwd.mismatches, 0);
         assert!(fwd.three_prime_match);
     }
@@ -332,7 +331,9 @@ mod tests {
         // top[2..8] = GCGTAC; oligo with wrong 3' end should not seed with k=4.
         let sites = find_primer_binding_sites("GCGTAT", T, false, settings(4, 4));
         assert!(
-            sites.iter().all(|s| s.range != (2..8) || s.mismatches > 0),
+            sites
+                .iter()
+                .all(|s| s.span != Span::from_range(2..8) || s.mismatches > 0),
             "wrong 3' k-mer must not seed a clean hit at 2..8"
         );
     }
@@ -344,7 +345,7 @@ mod tests {
             .iter()
             .find(|s| s.strand == Strand::Reverse)
             .expect("reverse site");
-        assert_eq!(rev.range, 2..8);
+        assert_eq!(rev.span, Span::from_range(2..8));
         assert_eq!(rev.mismatches, 0);
     }
 
@@ -368,14 +369,12 @@ mod tests {
         assert!(
             strict
                 .iter()
-                .all(|s| !(s.range == (2..8) && s.strand == Strand::Forward)),
+                .all(|s| !(s.span == Span::from_range(2..8) && s.strand == Strand::Forward)),
             "strict settings should drop the 1-mismatch site"
         );
-        assert!(
-            lenient
-                .iter()
-                .any(|s| s.range == (2..8) && s.strand == Strand::Forward && s.mismatches == 1)
-        );
+        assert!(lenient.iter().any(|s| s.span == Span::from_range(2..8)
+            && s.strand == Strand::Forward
+            && s.mismatches == 1));
     }
 
     #[test]
@@ -383,11 +382,34 @@ mod tests {
         // Circular seq where a 6-mer spans the origin (mirrors search.rs).
         let circ = b"AATTCNNNNNNNNNNG"; // len 16
         let sites = find_primer_binding_sites("GAATTC", circ, true, settings(4, 0));
-        let wrap = sites.iter().find(|s| s.range.start == 15);
+        let wrap = sites.iter().find(|s| s.span.start == 15);
         assert!(
             wrap.is_some(),
             "should find wrap-around site; got: {sites:?}"
         );
+        // P5c: the wrap site is one wrapping Span (start 15, len 6 on L=16), not an
+        // `end > len` overflow range.
+        let wrap = wrap.unwrap();
+        assert_eq!(wrap.span, Span::new(15, 6));
+        assert!(wrap.span.wraps(16), "site crosses the origin");
+    }
+
+    #[test]
+    fn wrapping_span_flows_through_same_site_matching() {
+        // P5c representational guarantee: a wrap-around binding is one wrapping
+        // Span that flows through the `same_site`/attached predicate by Span
+        // equality — no `end > len` overflow encoding. (Full across-origin
+        // *thermo* of a stored wrapping binding remains a documented follow-up.)
+        let circ = b"AATTCNNNNNNNNNNG"; // len 16; GAATTC wraps 15..16 ∪ 0..5
+        let sites = find_primer_binding_sites("GAATTC", circ, true, settings(4, 0));
+        let binding = Span::new(15, 6);
+        // Exactly one found site is the wrapping footprint, matched by Span.
+        let matched: Vec<_> = sites
+            .iter()
+            .filter(|s| same_site(s, binding, Strand::Forward))
+            .collect();
+        assert_eq!(matched.len(), 1, "wrap site matched by span: {sites:?}");
+        assert!(matched[0].span.wraps(16));
     }
 
     #[test]
@@ -478,6 +500,6 @@ mod tests {
         let att = classify_attachment(&primer, seq, false, settings(4, 0));
         assert_eq!(att.state, AttachmentState::Confirmed);
         assert_eq!(att.off_target_sites.len(), 1);
-        assert_eq!(att.off_target_sites[0].range, 8..14);
+        assert_eq!(att.off_target_sites[0].span, Span::from_range(8..14));
     }
 }

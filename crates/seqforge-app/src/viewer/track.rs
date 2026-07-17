@@ -255,10 +255,10 @@ pub(crate) fn build_block_layouts(
             if !visibility.visible(FeatureKind::classify(&f.raw_kind), f.id) {
                 continue;
             }
-            let hull = f.hull(seq_len);
-            if hull.start < block_end && hull.end > block_start {
+            let bounds = f.bounds(seq_len);
+            if bounds.start < block_end && bounds.end > block_start {
                 feat_idx_list.push(i);
-                feat_ranges.push((hull.start.max(block_start), hull.end.min(block_end)));
+                feat_ranges.push((bounds.start.max(block_start), bounds.end.min(block_end)));
             }
         }
         let (feat_local_rows, n_feat_rows) = greedy_stack(&feat_ranges);
@@ -1093,7 +1093,7 @@ pub(crate) struct FeatureContext {
 impl FeatureContext {
     /// Build a full context snapshot from a feature (right-click / secondary).
     pub fn from_feature(f: &Feature, len: usize) -> Self {
-        let span = f.hull(len);
+        let span = f.bounds(len);
         FeatureContext {
             id: f.id,
             start: span.start,
@@ -1301,7 +1301,7 @@ mod tests {
         FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
         let expected = clip_range_rect(
-            &ann.by_position(0).unwrap().hull(20),
+            &ann.by_position(0).unwrap().bounds(20),
             0,
             20,
             geom.y0, // row 0

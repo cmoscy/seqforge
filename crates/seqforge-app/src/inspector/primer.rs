@@ -288,8 +288,8 @@ fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCom
                     let label = format!(
                         "{} {}–{} · {tm}{mm}",
                         strand_glyph(site.strand),
-                        site.range.start + 1,
-                        site.range.end,
+                        site.span.start + 1,
+                        site.span.start + site.span.len,
                     );
                     if site.attached {
                         ui.strong(label);
@@ -303,8 +303,8 @@ fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCom
                                     name: None,
                                     sequence: None,
                                     strand: Some(strand_flag(site.strand).to_string()),
-                                    start: Some(site.range.start),
-                                    end: Some(site.range.end),
+                                    start: Some(site.span.start),
+                                    end: Some(site.span.start + site.span.len),
                                     detach: false,
                                     view: None,
                                 }),

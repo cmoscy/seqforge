@@ -131,7 +131,7 @@ pub fn extract(
             if nf.provenance.is_none() {
                 nf.provenance = Some(Provenance {
                     source_doc: source_doc.to_string(),
-                    source_range: f.hull(total),
+                    source_range: f.bounds(total),
                     operation: "extract".to_string(),
                 });
             }
@@ -196,7 +196,7 @@ impl PosMap {
 /// survive. Containment is decided on the feature's **span** (the doc's
 /// trisection); a contained feature keeps its full segmentation.
 fn localize_feature(f: &Feature, map: &PosMap, policy: PartialPolicy) -> Option<Feature> {
-    let span = f.hull(map.total);
+    let span = f.bounds(map.total);
     if map.contains(span.start, span.end) {
         // Every leaf lies inside — shift each into slice coords.
         let base = map.pos(span.start)?; // == span.start - start (contiguous)
@@ -490,7 +490,7 @@ mod tests {
             "src",
         );
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].hull(s.len()), 1..6);
+        assert_eq!(s.features[0].bounds(s.len()), 1..6);
         assert_eq!(s.bytes.len(), 8);
         // Provenance stamped with the original span (the merge lineage key).
         let prov = s.features[0].provenance.as_ref().unwrap();
@@ -523,7 +523,7 @@ mod tests {
             "src",
         );
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].hull(s.len()), 0..3);
+        assert_eq!(s.features[0].bounds(s.len()), 0..3);
         assert_eq!(s.features[0].location.fuzzy_ends(), (true, false));
     }
 
@@ -537,7 +537,7 @@ mod tests {
         let s = extract(TEXT20, &a, wrap, PartialPolicy::DropPartials, "src");
         assert_eq!(s.bytes.len(), 8);
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].hull(s.len()), 1..3);
+        assert_eq!(s.features[0].bounds(s.len()), 1..3);
     }
 
     // ── extract: primer transfer ─────────────────────────────────────────────
@@ -598,7 +598,7 @@ mod tests {
         let ids = place(&mut dst, &slice, 10, Orient::Identity, false, 30);
         assert_eq!(ids.len(), 1);
         let placed = dst.get(ids[0]).unwrap();
-        assert_eq!(placed.hull(30), 11..13);
+        assert_eq!(placed.bounds(30), 11..13);
         assert_ne!(placed.id, FeatureId(0)); // freshly minted
 
         // Pasting the same slice again yields distinct ids (decision 12).
@@ -618,7 +618,7 @@ mod tests {
         let mut dst = ann(vec![], vec![]);
         let ids = place(&mut dst, &slice, 0, Orient::Rev, false, 10);
         let placed = dst.get(ids[0]).unwrap();
-        assert_eq!(placed.hull(10), 6..9);
+        assert_eq!(placed.bounds(10), 6..9);
         assert_eq!(placed.strand, Strand::Reverse);
     }
 
@@ -752,7 +752,7 @@ mod tests {
         );
         let mut dst = ann(vec![], vec![]);
         place(&mut dst, &s, 0, Orient::Identity, false, 30);
-        let spans: Vec<_> = dst.iter().map(|f| f.hull(30)).collect();
+        let spans: Vec<_> = dst.iter().map(|f| f.bounds(30)).collect();
         assert_eq!(spans, vec![3..9, 20..25]);
         assert_eq!(dst.primers().next().unwrap().binding, Some(Span::new(4, 4)));
     }

@@ -314,7 +314,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_insert(&mut b, &mut a, 2, b"CC");
-        assert_eq!(a.features[0].hull(b.text.len()), 7..10);
+        assert_eq!(a.features[0].bounds(b.text.len()), 7..10);
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 5)]);
         apply_insert(&mut b, &mut a, 8, b"CC");
-        assert_eq!(a.features[0].hull(b.text.len()), 2..5);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..5);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 8)]);
         apply_insert(&mut b, &mut a, 5, b"CCC");
-        assert_eq!(a.features[0].hull(b.text.len()), 2..11);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..11);
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_insert(&mut b, &mut a, 5, b"CC");
-        assert_eq!(a.features[0].hull(b.text.len()), 7..10);
+        assert_eq!(a.features[0].bounds(b.text.len()), 7..10);
     }
 
     // ── delete cases (§2) ──────────────────────────────────────────────────────
@@ -352,7 +352,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_delete(&mut b, &mut a, 0, 2);
-        assert_eq!(a.features[0].hull(b.text.len()), 3..6);
+        assert_eq!(a.features[0].bounds(b.text.len()), 3..6);
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 5)]);
         apply_delete(&mut b, &mut a, 7, 9);
-        assert_eq!(a.features[0].hull(b.text.len()), 2..5);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..5);
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 6)]);
         apply_delete(&mut b, &mut a, 4, 8);
-        assert_eq!(a.features[0].hull(b.text.len()), 2..4);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..4);
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(4, 8)]);
         apply_delete(&mut b, &mut a, 2, 6);
-        assert_eq!(a.features[0].hull(b.text.len()), 2..4);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..4);
     }
 
     #[test]
@@ -400,7 +400,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 9)]);
         apply_delete(&mut b, &mut a, 4, 6);
-        assert_eq!(a.features[0].hull(b.text.len()), 2..7);
+        assert_eq!(a.features[0].bounds(b.text.len()), 2..7);
     }
 
     // ── replace (§2: one op, delta shift) ──────────────────────────────────────
@@ -411,7 +411,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(6, 9)]);
         apply_replace(&mut b, &mut a, 2, 4, b"CCCCC");
-        assert_eq!(a.features[0].hull(b.text.len()), 9..12);
+        assert_eq!(a.features[0].bounds(b.text.len()), 9..12);
         assert_eq!(b.text.len(), 13);
     }
 
@@ -421,7 +421,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(6, 9)]);
         apply_replace(&mut b, &mut a, 2, 5, b"C");
-        assert_eq!(a.features[0].hull(b.text.len()), 4..7);
+        assert_eq!(a.features[0].bounds(b.text.len()), 4..7);
     }
 
     // ── primer shift policy (decision 14 / consistency #1) ──────────────────────
