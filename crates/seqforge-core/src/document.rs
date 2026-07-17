@@ -77,7 +77,7 @@ pub enum Strand {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeatureKind {
     Gene,
     Cds,
@@ -177,13 +177,148 @@ pub struct Provenance {
     pub operation: String,
 }
 
+/// GenBank-native feature geometry — a core-owned mirror of
+/// `gb_io::seq::Location` (core cannot depend on the parser crate). Recursive so
+/// it captures the full location grammar losslessly instead of flattening to a
+/// bounding range on import (ROADMAP decision 23; `plans/feature-model.md`).
+///
+/// - [`Location::Simple`] carries `before`/`after` = GenBank `<`/`>` fuzzy
+///   (partial/truncated) markers.
+/// - [`Location::Join`] is a compound location (SnapGene "segments" — a spliced
+///   CDS, an origin-spanning feature on a circular molecule).
+/// - [`Location::Complement`] is retained for round-trip fidelity and future
+///   trans-splicing; in practice a feature's overall strand lives in
+///   [`Feature::strand`] (the authoritative field), and the GenBank mapping
+///   normalizes the outer complement into it. A **mixed-strand** `Join` (inner
+///   complements) is stubbed to single-strand for now.
+///
+/// The bounding hull is the **derived** [`Location::span`] — never stored
+/// (decision 8): the span is a pure function of the location, so storing it
+/// would denormalize with a sync invariant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Location {
+    /// A single contiguous range, optionally fuzzy at either end
+    /// (`before` = `<start`, `after` = `>end`).
+    Simple {
+        range: Range<usize>,
+        before: bool,
+        after: bool,
+    },
+    /// Compound location: ordered segments (introns between them).
+    Join(Vec<Location>),
+    /// Strand wrapper — retained for fidelity/trans-splicing.
+    Complement(Box<Location>),
+}
+
+impl Location {
+    /// A crisp (non-fuzzy) single-range location — the common construction.
+    pub fn simple(range: Range<usize>) -> Self {
+        Location::Simple {
+            range,
+            before: false,
+            after: false,
+        }
+    }
+
+    /// The bounding hull `[min start, max end)` across every segment — the
+    /// derived accessor that replaces `gb_io`'s `find_bounds()` and stands in
+    /// for the old `Feature.range` at the many bounds-only call sites. **Never
+    /// stored** (decision 8).
+    ///
+    /// An empty `Join` (never produced by the mapper) degenerates to `0..0`.
+    pub fn span(&self) -> Range<usize> {
+        match self {
+            Location::Simple { range, .. } => range.clone(),
+            Location::Complement(inner) => inner.span(),
+            Location::Join(parts) => {
+                let mut iter = parts.iter().map(Location::span);
+                match iter.next() {
+                    Some(first) => {
+                        iter.fold(first, |acc, r| acc.start.min(r.start)..acc.end.max(r.end))
+                    }
+                    None => 0..0,
+                }
+            }
+        }
+    }
+
+    /// Ordered leaf ranges (the concrete segments), for opt-in segment-aware
+    /// consumers — multi-segment rendering, GenBank export. Bounds-only
+    /// consumers use [`Location::span`] instead.
+    pub fn segments(&self) -> impl Iterator<Item = &Range<usize>> {
+        let mut out = Vec::new();
+        self.collect_segments(&mut out);
+        out.into_iter()
+    }
+
+    fn collect_segments<'a>(&'a self, out: &mut Vec<&'a Range<usize>>) {
+        match self {
+            Location::Simple { range, .. } => out.push(range),
+            Location::Complement(inner) => inner.collect_segments(out),
+            Location::Join(parts) => {
+                for p in parts {
+                    p.collect_segments(out);
+                }
+            }
+        }
+    }
+
+    /// Fuzzy markers at the spatial ends of the location: `(left, right)` where
+    /// `left` is the `before` (`<`) flag of the lowest-start leaf and `right` is
+    /// the `after` (`>`) flag of the highest-end leaf. Drives the torn-edge
+    /// render at the feature's 5'/3' bounds. `(false, false)` for a crisp
+    /// location.
+    pub fn fuzzy_ends(&self) -> (bool, bool) {
+        let mut leaves: Vec<(&Range<usize>, bool, bool)> = Vec::new();
+        self.collect_leaves(&mut leaves);
+        let left = leaves
+            .iter()
+            .min_by_key(|(r, _, _)| r.start)
+            .map(|(_, before, _)| *before)
+            .unwrap_or(false);
+        let right = leaves
+            .iter()
+            .max_by_key(|(r, _, _)| r.end)
+            .map(|(_, _, after)| *after)
+            .unwrap_or(false);
+        (left, right)
+    }
+
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<(&'a Range<usize>, bool, bool)>) {
+        match self {
+            Location::Simple {
+                range,
+                before,
+                after,
+            } => out.push((range, *before, *after)),
+            Location::Complement(inner) => inner.collect_leaves(out),
+            Location::Join(parts) => {
+                for p in parts {
+                    p.collect_leaves(out);
+                }
+            }
+        }
+    }
+
+    /// True if any leaf is fuzzy (`<`/`>`) — a torn edge to render.
+    pub fn is_fuzzy(&self) -> bool {
+        match self {
+            Location::Simple { before, after, .. } => *before || *after,
+            Location::Complement(inner) => inner.is_fuzzy(),
+            Location::Join(parts) => parts.iter().any(Location::is_fuzzy),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feature {
     /// Session-scoped handle. Never persisted (`#[serde(skip)]`); re-minted
     /// by [`crate::Annotations`] on load. See [`FeatureId`].
     #[serde(skip)]
     pub id: FeatureId,
-    pub range: Range<usize>,
+    /// GenBank-native geometry. The bounding hull is the derived
+    /// [`Feature::span`]; segment-aware code matches on [`Location`] variants.
+    pub location: Location,
     /// Verbatim GenBank feature-type string (the authoritative type).
     /// Display kind is derived via [`FeatureKind::classify`].
     pub raw_kind: String,
@@ -192,6 +327,15 @@ pub struct Feature {
     /// `None` value encodes a flag-style qualifier (`/pseudo`, `/partial`).
     pub qualifiers: BTreeMap<String, Option<String>>,
     pub provenance: Option<Provenance>,
+}
+
+impl Feature {
+    /// The feature's bounding hull `[min start, max end)` — the derived
+    /// accessor that stands in for the old `Feature.range` at every
+    /// bounds-only call site. Segment-aware code reads [`Feature::location`].
+    pub fn span(&self) -> Range<usize> {
+        self.location.span()
+    }
 }
 
 /// An **authored oligo attached relationally** to the template (ROADMAP
@@ -251,5 +395,55 @@ impl Document {
 
     pub fn is_empty(&self) -> bool {
         self.sequence.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    #[test]
+    fn span_of_simple_is_the_range() {
+        assert_eq!(Location::simple(3..9).span(), 3..9);
+    }
+
+    #[test]
+    fn span_of_join_is_the_hull() {
+        let j = Location::Join(vec![Location::simple(30..40), Location::simple(11..20)]);
+        // Hull spans min start .. max end, regardless of segment order.
+        assert_eq!(j.span(), 11..40);
+    }
+
+    #[test]
+    fn span_of_complement_is_inner_span() {
+        let c = Location::Complement(Box::new(Location::simple(5..8)));
+        assert_eq!(c.span(), 5..8);
+    }
+
+    #[test]
+    fn segments_yields_ordered_leaves() {
+        let j = Location::Join(vec![Location::simple(0..3), Location::simple(6..9)]);
+        let segs: Vec<_> = j.segments().cloned().collect();
+        assert_eq!(segs, vec![0..3, 6..9]);
+    }
+
+    #[test]
+    fn fuzzy_ends_reads_spatial_bounds() {
+        // before on the lowest-start leaf, after on the highest-end leaf.
+        let j = Location::Join(vec![
+            Location::Simple {
+                range: 0..3,
+                before: true,
+                after: false,
+            },
+            Location::Simple {
+                range: 6..9,
+                before: false,
+                after: true,
+            },
+        ]);
+        assert_eq!(j.fuzzy_ends(), (true, true));
+        assert!(j.is_fuzzy());
+        assert_eq!(Location::simple(0..3).fuzzy_ends(), (false, false));
     }
 }

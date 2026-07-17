@@ -223,6 +223,10 @@ pub(crate) fn build_block_layouts(
     cut_sites: &[CutSite],
     seq_len: usize,
     style: &Style,
+    // Session-scoped feature-visibility filter: hidden features (by kind/id, e.g.
+    // `source` by default) are excluded here so they reserve no stack row and are
+    // neither painted nor hit-tested.
+    visibility: &super::FeatureVisibility,
     // Height of the global-frame translation band (0 when no frame lanes). Sits
     // between the bottom strand and the annotation bars in every block.
     trans_band_h: f32,
@@ -246,9 +250,15 @@ pub(crate) fn build_block_layouts(
         let mut feat_idx_list: Vec<usize> = Vec::new();
         let mut feat_ranges: Vec<(usize, usize)> = Vec::new();
         for (i, f) in annotations.iter().enumerate() {
-            if f.range.start < block_end && f.range.end > block_start {
+            // Hidden features (source by default, or user-toggled) reserve no
+            // stack row and are thus neither painted nor hit-tested downstream.
+            if !visibility.visible(FeatureKind::classify(&f.raw_kind), f.id) {
+                continue;
+            }
+            let hull = f.span();
+            if hull.start < block_end && hull.end > block_start {
                 feat_idx_list.push(i);
-                feat_ranges.push((f.range.start.max(block_start), f.range.end.min(block_end)));
+                feat_ranges.push((hull.start.max(block_start), hull.end.min(block_end)));
             }
         }
         let (feat_local_rows, n_feat_rows) = greedy_stack(&feat_ranges);
@@ -419,6 +429,10 @@ pub(crate) struct LayoutKey {
     dims: u64,
     cut_fp: u64,
     display: TranslationDisplay,
+    /// Feature visibility is view-derived (an enzyme/primer-style session
+    /// toggle), so it doesn't bump `version` — captured here so a show/hide
+    /// rebuilds the memoized layout.
+    visibility: super::FeatureVisibility,
 }
 
 impl LayoutKey {
@@ -428,6 +442,7 @@ impl LayoutKey {
         style: &Style,
         cut_sites: &[CutSite],
         display: &TranslationDisplay,
+        visibility: &super::FeatureVisibility,
     ) -> Self {
         LayoutKey {
             version,
@@ -436,6 +451,7 @@ impl LayoutKey {
             dims: dims_fingerprint(style),
             cut_fp: cut_fingerprint(cut_sites),
             display: display.clone(),
+            visibility: visibility.clone(),
         }
     }
 }
@@ -499,22 +515,23 @@ pub(crate) fn y_to_block(rel_y: f32, offsets: &[f32]) -> Option<usize> {
     }
 }
 
-/// Clip a feature to the visible slice of a block and return its bar rect.
-/// Returns `None` if the feature doesn't overlap this block at all.
-pub(crate) fn annot_bar_rect(
-    feat: &Feature,
+/// Clip one range to a block's visible slice and return its bar rect, or `None`
+/// if it doesn't overlap. The per-segment primitive behind [`annot_bar_rect`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn clip_range_rect(
+    range: &std::ops::Range<usize>,
     block_start: usize,
     block_end: usize,
-    bar_row_y: f32, // top of the feature's stacked row
+    bar_row_y: f32,
     seq_x0: f32,
     char_width: f32,
     row_h: f32,
 ) -> Option<Rect> {
-    if feat.range.end <= block_start || feat.range.start >= block_end {
+    if range.end <= block_start || range.start >= block_end {
         return None;
     }
-    let col_s = feat.range.start.max(block_start) - block_start;
-    let col_e = feat.range.end.min(block_end) - block_start;
+    let col_s = range.start.max(block_start) - block_start;
+    let col_e = range.end.min(block_end) - block_start;
     Some(Rect::from_min_size(
         Pos2::new(seq_x0 + col_s as f32 * char_width, bar_row_y + 1.0),
         Vec2::new((col_e - col_s) as f32 * char_width, row_h - 2.0),
@@ -1073,10 +1090,11 @@ pub(crate) struct FeatureContext {
 impl FeatureContext {
     /// Build a full context snapshot from a feature (right-click / secondary).
     pub fn from_feature(f: &Feature) -> Self {
+        let span = f.span();
         FeatureContext {
             id: f.id,
-            start: f.range.start,
-            end: f.range.end,
+            start: span.start,
+            end: span.end,
             strand: f.strand,
             label: f.label.clone(),
             is_cds: matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds),
@@ -1185,7 +1203,7 @@ mod tests {
     fn feat(range: std::ops::Range<usize>) -> Feature {
         Feature {
             id: Default::default(),
-            range,
+            location: seqforge_core::Location::simple(range),
             raw_kind: "misc_feature".to_string(),
             label: "f".to_string(),
             strand: Strand::Forward,
@@ -1194,10 +1212,42 @@ mod tests {
         }
     }
 
+    fn feat_kind(range: std::ops::Range<usize>, raw_kind: &str) -> Feature {
+        Feature {
+            raw_kind: raw_kind.to_string(),
+            ..feat(range)
+        }
+    }
+
+    /// Feature-visibility filter: `source` is excluded from the layout by default
+    /// (reserves no stack row), and returns when shown.
+    #[test]
+    fn build_block_layouts_hides_source_by_default() {
+        let style = test_style();
+        // One `source` (whole molecule) + one real feature.
+        let ann = Annotations::new(vec![feat_kind(0..20, "source"), feat_kind(2..8, "CDS")]);
+
+        let default_vis = crate::viewer::FeatureVisibility::default();
+        let (layouts, _) = build_block_layouts(&ann, &[], 20, &style, &default_vis, 0.0, None);
+        assert_eq!(
+            layouts[0].feat_rows.len(),
+            1,
+            "source hidden by default — only the CDS is laid out"
+        );
+
+        // Un-hide source (remove the kind rule) → both features are laid out.
+        let show_all = crate::viewer::FeatureVisibility {
+            hidden_kinds: Default::default(),
+            ..Default::default()
+        };
+        let (layouts, _) = build_block_layouts(&ann, &[], 20, &style, &show_all, 0.0, None);
+        assert_eq!(layouts[0].feat_rows.len(), 2, "source shown when un-hidden");
+    }
+
     /// Co-location invariant: a track's `hit_rects` rect is the *same* geometry
-    /// its `paint` uses. For the Features track that geometry is `annot_bar_rect`
-    /// at the feature's stacked row — so the emitted hit rect must equal an
-    /// independent `annot_bar_rect` of the same inputs.
+    /// its `paint` uses. For the Features track that geometry is one
+    /// `clip_range_rect` per `Location` segment — for a plain single-segment
+    /// feature, the emitted hit rect equals a `clip_range_rect` of its span.
     #[test]
     fn features_hit_rect_equals_painted_bar_rect() {
         let style = test_style();
@@ -1247,8 +1297,8 @@ mod tests {
         let mut hits = Vec::new();
         FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
-        let expected = annot_bar_rect(
-            &ann.by_position(0).unwrap().clone(),
+        let expected = clip_range_rect(
+            &ann.by_position(0).unwrap().span(),
             0,
             20,
             geom.y0, // row 0
@@ -1262,6 +1312,77 @@ mod tests {
             "hit rect must equal the painted bar rect"
         );
         assert!(matches!(hits[0].1, Hit::Feature(0)));
+    }
+
+    /// An origin-spanning `Join` (arms at the two ends of the linear layout)
+    /// emits a hit rect **per arm** and nothing across the middle — so a click
+    /// between the arms no longer selects it, and it never hit-tests full-width.
+    #[test]
+    fn features_hit_rects_are_per_segment_not_hull() {
+        let style = test_style();
+        let theme = crate::config::Theme::default();
+        // ori-shaped: join(16..20, 0..4) on a length-20 molecule, one block wide.
+        let ori = Feature {
+            location: seqforge_core::Location::Join(vec![
+                seqforge_core::Location::simple(16..20),
+                seqforge_core::Location::simple(0..4),
+            ]),
+            ..feat(0..20)
+        };
+        let ann = Annotations::new(vec![ori]);
+        let layout = BlockLayout {
+            feat_rows: vec![(0, 0)],
+            feat_row_offsets: vec![0.0],
+            feat_band_h: 14.0,
+            ..Default::default()
+        };
+        let ctx = BlockCtx {
+            block_idx: 0,
+            block_start: 0,
+            block_end: 20,
+            seq: b"ACGTACGTACGTACGTACGT",
+            seq_len: 20,
+            render_ann: &ann,
+            primer_decomps: &[],
+            primer_states: &[],
+            primer_display: crate::viewer::PrimerDisplay::default(),
+            cut_sites: &[],
+            methyl_states: &[],
+            search_hits: &[],
+            trans_cache: None,
+            show_orfs: false,
+            theme: &theme,
+            style: &style,
+            staging: false,
+            added: None,
+            deleted: None,
+            selection: None,
+            selected_feature: None,
+            selected_primer: None,
+            blink_on: false,
+            hovered_cut_site: None,
+            hover_footprint: None,
+            layout: &layout,
+        };
+        let geom = BlockGeom {
+            y0: 100.0,
+            seq_x0: 10.0,
+            rect_min_x: 0.0,
+            strand_top_y: 0.0,
+            strand_bot_y: 0.0,
+        };
+        let mut hits = Vec::new();
+        FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
+        // Two arms → two hit rects; neither spans the whole 20-col block.
+        assert_eq!(hits.len(), 2, "one hit rect per arm");
+        let full_width = 20.0 * style.char_width;
+        for (r, _) in &hits {
+            assert!(
+                r.width() < full_width,
+                "no arm hit rect spans the whole molecule (was {})",
+                r.width()
+            );
+        }
     }
 
     fn primer(binding: std::ops::Range<usize>, strand: Strand) -> Primer {
@@ -1320,7 +1441,8 @@ mod tests {
         let theme = crate::config::Theme::default();
         let mut ann = Annotations::new(vec![]);
         let pid = ann.add_primer(primer(2..8, Strand::Forward));
-        let (layouts, _off) = build_block_layouts(&ann, &[], 20, &style, 0.0, None);
+        let (layouts, _off) =
+            build_block_layouts(&ann, &[], 20, &style, &Default::default(), 0.0, None);
         let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
         let geom = BlockGeom {
             y0: 100.0,
@@ -1362,7 +1484,8 @@ mod tests {
             binding: None,
             ..primer(0..6, Strand::Forward)
         });
-        let (layouts, _off) = build_block_layouts(&ann, &[], 20, &style, 0.0, None);
+        let (layouts, _off) =
+            build_block_layouts(&ann, &[], 20, &style, &Default::default(), 0.0, None);
         let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
         let geom = BlockGeom {
             y0: 0.0,
@@ -1386,7 +1509,8 @@ mod tests {
         let style = test_style();
         let theme = crate::config::Theme::default();
         let ann = Annotations::new(vec![feat(1..30), feat(2..5)]);
-        let (layouts, _off) = build_block_layouts(&ann, &[], 40, &style, 0.0, None);
+        let (layouts, _off) =
+            build_block_layouts(&ann, &[], 40, &style, &Default::default(), 0.0, None);
         let layout = &layouts[0];
         let ctx = BlockCtx {
             block_idx: 0,
@@ -1449,21 +1573,28 @@ mod tests {
             cut_pos: 1,
             bottom_cut_pos: 5,
         }];
-        let base = LayoutKey::new(3, 100, &style, &cuts, &display);
+        let vis = crate::viewer::FeatureVisibility::default();
+        let base = LayoutKey::new(3, 100, &style, &cuts, &display, &vis);
         // Identical inputs → equal (cache hit).
-        assert_eq!(base, LayoutKey::new(3, 100, &style, &cuts, &display));
+        assert_eq!(base, LayoutKey::new(3, 100, &style, &cuts, &display, &vis));
         // Version bump (a sequence or annotation edit).
-        assert_ne!(base, LayoutKey::new(4, 100, &style, &cuts, &display));
+        assert_ne!(base, LayoutKey::new(4, 100, &style, &cuts, &display, &vis));
         // Cut-site set change (enzyme toggle — doesn't bump version).
-        assert_ne!(base, LayoutKey::new(3, 100, &style, &[], &display));
+        assert_ne!(base, LayoutKey::new(3, 100, &style, &[], &display, &vis));
         // Wrap width change (resize).
         let mut narrow = test_style();
         narrow.line_width = 10;
-        assert_ne!(base, LayoutKey::new(3, 100, &narrow, &cuts, &display));
+        assert_ne!(base, LayoutKey::new(3, 100, &narrow, &cuts, &display, &vis));
         // Translation toggle (affects which features get a CDS sub-row).
         let mut d2 = TranslationDisplay::default();
         d2.frames[0] = true;
-        assert_ne!(base, LayoutKey::new(3, 100, &style, &cuts, &d2));
+        assert_ne!(base, LayoutKey::new(3, 100, &style, &cuts, &d2, &vis));
+        // Feature-visibility toggle (show/hide — doesn't bump version).
+        let vis2 = crate::viewer::FeatureVisibility {
+            show_all: false,
+            ..Default::default()
+        };
+        assert_ne!(base, LayoutKey::new(3, 100, &style, &cuts, &display, &vis2));
     }
 
     #[test]

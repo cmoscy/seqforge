@@ -28,8 +28,8 @@ use std::sync::{Arc, RwLock};
 use std::ops::Range;
 
 use seqforge_core::{
-    Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Selection, View,
-    ViewId, ViewKind, ViewSelection, mutations,
+    Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Orient, Selection,
+    SeqSlice, View, ViewId, ViewKind, ViewSelection, mutations, transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -486,6 +486,59 @@ impl Workspace {
         history.record(range.start, old_bytes, new_bytes.to_vec(), ann, kind);
         mutations::apply_splice(&mut buf, ann, range.clone(), new_bytes);
         let cursor = range.start + new_bytes.len();
+        drop(buf);
+
+        if let Some(view) = self.views.get_mut(&view_id) {
+            view.selection = ViewSelection::Text(Selection::cursor(cursor));
+        }
+        Ok(())
+    }
+
+    /// Paste an annotated [`SeqSlice`] at `pos` in **one undo transaction**: the
+    /// slice's bytes are spliced in (shifting existing annotations to make room),
+    /// then its carried features/primers are re-homed via [`transport::place`]
+    /// (fresh ids, decision 12; provenance-gated `merge`). The history entry
+    /// snapshots annotations *before* the splice, so undo restores both the bytes
+    /// and the placed annotations for free.
+    ///
+    /// This is the copy/paste consumer of the transport primitive; PCR and
+    /// ligation reuse `transport::place` with different `orient`/`merge`.
+    pub fn paste_slice(
+        &mut self,
+        view_id: ViewId,
+        pos: usize,
+        slice: &SeqSlice,
+        orient: Orient,
+        merge: bool,
+    ) -> Result<(), DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+
+        if pos > buf.text.len() {
+            return Err(DispatchError::OutOfRange {
+                position: pos,
+                seq_len: buf.text.len(),
+            });
+        }
+
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        // Snapshot annotations before the splice + place; the reverse delta is a
+        // plain insertion at `pos`.
+        history.record(pos, Vec::new(), slice.bytes.clone(), ann, EditKind::Other);
+        mutations::apply_splice(&mut buf, ann, pos..pos, &slice.bytes);
+        transport::place(ann, slice, pos, orient, merge);
+        let cursor = pos + slice.bytes.len();
         drop(buf);
 
         if let Some(view) = self.views.get_mut(&view_id) {

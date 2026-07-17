@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 
-use crate::{Annotations, Buffer, Strand};
+use crate::{Annotations, Buffer, Location, Strand};
 
 /// Replace `buf.text[range]` with `new_bytes`, shift features per the §2
 /// policy, bump `version`, and mark the buffer dirty.
@@ -81,50 +81,92 @@ pub fn apply_replace(
 /// is the §2 delete policy on `[start, start+removed)` followed by a
 /// right-shift of everything at/after `start` by the net delta. Features
 /// fully inside the removed region are dropped.
+///
+/// The policy applies **per segment** of a feature's [`Location`]: each leaf
+/// range is shifted/clamped independently and dropped if it collapses; a
+/// feature is dropped only when *every* leaf collapses. For the common
+/// single-`Simple` feature this is exactly the pre-`Location` behavior.
 fn shift_features(ann: &mut Annotations, start: usize, removed: usize, inserted: usize) {
+    ann.features.retain_mut(
+        |f| match shift_location(&f.location, start, removed, inserted) {
+            Some(loc) => {
+                f.location = loc;
+                true
+            }
+            None => false,
+        },
+    );
+}
+
+/// Apply the splice-shift policy to one range. Returns the shifted range, or
+/// `None` if it collapses (fully inside the removed region, or a straddle whose
+/// body is entirely cut) — the caller drops it.
+///
+/// This is the coordinate math the transport layer also reuses.
+pub(crate) fn shift_range(
+    r: &Range<usize>,
+    start: usize,
+    removed: usize,
+    inserted: usize,
+) -> Option<Range<usize>> {
     let end = start + removed; // end of the removed region
     let delta = inserted as isize - removed as isize;
+    let (fs, fe) = (r.start, r.end);
 
-    ann.features.retain_mut(|f| {
-        let (fs, fe) = (f.range.start, f.range.end);
+    // Fully left of the edit — untouched.
+    if fe <= start {
+        return Some(fs..fe);
+    }
+    // Fully right of the removed region — shift both ends by delta.
+    if fs >= end {
+        return Some((fs as isize + delta) as usize..(fe as isize + delta) as usize);
+    }
+    // Fully inside the removed region — destroyed.
+    if fs >= start && fe <= end {
+        return None;
+    }
+    // Straddles: clamp the overlap to the edit point, apply delta at/after `end`.
+    let new_start = fs.min(start);
+    let new_end = if fe > end {
+        (fe as isize + delta) as usize
+    } else {
+        start // tail cut — clamp to the edit point
+    };
+    (new_start < new_end).then_some(new_start..new_end)
+}
 
-        // Fully left of the edit — untouched.
-        if fe <= start {
-            return true;
+/// Apply the splice-shift policy recursively over a [`Location`]. Returns the
+/// shifted location, or `None` if every segment collapses.
+fn shift_location(
+    loc: &Location,
+    start: usize,
+    removed: usize,
+    inserted: usize,
+) -> Option<Location> {
+    match loc {
+        Location::Simple {
+            range,
+            before,
+            after,
+        } => shift_range(range, start, removed, inserted).map(|range| Location::Simple {
+            range,
+            before: *before,
+            after: *after,
+        }),
+        Location::Complement(inner) => shift_location(inner, start, removed, inserted)
+            .map(|l| Location::Complement(Box::new(l))),
+        Location::Join(parts) => {
+            let mut survivors: Vec<Location> = parts
+                .iter()
+                .filter_map(|p| shift_location(p, start, removed, inserted))
+                .collect();
+            match survivors.len() {
+                0 => None,
+                1 => Some(survivors.pop().unwrap()),
+                _ => Some(Location::Join(survivors)),
+            }
         }
-
-        // Fully right of the removed region — shift both ends by delta.
-        if fs >= end {
-            f.range.start = (fs as isize + delta) as usize;
-            f.range.end = (fe as isize + delta) as usize;
-            return true;
-        }
-
-        // From here the feature overlaps the removed region `[start, end)`.
-
-        // Fully inside the removed region — destroyed.
-        if fs >= start && fe <= end {
-            return false;
-        }
-
-        // Spans / straddles the removed region. Clamp the overlap to the
-        // edit point, then apply delta to whatever lies at/after `end`.
-        let new_start = if fs < start { fs } else { start };
-        // Portion of the feature at/after the removed region keeps its
-        // length and moves by delta; the removed-overlap collapses to `start`.
-        let new_end = if fe > end {
-            (fe as isize + delta) as usize
-        } else {
-            // fe is within (start, end] — the tail was cut; clamp to start.
-            start
-        };
-
-        f.range.start = new_start;
-        f.range.end = new_end.max(new_start);
-        // A straddle that collapses to an empty range (e.g. the whole
-        // feature body was removed) is dropped.
-        f.range.start < f.range.end
-    });
+    }
 }
 
 /// Apply the **primer**-specific shift policy for a splice (ROADMAP decision 14;
@@ -193,7 +235,7 @@ fn shift_primers(ann: &mut Annotations, start: usize, removed: usize, inserted: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Feature, Primer, Strand, Topology};
+    use crate::{Feature, Location, Primer, Strand, Topology};
     use std::collections::BTreeMap;
 
     fn buf(len: usize) -> Buffer {
@@ -203,7 +245,7 @@ mod tests {
     fn feat(start: usize, end: usize) -> Feature {
         Feature {
             id: Default::default(),
-            range: start..end,
+            location: Location::simple(start..end),
             raw_kind: "misc_feature".into(),
             label: "f".into(),
             strand: Strand::Forward,
@@ -261,7 +303,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_insert(&mut b, &mut a, 2, b"CC");
-        assert_eq!(a.features[0].range, 7..10);
+        assert_eq!(a.features[0].span(), 7..10);
     }
 
     #[test]
@@ -270,7 +312,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 5)]);
         apply_insert(&mut b, &mut a, 8, b"CC");
-        assert_eq!(a.features[0].range, 2..5);
+        assert_eq!(a.features[0].span(), 2..5);
     }
 
     #[test]
@@ -279,7 +321,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 8)]);
         apply_insert(&mut b, &mut a, 5, b"CCC");
-        assert_eq!(a.features[0].range, 2..11);
+        assert_eq!(a.features[0].span(), 2..11);
     }
 
     #[test]
@@ -288,7 +330,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_insert(&mut b, &mut a, 5, b"CC");
-        assert_eq!(a.features[0].range, 7..10);
+        assert_eq!(a.features[0].span(), 7..10);
     }
 
     // ── delete cases (§2) ──────────────────────────────────────────────────────
@@ -299,7 +341,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(5, 8)]);
         apply_delete(&mut b, &mut a, 0, 2);
-        assert_eq!(a.features[0].range, 3..6);
+        assert_eq!(a.features[0].span(), 3..6);
     }
 
     #[test]
@@ -308,7 +350,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 5)]);
         apply_delete(&mut b, &mut a, 7, 9);
-        assert_eq!(a.features[0].range, 2..5);
+        assert_eq!(a.features[0].span(), 2..5);
     }
 
     #[test]
@@ -327,7 +369,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 6)]);
         apply_delete(&mut b, &mut a, 4, 8);
-        assert_eq!(a.features[0].range, 2..4);
+        assert_eq!(a.features[0].span(), 2..4);
     }
 
     #[test]
@@ -337,7 +379,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(4, 8)]);
         apply_delete(&mut b, &mut a, 2, 6);
-        assert_eq!(a.features[0].range, 2..4);
+        assert_eq!(a.features[0].span(), 2..4);
     }
 
     #[test]
@@ -347,7 +389,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(2, 9)]);
         apply_delete(&mut b, &mut a, 4, 6);
-        assert_eq!(a.features[0].range, 2..7);
+        assert_eq!(a.features[0].span(), 2..7);
     }
 
     // ── replace (§2: one op, delta shift) ──────────────────────────────────────
@@ -358,7 +400,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(6, 9)]);
         apply_replace(&mut b, &mut a, 2, 4, b"CCCCC");
-        assert_eq!(a.features[0].range, 9..12);
+        assert_eq!(a.features[0].span(), 9..12);
         assert_eq!(b.text.len(), 13);
     }
 
@@ -368,7 +410,7 @@ mod tests {
         let mut b = buf(10);
         let mut a = ann(vec![feat(6, 9)]);
         apply_replace(&mut b, &mut a, 2, 5, b"C");
-        assert_eq!(a.features[0].range, 4..7);
+        assert_eq!(a.features[0].span(), 4..7);
     }
 
     // ── primer shift policy (decision 14 / consistency #1) ──────────────────────

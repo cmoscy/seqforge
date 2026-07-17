@@ -171,10 +171,12 @@ pub struct AppState {
     /// the `ReloadConfig` command. Wrapped in `Arc` so widgets cheaply
     /// clone a per-frame reference.
     pub config: Arc<Config>,
-    /// In-memory clipboard for Cut/Copy/Paste (editor v0.2). Headless- and
-    /// test-safe fallback holding the most recently cut/copied sequence bytes;
-    /// GUI clipboard interop (arboard) is layered on separately.
-    pub(crate) clipboard: Option<Vec<u8>>,
+    /// In-memory clipboard for Cut/Copy/Paste (editor v0.2). Holds an annotated
+    /// [`SeqSlice`] — bytes **plus** carried features/primers (feature-model
+    /// track F1) — so paste re-homes annotations, not just bytes. The `.bytes()`
+    /// projection feeds byte-only consumers (staged-paste preview, GUI clipboard
+    /// interop via arboard, which is layered on separately).
+    pub(crate) clipboard: Option<seqforge_core::SeqSlice>,
     /// Set while a Save-As file dialog is open, naming the view to write on
     /// pick. Discriminates the save-mode dialog from an open-mode one in the
     /// shared file-dialog pick handler. Cleared on pick or cancel.
@@ -1416,8 +1418,12 @@ impl eframe::App for SeqForgeApp {
                         if !matches!(FeatureKind::classify(&f.raw_kind), FeatureKind::Cds) {
                             return None;
                         }
-                        let end = f.range.end.min(buf.text.len());
-                        if f.range.start >= end {
+                        // Hull translation (behavior-preserving): a joined CDS
+                        // still translates through its span. Segment-aware CDS
+                        // translation is a follow-up (feature-model track F0 note).
+                        let span = f.span();
+                        let end = span.end.min(buf.text.len());
+                        if span.start >= end {
                             return None;
                         }
                         let codon_start = f
@@ -1428,7 +1434,7 @@ impl eframe::App for SeqForgeApp {
                             .filter(|n| (1..=3).contains(n))
                             .unwrap_or(1);
                         let protein = seqforge_bio::translate(
-                            &buf.text[f.range.start..end],
+                            &buf.text[span.start..end],
                             f.strand,
                             codon_start,
                         );
@@ -1495,7 +1501,7 @@ impl eframe::App for SeqForgeApp {
                     // Staged-edit indicator (Phase 13.6). Lives here rather than
                     // floating in the canvas; the accent colour marks the active
                     // staging mode. The track-changes diff wash stays in-canvas.
-                    let clipboard = self.state.clipboard.as_deref();
+                    let clipboard = self.state.clipboard.as_ref().map(|s| s.bytes());
                     if let Some(summary) = self
                         .state
                         .workspace
@@ -1689,7 +1695,7 @@ impl eframe::App for SeqForgeApp {
                             pending_commands,
                             overlays,
                             focus,
-                            clipboard: clipboard.as_deref(),
+                            clipboard: clipboard.as_ref().map(|s| s.bytes()),
                             config: config.clone(),
                         },
                     );

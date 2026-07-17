@@ -297,8 +297,10 @@ pub(crate) fn build_translation_cache(
                 .filter(|n| (1..=3).contains(n))
                 .unwrap_or(1);
             FeatureAa {
+                // Hull translation (behavior-preserving); segment-aware CDS
+                // translation is a feature-model F0 follow-up.
                 id: f.id,
-                glyphs: cds_glyphs(seq, f.range.clone(), f.strand, cs),
+                glyphs: cds_glyphs(seq, f.span(), f.strand, cs),
             }
         })
         .collect();
@@ -354,7 +356,7 @@ mod tests {
         let mut ann = seqforge_core::Annotations::new(vec![]);
         let id = ann.add(Feature {
             id: Default::default(),
-            range: 0..9,
+            location: seqforge_core::Location::simple(0..9),
             raw_kind: "misc_feature".to_string(),
             label: "region".to_string(),
             strand: Strand::Forward,
@@ -411,7 +413,7 @@ mod tests {
         let mut ann = seqforge_core::Annotations::new(vec![]);
         let mk = |range: std::ops::Range<usize>| Feature {
             id: Default::default(),
-            range,
+            location: seqforge_core::Location::simple(range),
             raw_kind: "CDS".to_string(),
             label: "c".to_string(),
             strand: Strand::Forward,

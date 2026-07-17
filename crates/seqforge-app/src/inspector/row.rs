@@ -74,6 +74,38 @@ pub(super) fn remove_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
     resp
 }
 
+/// A per-row map-visibility toggle (Phosphor eye / eye-slash). `visible` drives
+/// the icon; the caller flips the state on `clicked()`. Mirrors [`remove_button`]
+/// — one glyph, one placement, one logic — but is reversible view state, not a
+/// remove. A hidden row shows the crossed-out eye, subdued.
+pub(super) fn visibility_button(ui: &mut egui::Ui, visible: bool) -> egui::Response {
+    use egui_phosphor::regular;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    let icon = if visible {
+        regular::EYE
+    } else {
+        regular::EYE_SLASH
+    };
+    let color = if visible {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(14.0),
+        color,
+    );
+    resp
+}
+
 /// Paint a primer state dot (filled for Confirmed/Drifted, hollow ring for
 /// Detached), coloured by tone. Painted rather than a font glyph because the
 /// bundled font tofus ●◐○, and colour is the primary signal for a status dot.

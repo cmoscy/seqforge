@@ -23,8 +23,8 @@
 use std::ops::Range;
 
 use seqforge_core::{
-    DispatchError, EditKind, Feature, FeatureId, Primer, PrimerId, Selection, Strand, ViewId,
-    ViewSelection, ViewerResponse,
+    DispatchError, EditKind, Feature, FeatureId, Location, Orient, PartialPolicy, Primer, PrimerId,
+    Selection, SeqSlice, Strand, ViewId, ViewSelection, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -132,6 +132,33 @@ fn read_slice(
 }
 
 /// The buffer length after an edit, for the `Edited` response.
+/// Extract `range` into an annotated [`SeqSlice`] (bytes + features + primers in
+/// local coords) — the clipboard payload for a region copy/cut. `DropPartials`
+/// mirrors the Biopython/pydna `record[a:b]` default; circularity comes from the
+/// buffer topology so a selection wrapping the origin carries correctly.
+fn extract_region(
+    state: &mut AppState,
+    vid: ViewId,
+    range: Range<usize>,
+) -> Result<SeqSlice, DispatchError> {
+    state.workspace.with_buffer(vid, |_v, buf, ann| {
+        if range.end > buf.text.len() {
+            return Err(DispatchError::OutOfRange {
+                position: range.end,
+                seq_len: buf.text.len(),
+            });
+        }
+        Ok(seqforge_core::transport::extract(
+            &buf.text,
+            ann,
+            range,
+            buf.is_circular(),
+            PartialPolicy::DropPartials,
+            &buf.name,
+        ))
+    })?
+}
+
 fn buffer_len(state: &mut AppState, vid: ViewId) -> usize {
     state
         .workspace
@@ -239,11 +266,18 @@ pub(super) fn apply_copy(
         .ok()
         .flatten();
 
+    // A selected-primer copy carries only the authored oligo bytes (no template
+    // features/primers ride along — it's a reagent, not a region). A region copy
+    // carries the full annotated slice (features + primers) via `extract`.
     let slice = match oligo {
-        Some(o) => o,
-        None => read_slice(state, vid, start..end)?,
+        Some(bytes) => SeqSlice {
+            bytes,
+            features: Vec::new(),
+            primers: Vec::new(),
+        },
+        None => extract_region(state, vid, start..end)?,
     };
-    let len = slice.len();
+    let len = slice.bytes.len();
     state.clipboard = Some(slice);
     // Copy doesn't mutate the buffer — report the copied length, not a buffer
     // change, and record no history.
@@ -260,7 +294,9 @@ pub(super) fn apply_cut(
     end: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    let slice = read_slice(state, vid, start..end)?;
+    // Carry the annotated slice, then delete the region (which shifts/drops the
+    // remaining annotations via the splice policy).
+    let slice = extract_region(state, vid, start..end)?;
     state.clipboard = Some(slice);
     state
         .workspace
@@ -274,17 +310,20 @@ pub(super) fn apply_paste(
     pos: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
-    let bytes = state
+    let slice = state
         .clipboard
         .clone()
         .ok_or_else(|| DispatchError::InvalidInput("clipboard is empty".into()))?;
-    if bytes.is_empty() {
+    if slice.bytes.is_empty() {
         return Err(DispatchError::InvalidInput("clipboard is empty".into()));
     }
     // A paste is its own undo unit (`Other`) — never coalesces with typing.
+    // Bytes + carried features/primers land in one transaction; `merge=true`
+    // reunites same-lineage pieces (provenance-gated — ordinary pastes don't
+    // fuse). Copy/paste is always `Identity`; `Rev` is first used at ligation.
     state
         .workspace
-        .edit(vid, EditKind::Other, pos..pos, &bytes)?;
+        .paste_slice(vid, pos, &slice, Orient::Identity, true)?;
     edited(buffer_len(state, vid))
 }
 
@@ -349,7 +388,7 @@ pub(super) fn apply_add_feature(
         }
         let id = ann.add(Feature {
             id: Default::default(), // reassigned by `add`
-            range: start..end,
+            location: Location::simple(start..end),
             raw_kind: kind,
             label,
             strand: parse_strand(&strand),
@@ -417,16 +456,23 @@ pub(super) fn apply_update_feature(
         let cur = ann
             .get(id)
             .ok_or_else(|| DispatchError::InvalidInput(format!("no feature with id {id}")))?;
-        let new_start = start.unwrap_or(cur.range.start);
-        let new_end = end.unwrap_or(cur.range.end);
+        let cur_span = cur.span();
+        let new_start = start.unwrap_or(cur_span.start);
+        let new_end = end.unwrap_or(cur_span.end);
         if new_start >= new_end || new_end > buf.text.len() {
             return Err(DispatchError::OutOfRange {
                 position: new_end,
                 seq_len: buf.text.len(),
             });
         }
+        // Rebuild the geometry to a single crisp range only when the caller
+        // actually re-ranged the feature; a label/kind/strand-only edit must not
+        // flatten a multi-segment `Join` to its hull.
+        let re_range = start.is_some() || end.is_some();
         let f = ann.get_mut(id).expect("present — checked just above");
-        f.range = new_start..new_end;
+        if re_range {
+            f.location = Location::simple(new_start..new_end);
+        }
         if let Some(k) = kind {
             f.raw_kind = k;
         }
@@ -450,7 +496,7 @@ pub(super) fn apply_update_feature(
     {
         let range = state
             .workspace
-            .with_buffer(vid, |_, _, ann| ann.get(id).map(|f| f.range.clone()))
+            .with_buffer(vid, |_, _, ann| ann.get(id).map(|f| f.span()))
             .ok()
             .flatten();
         if let (Some(r), Some(view)) = (range, state.workspace.view_mut(vid)) {
@@ -770,7 +816,16 @@ pub(super) fn apply_save_as(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqforge_core::{BioOps, Feature, Primer, Topology, ViewKind, ViewSelection};
+    use seqforge_core::{BioOps, Feature, Primer, SeqSlice, Topology, ViewKind, ViewSelection};
+
+    /// A bytes-only clipboard slice (no carried annotations) for paste tests.
+    fn clip(bytes: &[u8]) -> SeqSlice {
+        SeqSlice {
+            bytes: bytes.to_vec(),
+            features: Vec::new(),
+            primers: Vec::new(),
+        }
+    }
 
     /// Headless `AppState` with one active view over `seq`.
     fn state_with(seq: &[u8]) -> AppState {
@@ -858,7 +913,10 @@ mod tests {
         let mut s = state_with(b"ATGCAA");
         apply_cut(&mut s, None, 2, 4).unwrap();
         assert_eq!(text(&mut s), b"ATAA");
-        assert_eq!(s.clipboard.as_deref(), Some(b"GC".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"GC".as_slice())
+        );
     }
 
     #[test]
@@ -879,7 +937,10 @@ mod tests {
         let mut s = state_with(b"ATGC");
         let resp = apply_copy(&mut s, None, 0, 2).unwrap();
         assert_eq!(text(&mut s), b"ATGC");
-        assert_eq!(s.clipboard.as_deref(), Some(b"AT".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"AT".as_slice())
+        );
         assert!(matches!(
             resp,
             Some(ViewerResponse::Edited { changed: false, .. })
@@ -910,12 +971,18 @@ mod tests {
 
         // Copying the primer's exact footprint copies the oligo, not "TGC".
         apply_copy(&mut s, None, 5, 8).unwrap();
-        assert_eq!(s.clipboard.as_deref(), Some(b"GCA".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"GCA".as_slice())
+        );
 
         // A copy over a *different* range stays a literal template slice — the
         // gate is `range == binding`, so CLI/agent range copies are unaffected.
         apply_copy(&mut s, None, 0, 3).unwrap();
-        assert_eq!(s.clipboard.as_deref(), Some(b"AAA".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"AAA".as_slice())
+        );
     }
 
     #[test]
@@ -941,7 +1008,10 @@ mod tests {
             .unwrap();
 
         apply_copy(&mut s, None, 0, 0).unwrap();
-        assert_eq!(s.clipboard.as_deref(), Some(b"GCA".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"GCA".as_slice())
+        );
     }
 
     #[test]
@@ -966,20 +1036,26 @@ mod tests {
             .unwrap();
 
         apply_copy(&mut s, None, 0, 0).unwrap();
-        assert_eq!(s.clipboard.as_deref(), Some(b"TTTGGG".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"TTTGGG".as_slice())
+        );
     }
 
     #[test]
     fn copy_without_selected_primer_is_a_template_slice() {
         let mut s = state_with(b"AAATGCGG");
         apply_copy(&mut s, None, 3, 6).unwrap();
-        assert_eq!(s.clipboard.as_deref(), Some(b"TGC".as_slice()));
+        assert_eq!(
+            s.clipboard.as_ref().map(|c| c.bytes()),
+            Some(b"TGC".as_slice())
+        );
     }
 
     #[test]
     fn paste_inserts_clipboard() {
         let mut s = state_with(b"ATGC");
-        s.clipboard = Some(b"NN".to_vec());
+        s.clipboard = Some(clip(b"NN"));
         apply_paste(&mut s, None, 4).unwrap();
         assert_eq!(text(&mut s), b"ATGCNN");
     }
@@ -989,6 +1065,102 @@ mod tests {
         let mut s = state_with(b"ATGC");
         let err = apply_paste(&mut s, None, 0).unwrap_err();
         assert!(matches!(err, DispatchError::InvalidInput(_)));
+    }
+
+    /// Feature spans (hulls) in definition order on the active buffer.
+    fn feature_spans(state: &mut AppState) -> Vec<Range<usize>> {
+        state
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.iter().map(|f| f.span()).collect())
+            .unwrap()
+    }
+
+    /// Primer bindings in definition order on the active buffer.
+    fn primer_bindings(state: &mut AppState) -> Vec<Option<Range<usize>>> {
+        state
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.primers().map(|p| p.binding.clone()).collect())
+            .unwrap()
+    }
+
+    #[test]
+    fn copy_carries_feature_and_primer_through_paste() {
+        // Region [2,8) contains feature [3,6) and primer binding [4,7).
+        let mut s = state_with(b"ATGCATGCATGC");
+        add_feat(&mut s, 3, 6, "gene");
+        s.workspace
+            .with_active_buffer_mut(|_, _, ann| {
+                ann.add_primer(Primer {
+                    id: Default::default(),
+                    name: "p1".into(),
+                    sequence: "GCA".into(),
+                    binding: Some(4..7),
+                    strand: seqforge_core::Strand::Forward,
+                    qualifiers: Default::default(),
+                });
+            })
+            .unwrap();
+
+        // Copy [2,8) → paste at 12 (end). Feature localizes to [1,4) then +12 →
+        // [13,16); primer binding [2,5)+12 → [14,17).
+        apply_copy(&mut s, None, 2, 8).unwrap();
+        apply_paste(&mut s, None, 12).unwrap();
+
+        assert_eq!(text(&mut s), b"ATGCATGCATGCGCATGC");
+        assert_eq!(feature_spans(&mut s), vec![3..6, 13..16]);
+        assert_eq!(
+            primer_bindings(&mut s),
+            vec![Some(4..7), Some(14..17)],
+            "primer carried with shifted binding"
+        );
+
+        // Undo removes the pasted bytes AND the placed annotations (one txn).
+        apply_undo(&mut s, None).unwrap();
+        assert_eq!(text(&mut s), b"ATGCATGCATGC");
+        assert_eq!(feature_spans(&mut s), vec![3..6]);
+        assert_eq!(primer_bindings(&mut s), vec![Some(4..7)]);
+    }
+
+    #[test]
+    fn copy_paste_through_dispatch_carries_features() {
+        // CLI/GUI parity: both surfaces build these exact `ViewerRequest` values
+        // and route through the one `command::apply` dispatch (no GUI-emits-CLI-
+        // text). Driving that dispatch must carry features, same as the GUI walk.
+        use seqforge_core::ViewerRequest;
+        let mut s = state_with(b"ATGCATGCATGC");
+        add_feat(&mut s, 3, 6, "gene");
+        crate::command::apply(
+            AppCommand::Viewer(ViewerRequest::Copy {
+                start: 2,
+                end: 8,
+                view: None,
+            }),
+            &mut s,
+            &LoadBio,
+        )
+        .unwrap();
+        crate::command::apply(
+            AppCommand::Viewer(ViewerRequest::Paste {
+                pos: 12,
+                view: None,
+            }),
+            &mut s,
+            &LoadBio,
+        )
+        .unwrap();
+        assert_eq!(feature_spans(&mut s), vec![3..6, 13..16]);
+    }
+
+    #[test]
+    fn paste_of_whole_feature_next_to_source_does_not_merge() {
+        // Ordinary paste: the source feature is unstamped (provenance None), so
+        // even abutting the copy it stays two distinct features (merge is
+        // provenance-gated; a fresh copy never fuses with a loaded feature).
+        let mut s = state_with(b"ATGCATGC");
+        add_feat(&mut s, 0, 4, "gene"); // [0,4)
+        apply_copy(&mut s, None, 0, 4).unwrap();
+        apply_paste(&mut s, None, 4).unwrap(); // paste abutting at 4 → [4,8)
+        assert_eq!(feature_spans(&mut s), vec![0..4, 4..8], "no silent merge");
     }
 
     #[test]
@@ -1087,7 +1259,7 @@ mod tests {
             .workspace
             .with_active_buffer(|_, _, ann| {
                 let f = ann.get(id).unwrap();
-                (f.label.clone(), f.range.clone())
+                (f.label.clone(), f.span())
             })
             .unwrap();
         assert_eq!(label, "renamed");
@@ -1180,7 +1352,7 @@ mod tests {
             fs.iter()
                 .map(|f| {
                     (
-                        f.range.clone(),
+                        f.span(),
                         f.raw_kind.clone(),
                         f.label.clone(),
                         f.strand,
@@ -1349,7 +1521,7 @@ mod tests {
             .workspace
             .with_active_buffer(|_, _, ann| {
                 let f = ann.get(id).unwrap();
-                (f.range.clone(), f.raw_kind.clone(), f.label.clone())
+                (f.span(), f.raw_kind.clone(), f.label.clone())
             })
             .unwrap();
         assert_eq!(range, 4..9);
@@ -1360,7 +1532,7 @@ mod tests {
         s.workspace.undo(vid).unwrap();
         let range = s
             .workspace
-            .with_active_buffer(|_, _, ann| ann.get(id).unwrap().range.clone())
+            .with_active_buffer(|_, _, ann| ann.get(id).unwrap().span())
             .unwrap();
         assert_eq!(range, 0..3);
     }
@@ -1783,7 +1955,7 @@ mod tests {
         assert!(is_enabled(&save, &s));
 
         // Clipboard populated → paste available.
-        s.clipboard = Some(b"AA".to_vec());
+        s.clipboard = Some(clip(b"AA"));
         assert!(is_enabled(&paste, &s));
 
         // Range selection → cut available; a bare cursor does not enable it.

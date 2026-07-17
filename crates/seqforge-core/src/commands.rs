@@ -847,13 +847,16 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::ListFeatures { view: _ } => {
             let features = annotations
                 .iter()
-                .map(|f| FeatureInfo {
-                    id: f.id,
-                    kind: f.raw_kind.clone(),
-                    label: f.label.clone(),
-                    start: f.range.start,
-                    end: f.range.end,
-                    strand: f.strand,
+                .map(|f| {
+                    let span = f.span();
+                    FeatureInfo {
+                        id: f.id,
+                        kind: f.raw_kind.clone(),
+                        label: f.label.clone(),
+                        start: span.start,
+                        end: span.end,
+                        strand: f.strand,
+                    }
                 })
                 .collect();
             Ok(ViewerResponse::Features { features })
@@ -1360,7 +1363,7 @@ mod tests {
         let (mut view, buf, _) = fixture();
         let mut ann = Annotations::new(vec![crate::Feature {
             id: Default::default(),
-            range: 1..4,
+            location: crate::Location::simple(1..4),
             raw_kind: "CDS".into(),
             label: "gene".into(),
             strand: crate::Strand::Forward,

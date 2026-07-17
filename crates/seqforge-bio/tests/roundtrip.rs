@@ -3,7 +3,9 @@
 //! qualifiers and provenance.
 
 use seqforge_bio::{load, save};
-use seqforge_core::{Annotations, Buffer, Document, Feature, Primer, Provenance, Strand, Topology};
+use seqforge_core::{
+    Annotations, Buffer, Document, Feature, Location, Primer, Provenance, Strand, Topology,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -48,7 +50,7 @@ fn shell(doc: Document) -> (Buffer, Annotations) {
 fn assert_features_eq(a: &[Feature], b: &[Feature]) {
     assert_eq!(a.len(), b.len(), "feature count differs");
     for (x, y) in a.iter().zip(b) {
-        assert_eq!(x.range, y.range, "range");
+        assert_eq!(x.location, y.location, "location");
         assert_eq!(x.raw_kind, y.raw_kind, "raw_kind");
         assert_eq!(x.strand, y.strand, "strand");
         assert_eq!(x.label, y.label, "label");
@@ -71,7 +73,7 @@ fn normalize_ws(v: &Option<String>) -> Option<String> {
 fn assert_features_eq_reflow_tolerant(a: &[Feature], b: &[Feature]) {
     assert_eq!(a.len(), b.len(), "feature count differs");
     for (x, y) in a.iter().zip(b) {
-        assert_eq!(x.range, y.range, "range");
+        assert_eq!(x.location, y.location, "location");
         assert_eq!(x.raw_kind, y.raw_kind, "raw_kind");
         assert_eq!(x.strand, y.strand, "strand");
         assert_eq!(x.label, y.label, "label");
@@ -149,7 +151,7 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
 
     let feature = Feature {
         id: Default::default(),
-        range: 10..40,
+        location: seqforge_core::Location::simple(10..40),
         raw_kind: "CDS".to_string(),
         label: "myCDS".to_string(),
         strand: Strand::Reverse,
@@ -181,6 +183,85 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
     );
     assert_eq!(reloaded.qualifiers.get("pseudo"), Some(&None));
     assert_eq!(reloaded.strand, Strand::Reverse);
+}
+
+// ── Location round-trip (F0: no flattening of join/fuzzy/complement) ────────────
+
+/// Save a single feature carrying `location`/`strand` on a 60 bp molecule, then
+/// reload it — returning the reloaded feature so its geometry can be asserted.
+fn roundtrip_location(tag: &str, location: Location, strand: Strand) -> Feature {
+    let feature = Feature {
+        id: Default::default(),
+        location,
+        raw_kind: "CDS".to_string(),
+        label: "geneA".to_string(),
+        strand,
+        qualifiers: {
+            let mut q = BTreeMap::new();
+            q.insert("label".to_string(), Some("geneA".to_string()));
+            q
+        },
+        provenance: None,
+    };
+    let buf = Buffer::new(
+        "loc_test".to_string(),
+        None,
+        vec![b'A'; 60],
+        Topology::Linear,
+    );
+    let ann = Annotations::new(vec![feature]);
+    let out = TempOut::new(tag, "gb");
+    save(&buf, &ann, out.path()).expect("save gb");
+    let doc2 = load(out.path()).expect("reload gb");
+    doc2.features.into_iter().next().expect("one feature")
+}
+
+#[test]
+fn roundtrip_join_preserves_segments() {
+    // A spliced CDS: join(11..20, 30..40) must NOT collapse to the 11..40 hull.
+    let loc = Location::Join(vec![Location::simple(11..20), Location::simple(30..40)]);
+    let r = roundtrip_location("loc_join", loc.clone(), Strand::Forward);
+    assert_eq!(r.location, loc, "join segments preserved (no flatten)");
+    assert_eq!(r.span(), 11..40, "hull spans all segments");
+    assert_eq!(r.strand, Strand::Forward);
+}
+
+#[test]
+fn roundtrip_before_fuzzy_preserved() {
+    // `<10..40` — a 5'-truncated feature.
+    let loc = Location::Simple {
+        range: 10..40,
+        before: true,
+        after: false,
+    };
+    let r = roundtrip_location("loc_before", loc.clone(), Strand::Forward);
+    assert_eq!(r.location, loc, "before (<) fuzzy preserved");
+}
+
+#[test]
+fn roundtrip_after_fuzzy_preserved() {
+    // `10..>40` — a 3'-truncated feature.
+    let loc = Location::Simple {
+        range: 10..40,
+        before: false,
+        after: true,
+    };
+    let r = roundtrip_location("loc_after", loc.clone(), Strand::Forward);
+    assert_eq!(r.location, loc, "after (>) fuzzy preserved");
+}
+
+#[test]
+fn roundtrip_complement_join_is_reverse_with_segments() {
+    // `complement(join(11..20,30..40))`: overall strand normalizes into
+    // `Feature.strand = Reverse`; the geometry stays a strand-free Join.
+    let geom = Location::Join(vec![Location::simple(11..20), Location::simple(30..40)]);
+    let r = roundtrip_location("loc_comp", geom.clone(), Strand::Reverse);
+    assert_eq!(
+        r.strand,
+        Strand::Reverse,
+        "outer complement → reverse strand"
+    );
+    assert_eq!(r.location, geom, "join geometry preserved under complement");
 }
 
 // ── Primer round-trip (Phase 0.3: primer_bind ↔ Primer) ─────────────────────────

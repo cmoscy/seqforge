@@ -1,6 +1,9 @@
 use gb_io::reader::SeqReader;
 use gb_io::seq::{After, Before, Feature as GbFeature, Location, Seq, Topology as GbTopology};
-use seqforge_core::{Annotations, Buffer, Document, Feature, Primer, Provenance, Strand, Topology};
+use seqforge_core::{
+    Annotations, Buffer, Document, Feature, Location as CoreLocation, Primer, Provenance, Strand,
+    Topology,
+};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -77,14 +80,10 @@ pub fn load(path: &Path) -> Result<Document, BioError> {
 }
 
 fn map_feature(f: &GbFeature) -> Option<Feature> {
-    let bounds = f.location.find_bounds().ok()?;
-    let start = bounds.0.max(0) as usize;
-    let end = bounds.1.max(0) as usize;
-    if start >= end {
-        return None;
-    }
-
-    let strand = location_strand(&f.location);
+    // Map the full location grammar losslessly (join/fuzzy/complement) instead
+    // of flattening to a bounding range. The overall strand is normalized into
+    // `Feature.strand`; a mixed-strand join is single-stranded (the stub).
+    let (location, strand) = map_location(&f.location)?;
     let raw_kind = f.kind.to_string();
 
     let label = f
@@ -117,7 +116,7 @@ fn map_feature(f: &GbFeature) -> Option<Feature> {
     Some(Feature {
         // Placeholder; `Annotations::new` re-mints a session-scoped id on load.
         id: Default::default(),
-        range: start..end,
+        location,
         raw_kind,
         label,
         strand,
@@ -204,6 +203,76 @@ fn location_strand(loc: &Location) -> Strand {
     }
 }
 
+/// Map a `gb_io` location to core geometry + overall strand. The strand comes
+/// from the outermost `complement(...)`; the returned [`CoreLocation`] is
+/// strand-free geometry (join/fuzzy) — inner complements (a mixed-strand join)
+/// are dropped, which single-strands trans-splicing (the stub). `None` if no
+/// segment resolves to a non-empty range.
+fn map_location(loc: &Location) -> Option<(CoreLocation, Strand)> {
+    let strand = location_strand(loc);
+    Some((gb_geometry(loc)?, strand))
+}
+
+/// Recursively map `gb_io` geometry to [`CoreLocation`], discarding every
+/// `complement` wrapper (strand is tracked separately). `Range` carries its
+/// `<`/`>` fuzzy flags across; `Join`/`Order` become segments; unusual variants
+/// (`Bond`/`OneOf`/`External`/`Gap`) fall back to their bounding hull.
+fn gb_geometry(loc: &Location) -> Option<CoreLocation> {
+    match loc {
+        Location::Range((a, Before(before)), (b, After(after))) => {
+            let start = (*a).max(0) as usize;
+            let end = (*b).max(0) as usize;
+            (start < end).then_some(CoreLocation::Simple {
+                range: start..end,
+                before: *before,
+                after: *after,
+            })
+        }
+        Location::Complement(inner) => gb_geometry(inner),
+        Location::Join(parts) | Location::Order(parts) => {
+            let segs: Vec<CoreLocation> = parts.iter().filter_map(gb_geometry).collect();
+            match segs.len() {
+                0 => None,
+                1 => segs.into_iter().next(),
+                _ => Some(CoreLocation::Join(segs)),
+            }
+        }
+        // Between / Bond / OneOf / External / Gap — no first-class mapping; keep
+        // the bounding hull so the feature at least survives round-trip.
+        _ => {
+            let (a, b) = loc.find_bounds().ok()?;
+            let start = a.max(0) as usize;
+            let end = b.max(0) as usize;
+            (start < end).then_some(CoreLocation::simple(start..end))
+        }
+    }
+}
+
+/// Build a `gb_io` location from core geometry, then wrap it in `complement`
+/// iff the feature's overall strand is reverse (the inverse of [`map_location`]).
+fn core_location_to_gb(loc: &CoreLocation, strand: Strand) -> Location {
+    let base = geometry_to_gb(loc);
+    match strand {
+        Strand::Reverse => Location::Complement(Box::new(base)),
+        _ => base,
+    }
+}
+
+fn geometry_to_gb(loc: &CoreLocation) -> Location {
+    match loc {
+        CoreLocation::Simple {
+            range,
+            before,
+            after,
+        } => Location::Range(
+            (range.start as i64, Before(*before)),
+            (range.end as i64, After(*after)),
+        ),
+        CoreLocation::Join(parts) => Location::Join(parts.iter().map(geometry_to_gb).collect()),
+        CoreLocation::Complement(inner) => Location::Complement(Box::new(geometry_to_gb(inner))),
+    }
+}
+
 /// Write a `Buffer` + `Annotations` to a GenBank file at `path`.
 pub fn write(buf: &Buffer, ann: &Annotations, path: &Path) -> Result<(), BioError> {
     let mut seq = Seq::empty();
@@ -233,14 +302,9 @@ pub fn write(buf: &Buffer, ann: &Annotations, path: &Path) -> Result<(), BioErro
 }
 
 fn feature_to_gb(f: &Feature) -> GbFeature {
-    let base = Location::Range(
-        (f.range.start as i64, Before(false)),
-        (f.range.end as i64, After(false)),
-    );
-    let location = match f.strand {
-        Strand::Reverse => Location::Complement(Box::new(base)),
-        _ => base,
-    };
+    // Emit the full geometry (join/fuzzy), re-wrapping in `complement` from the
+    // authoritative `Feature.strand` — the inverse of the import mapping.
+    let location = core_location_to_gb(&f.location, f.strand);
 
     let mut qualifiers: Vec<(Cow<'static, str>, Option<String>)> = f
         .qualifiers

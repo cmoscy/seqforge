@@ -6,10 +6,12 @@
 
 use std::ops::Range;
 
-use seqforge_core::{FeatureId, Strand, ViewerRequest};
+use seqforge_core::{FeatureId, FeatureKind, Strand, ViewerRequest};
 
 use super::InspectorState;
-use super::row::{EditOutcome, Row, detail_frame, row_shell, strand_flag, strand_glyph};
+use super::row::{
+    EditOutcome, Row, detail_frame, row_shell, strand_flag, strand_glyph, visibility_button,
+};
 use crate::command::{AppCommand, PendingCommand};
 use crate::overlay::FEATURE_KINDS;
 
@@ -259,10 +261,31 @@ impl InspectorState {
         };
         let editing = &mut self.editing;
 
+        let visibility = self.feature_visibility.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in &feats {
                 let is_sel = selected == Some(f.id);
-                let resp = row_shell(ui, &feature_display_row(f, is_sel));
+                // Per-row map-visibility eye (authoritative session hide/show; the
+                // row stays listed regardless). Hidden-by-kind (`source`) reads as
+                // hidden here too; un-hiding an individual row also lifts its kind
+                // rule so the click is intuitive.
+                let kind = FeatureKind::classify(&f.kind);
+                let visible = visibility.visible(kind, f.id);
+                let resp = ui
+                    .horizontal(|ui| {
+                        if visibility_button(ui, visible).clicked() {
+                            let mut v = visibility.clone();
+                            if visible {
+                                v.hidden_ids.insert(f.id);
+                            } else {
+                                v.hidden_ids.remove(&f.id);
+                                v.hidden_kinds.remove(&kind);
+                            }
+                            pending.push((AppCommand::SetFeatureVisibility(v), None));
+                        }
+                        row_shell(ui, &feature_display_row(f, is_sel))
+                    })
+                    .inner;
                 if resp.double_clicked() {
                     *editing = Some(FeatureDraft::from_row(f));
                     // Ensure the map selection follows the row being edited.

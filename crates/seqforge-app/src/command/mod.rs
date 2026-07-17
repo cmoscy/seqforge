@@ -199,6 +199,9 @@ pub enum AppCommand {
     /// Set the active view's primer map-overlay display (Inspector Primers-tab
     /// header toggles: show/hide on map, arrows-vs-bases).
     SetPrimerDisplay(crate::viewer::PrimerDisplay),
+    /// Set the active view's feature map visibility (Inspector Features-tab
+    /// header toggles: show all on map, show the `source` metadata feature).
+    SetFeatureVisibility(crate::viewer::FeatureVisibility),
     /// Toggle inline translation for a single feature (right-click → Show/Hide
     /// translation), anchored to that feature's start + strand.
     ToggleFeatureTranslation(FeatureId),
@@ -319,7 +322,8 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         OpenTranslation { .. }
         | SetTranslationDisplay(_)
         | ToggleFeatureTranslation(_)
-        | SetPrimerDisplay(_) => state.workspace.active_view().is_some(),
+        | SetPrimerDisplay(_)
+        | SetFeatureVisibility(_) => state.workspace.active_view().is_some(),
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
@@ -606,6 +610,14 @@ pub fn apply<B: BioOps>(
             if let Some(vid) = state.workspace.active_view {
                 if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
                     sv.primer_display = display;
+                }
+            }
+            Ok(None)
+        }
+        SetFeatureVisibility(visibility) => {
+            if let Some(vid) = state.workspace.active_view {
+                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
+                    sv.feature_visibility = visibility;
                 }
             }
             Ok(None)

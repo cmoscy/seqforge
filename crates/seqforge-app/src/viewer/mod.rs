@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use egui::{Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
-    Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, MethylState, Selection, Strand, View,
-    ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
+    Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, FeatureId, FeatureKind, MethylState,
+    Selection, Strand, View, ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
 };
 
 use crate::command::{AppCommand, PendingCommand};
@@ -558,6 +558,41 @@ impl Default for PrimerDisplay {
     }
 }
 
+/// Which features the map draws — the features-track analogue of
+/// [`PrimerDisplay`] / `active_enzymes`. Per-view, **session-scoped** (not
+/// persisted), toggled via `AppCommand::SetFeatureVisibility`.
+///
+/// The GenBank `source` feature is hidden by default: it's a whole-molecule
+/// metadata record (`/organism`, `/mol_type`, …), not a biological annotation,
+/// so it only clutters the map as a full-width bar — but it stays in the model +
+/// inspector and can be toggled back on. Hiding is layered: a master `show_all`
+/// (all/none), a set of hidden **kinds** (stable across reload — this is where
+/// `source` lives), and a set of individually hidden **ids** (session-scoped, so
+/// they reset on reload, consistent with id re-minting — decision 12).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureVisibility {
+    pub show_all: bool,
+    pub hidden_kinds: std::collections::HashSet<FeatureKind>,
+    pub hidden_ids: std::collections::HashSet<FeatureId>,
+}
+
+impl Default for FeatureVisibility {
+    fn default() -> Self {
+        Self {
+            show_all: true,
+            hidden_kinds: std::iter::once(FeatureKind::Source).collect(),
+            hidden_ids: std::collections::HashSet::new(),
+        }
+    }
+}
+
+impl FeatureVisibility {
+    /// Whether a feature of this `kind`/`id` is drawn on the map.
+    pub fn visible(&self, kind: FeatureKind, id: FeatureId) -> bool {
+        self.show_all && !self.hidden_kinds.contains(&kind) && !self.hidden_ids.contains(&id)
+    }
+}
+
 /// Per-document state for the sequence viewer widget.
 #[derive(Debug, Default)]
 pub struct SequenceView {
@@ -586,6 +621,9 @@ pub struct SequenceView {
     pub translation: TranslationDisplay,
     /// Which primer overlays the map shows (Inspector Primers header toggles).
     pub primer_display: PrimerDisplay,
+    /// Which features the map draws (Inspector Features header + per-row toggles).
+    /// `source` hidden by default. See [`FeatureVisibility`].
+    pub feature_visibility: FeatureVisibility,
     /// Memoized translation lanes, rebuilt only when `(buffer.version, translation)`
     /// changes — never per frame. `None` when no lanes are shown.
     translation_cache: Option<TranslationCache>,
@@ -886,6 +924,7 @@ impl SequenceView {
         // staging, the preview buffer differs each keystroke and the committed
         // memo must survive (staging may cancel), so compute fresh into a local
         // and leave `layout_cache` untouched.
+        let feature_visibility = self.feature_visibility.clone();
         let mut layout_cache = self.layout_cache.take();
         let staging_layout: Option<(Vec<_>, Vec<f32>)> = if staging {
             Some(build_block_layouts(
@@ -893,6 +932,7 @@ impl SequenceView {
                 cut_sites,
                 seq_len,
                 &style,
+                &feature_visibility,
                 trans_band_h,
                 trans_cache.as_ref(),
             ))
@@ -903,6 +943,7 @@ impl SequenceView {
                 &style,
                 cut_sites,
                 &self.translation,
+                &feature_visibility,
             );
             if layout_cache.as_ref().is_none_or(|c| c.key != key) {
                 let (layouts, offsets) = build_block_layouts(
@@ -910,6 +951,7 @@ impl SequenceView {
                     cut_sites,
                     seq_len,
                     &style,
+                    &feature_visibility,
                     trans_band_h,
                     trans_cache.as_ref(),
                 );
@@ -1119,7 +1161,10 @@ impl SequenceView {
                                 cmds,
                                 ViewSelection::Feature {
                                     id: feat.id,
-                                    range: Selection::range(feat.range.start, feat.range.end),
+                                    range: {
+                                        let s = feat.span();
+                                        Selection::range(s.start, s.end)
+                                    },
                                 },
                             );
                         } else if let Some(hit_idx) = find_hit(&hits, pos, Hit::as_search) {

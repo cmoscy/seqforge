@@ -243,7 +243,7 @@ pub(super) fn apply_reveal_feature(
     let before = active_selection(state);
     let range = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| ann.get(id).map(|f| f.range.clone()))
+        .with_active_buffer(|_v, _b, ann| ann.get(id).map(|f| f.span()))
         .ok()
         .flatten();
     if let (Some(view), Some(r)) = (state.workspace.active_view_mut(), range) {
@@ -299,12 +299,13 @@ pub(super) fn apply_edit_feature_in_inspector(
                     Strand::Reverse => "-",
                     _ => ".",
                 };
+                let span = f.span();
                 (
                     f.label.clone(),
                     f.raw_kind.clone(),
                     flag.to_string(),
-                    f.range.start,
-                    f.range.end,
+                    span.start,
+                    span.end,
                 )
             })
         })
@@ -652,7 +653,7 @@ mod tests {
             .with_active_buffer_mut(|_v, _b, ann| {
                 ann.add(seqforge_core::Feature {
                     id: FeatureId::default(),
-                    range: 1..5,
+                    location: seqforge_core::Location::simple(1..5),
                     raw_kind: "CDS".into(),
                     label: "gene".into(),
                     strand: Strand::Forward,
@@ -697,7 +698,7 @@ mod tests {
             .with_active_buffer_mut(|_v, _b, ann| {
                 ann.add(seqforge_core::Feature {
                     id: FeatureId::default(),
-                    range: 2..8,
+                    location: seqforge_core::Location::simple(2..8),
                     raw_kind: "CDS".into(),
                     label: "lacZ".into(),
                     strand: Strand::Reverse,

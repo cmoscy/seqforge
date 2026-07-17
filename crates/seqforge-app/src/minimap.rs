@@ -72,8 +72,9 @@ fn build_circular_geom(
 
     let mut arcs = Vec::with_capacity(ann.len());
     for feat in ann.iter() {
-        let start_a = angle_for_pos(feat.range.start, seq_len);
-        let end_a = angle_for_pos(feat.range.end, seq_len);
+        let hull = feat.span();
+        let start_a = angle_for_pos(hull.start, seq_len);
+        let end_a = angle_for_pos(hull.end, seq_len);
 
         // Angular span — handle wrap-around (feature crossing origin)
         let mut span = end_a - start_a;
@@ -123,15 +124,22 @@ fn build_linear_geom(
     theme: &crate::config::Theme,
 ) -> MinimapGeom {
     // Feature rows packed identically to the text viewer's stacking.
-    let ranges: Vec<(usize, usize)> = ann.iter().map(|f| (f.range.start, f.range.end)).collect();
+    let ranges: Vec<(usize, usize)> = ann
+        .iter()
+        .map(|f| {
+            let s = f.span();
+            (s.start, s.end)
+        })
+        .collect();
     let (row_assign, _n_rows) = crate::viewer::greedy_stack(&ranges);
 
     let mut bars = Vec::with_capacity(ann.len());
     // `feat_idx` is a within-frame render detail (indexes `row_assign`); the
     // stored handle is the stable `feat.id`.
     for (feat_idx, feat) in ann.iter().enumerate() {
-        let x = (feat.range.start as f32 / seq_len as f32) * panel_width;
-        let w = ((feat.range.end - feat.range.start) as f32 / seq_len as f32) * panel_width;
+        let hull = feat.span();
+        let x = (hull.start as f32 / seq_len as f32) * panel_width;
+        let w = ((hull.end - hull.start) as f32 / seq_len as f32) * panel_width;
 
         if w < settings.min_bar_width {
             continue; // LOD: sub-pixel

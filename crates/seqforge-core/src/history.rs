@@ -279,7 +279,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Feature, Strand, Topology};
+    use crate::{Feature, Location, Strand, Topology};
     use std::collections::BTreeMap;
 
     fn buf(bytes: &[u8]) -> Buffer {
@@ -289,7 +289,7 @@ mod tests {
     fn feat(start: usize, end: usize, label: &str) -> Feature {
         Feature {
             id: Default::default(),
-            range: start..end,
+            location: Location::simple(start..end),
             raw_kind: "misc_feature".into(),
             label: label.into(),
             strand: Strand::Forward,
@@ -376,7 +376,7 @@ mod tests {
         assert!(h.undo(&mut b, &mut a));
         assert_eq!(b.text, b"AAAACCCCGGGG");
         assert_eq!(a.features.len(), 1);
-        assert_eq!(a.features[0].range, 4..8);
+        assert_eq!(a.features[0].span(), 4..8);
         assert_eq!(a.features[0].label, "mid");
 
         // redo re-applies and re-destroys

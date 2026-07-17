@@ -122,6 +122,9 @@ pub struct InspectorState {
     /// The active view's primer map-overlay display (mirrored for the header
     /// toggles; source of truth stays on the `SequenceView`).
     primer_display: PrimerDisplay,
+    /// The active view's feature map visibility (mirrored for the Features-tab
+    /// header toggles; source of truth stays on the `SequenceView`).
+    feature_visibility: crate::viewer::FeatureVisibility,
     has_view: bool,
 }
 
@@ -142,7 +145,7 @@ impl InspectorState {
                     id: f.id,
                     label: f.label.clone(),
                     kind: f.raw_kind.clone(),
-                    range: f.range.clone(),
+                    range: f.span(),
                     strand: f.strand,
                 })
                 .collect();
@@ -224,6 +227,11 @@ impl InspectorState {
             .seq_views
             .get(&view_id)
             .map(|sv| sv.primer_display)
+            .unwrap_or_default();
+        self.feature_visibility = workspace
+            .seq_views
+            .get(&view_id)
+            .map(|sv| sv.feature_visibility.clone())
             .unwrap_or_default();
 
         let stale = self
@@ -417,6 +425,38 @@ impl InspectorState {
             });
             if changed {
                 pending.push((AppCommand::SetPrimerDisplay(d), None));
+            }
+            ui.separator();
+        }
+
+        // Features-tab header: map-visibility toggles (drive the FeaturesTrack via
+        // `SetFeatureVisibility`; the source of truth is the view). `source` is a
+        // whole-molecule metadata record, hidden by default — surfaced here so it
+        // can be brought back.
+        if self.tab == InspectorTab::Features {
+            let mut v = self.feature_visibility.clone();
+            let mut changed = false;
+            let mut show_source = !v.hidden_kinds.contains(&seqforge_core::FeatureKind::Source);
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                changed |= ui.checkbox(&mut v.show_all, "Show on map").changed();
+                if ui
+                    .add_enabled(v.show_all, egui::Checkbox::new(&mut show_source, "Source"))
+                    .on_hover_text(
+                        "Show the GenBank `source` metadata feature (spans the whole molecule)",
+                    )
+                    .changed()
+                {
+                    if show_source {
+                        v.hidden_kinds.remove(&seqforge_core::FeatureKind::Source);
+                    } else {
+                        v.hidden_kinds.insert(seqforge_core::FeatureKind::Source);
+                    }
+                    changed = true;
+                }
+            });
+            if changed {
+                pending.push((AppCommand::SetFeatureVisibility(v), None));
             }
             ui.separator();
         }

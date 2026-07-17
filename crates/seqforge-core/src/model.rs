@@ -697,7 +697,7 @@ mod tests {
     fn feat(label: &str) -> Feature {
         Feature {
             id: Default::default(),
-            range: 0..3,
+            location: crate::Location::simple(0..3),
             raw_kind: "CDS".into(),
             label: label.into(),
             strand: crate::Strand::Forward,
