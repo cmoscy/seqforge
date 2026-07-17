@@ -315,11 +315,13 @@ fn handle_keyboard(
     pending: &mut Option<PendingEdit>,
     ui: &egui::Ui,
     view: &View,
-    seq_len: usize,
+    buffer: &Buffer,
     line_width: usize,
     clipboard: Option<&[u8]>,
     cmds: &mut Vec<PendingCommand>,
 ) {
+    let seq_len = buffer.text.len();
+    let circular = buffer.is_circular();
     let vid = view.id;
     let sel = view.selection.text_range();
     let range = sel.filter(|s| !s.is_cursor()).map(|s| s.ordered());
@@ -400,17 +402,28 @@ fn handle_keyboard(
     if let Some((delta, extend)) = arrow {
         // `delta == 0` only for Up/Down before the first layout sets line_width;
         // consume the key but don't move.
+        // Circular wrap-nav is mod `seq_len`; an empty buffer has no origin to
+        // wrap around, so fall back to the clamping (linear) path there.
+        let circular = circular && seq_len > 0;
         if delta != 0 {
             let base = sel.map_or(0, |s| s.focus);
             let anchor = sel.map_or(base, |s| s.anchor);
-            let new_focus = move_focus(base, delta, seq_len);
-            let new_sel = if extend {
+            let new_sel = if extend && circular {
+                // Circular shift-extend: focus steps mod L, `wrap` toggles at the
+                // origin, so the selection grows *through* position 0 (plans/span.md).
+                sel.unwrap_or(Selection::cursor(base))
+                    .move_focus_circular(delta, seq_len)
+            } else if extend {
                 Selection {
                     anchor,
-                    focus: new_focus,
+                    focus: move_focus(base, delta, seq_len),
+                    wrap: false,
                 }
+            } else if circular {
+                // Plain circular nav wraps the cursor mod L rather than clamping.
+                Selection::cursor((base as isize + delta).rem_euclid(seq_len as isize) as usize)
             } else {
-                Selection::cursor(new_focus)
+                Selection::cursor(move_focus(base, delta, seq_len))
             };
             *pending = None;
             cmds.push((AppCommand::Select(ViewSelection::Text(new_sel)), None));
@@ -759,7 +772,7 @@ impl SequenceView {
                 &mut self.pending,
                 ui,
                 view,
-                buffer.text.len(),
+                buffer,
                 self.last_line_width,
                 clipboard,
                 cmds,
@@ -1124,6 +1137,7 @@ impl SequenceView {
                                     Selection {
                                         anchor: sel.anchor,
                                         focus,
+                                        wrap: sel.wrap,
                                     }
                                 }
                                 None => Selection::range(codon.start, codon.end),
@@ -1132,6 +1146,7 @@ impl SequenceView {
                                 Some(sel) => Selection {
                                     anchor: sel.anchor,
                                     focus: p,
+                                    wrap: sel.wrap,
                                 },
                                 None => Selection::cursor(p),
                             }),
@@ -1353,7 +1368,8 @@ impl SequenceView {
             }
             if response.dragged() {
                 if let (Some(anchor), Some(focus)) = (self.drag_start, ptr_seq) {
-                    push_select(cmds, ViewSelection::Text(Selection { anchor, focus }));
+                    // Drag stays non-wrapping (plans/span.md): a linear sweep.
+                    push_select(cmds, ViewSelection::Text(Selection::range(anchor, focus)));
                 }
             }
             if response.drag_stopped() {

@@ -135,22 +135,26 @@ impl Track for SequenceTrack {
                     );
                 }
             } else {
-                let (sel_s, sel_e) = sel.ordered();
-                let vis_s = sel_s.max(block_start);
-                let vis_e = sel_e.min(block_end);
-                if vis_s < vis_e {
-                    let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
-                    let sw = (vis_e - vis_s) as f32 * char_width;
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
-                        0.0,
-                        style.selection_color,
-                    );
-                    painter.rect_filled(
-                        Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
-                        0.0,
-                        style.selection_color.gamma_multiply(0.7),
-                    );
+                // Wrap-aware: a selection that crosses the origin paints as its
+                // two linear arms (`Span::linear_pieces`), each clipped to this
+                // block — the same geometry primitive features render from.
+                for run in sel.to_span(ctx.seq_len).linear_pieces(ctx.seq_len).iter() {
+                    let vis_s = run.start.max(block_start);
+                    let vis_e = run.end.min(block_end);
+                    if vis_s < vis_e {
+                        let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
+                        let sw = (vis_e - vis_s) as f32 * char_width;
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                            0.0,
+                            style.selection_color,
+                        );
+                        painter.rect_filled(
+                            Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                            0.0,
+                            style.selection_color.gamma_multiply(0.7),
+                        );
+                    }
                 }
             }
         }

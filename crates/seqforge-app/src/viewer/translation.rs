@@ -233,15 +233,9 @@ pub(crate) fn codon_extend(
     clicked: &std::ops::Range<usize>,
 ) -> Selection {
     if clicked.start >= anchor.start {
-        Selection {
-            anchor: anchor.start,
-            focus: clicked.end,
-        }
+        Selection::range(anchor.start, clicked.end)
     } else {
-        Selection {
-            anchor: anchor.end,
-            focus: clicked.start,
-        }
+        Selection::range(anchor.end, clicked.start)
     }
 }
 

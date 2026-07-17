@@ -5,6 +5,7 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::span::Span;
 use crate::{
     Annotations, Buffer, CutSite, Document, FeatureId, MethylContext, MethylState, Primer,
     PrimerId, SearchHit, Strand, View, ViewId, ViewSelection,
@@ -25,13 +26,24 @@ fn default_methyl_dcm() -> bool {
 /// When `anchor == focus` the selection is a **cursor** — rendered as a thin
 /// vertical line between bases. When they differ it is a **range**. The anchor
 /// is where the user first clicked; the focus tracks the current extent.
-/// Shift+click (Phase 8) will extend the focus while keeping the anchor fixed.
+///
+/// `wrap` makes the selection **circular-native**: with `wrap == true` the
+/// selected region is the arc from `anchor` **through the origin** to `focus`
+/// (the complement of the `(min, max)` interval), so shift-selecting from near
+/// the end through position 0 to the start is representable on a plasmid. On a
+/// linear molecule `wrap` stays `false`. The single wrap-aware projection is
+/// [`Selection::to_span`]; render/copy consume its [`Span::linear_pieces`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     /// Fixed end — where the interaction began.
     pub anchor: usize,
     /// Moving end — equals `anchor` for a cursor.
     pub focus: usize,
+    /// Whether the region runs from `anchor` through the origin to `focus`.
+    /// `#[serde(default)]` keeps older serialized selections (no `wrap`) loadable
+    /// as the non-wrapping default.
+    #[serde(default)]
+    pub wrap: bool,
 }
 
 impl Selection {
@@ -39,6 +51,7 @@ impl Selection {
         Self {
             anchor: pos,
             focus: pos,
+            wrap: false,
         }
     }
 
@@ -46,17 +59,68 @@ impl Selection {
         Self {
             anchor: start,
             focus: end,
+            wrap: false,
         }
     }
 
     pub fn is_cursor(self) -> bool {
-        self.anchor == self.focus
+        self.anchor == self.focus && !self.wrap
     }
 
     /// Returns `(start, end)` in ascending order regardless of drag direction.
+    /// Bounds-only — for a wrapping selection this is the interval the region is
+    /// the **complement** of, not the region itself; use [`Selection::to_span`]
+    /// for the actual covered geometry.
     pub fn ordered(self) -> (usize, usize) {
         (self.anchor.min(self.focus), self.anchor.max(self.focus))
     }
+
+    /// The covered region as a wrap-aware [`Span`] on a molecule of length `len`
+    /// — the single geometry projection (highlight / copy / minimap all consume
+    /// its [`Span::linear_pieces`]). Non-wrapping → the `[min, max)` arc;
+    /// wrapping → the origin-crossing arc `[max..len) ∪ [0..min)`, with the
+    /// `anchor == focus && wrap` degenerate meaning the whole molecule.
+    pub fn to_span(self, len: usize) -> Span {
+        let (lo, hi) = self.ordered();
+        if self.wrap {
+            if lo == hi {
+                Span::full(len)
+            } else {
+                Span::between(hi, lo, len)
+            }
+        } else {
+            Span::from_range(lo..hi)
+        }
+    }
+
+    /// Move the `focus` by a signed `delta` on a **circular** molecule of length
+    /// `len`: the focus steps mod `len` (never clamped), and `wrap` toggles each
+    /// time the step crosses the origin — so extending a selection past position
+    /// `0`/`len` grows it *through* the origin instead of stalling. Pure; the
+    /// anchor is untouched. Linear molecules keep the clamping arrow-nav path.
+    pub fn move_focus_circular(self, delta: isize, len: usize) -> Selection {
+        let (focus, wrap) = step_focus_circular(self.focus, self.wrap, delta, len);
+        Selection {
+            anchor: self.anchor,
+            focus,
+            wrap,
+        }
+    }
+}
+
+/// The pure focus/wrap transition backing [`Selection::move_focus_circular`],
+/// factored out for exhaustive truth-table tests. Returns `(new_focus,
+/// new_wrap)`. `new_wrap` flips exactly when the step leaves `[0, len)` — i.e.
+/// crosses the origin — which is independent of the anchor. Assumes
+/// `|delta| < len` (true for arrow/line steps on any real molecule).
+fn step_focus_circular(focus: usize, wrap: bool, delta: isize, len: usize) -> (usize, bool) {
+    if len == 0 {
+        return (0, false);
+    }
+    let raw = focus as isize + delta;
+    let crossed = raw < 0 || raw >= len as isize;
+    let new_focus = raw.rem_euclid(len as isize) as usize;
+    (new_focus, wrap ^ crossed)
 }
 
 // ── File commands ─────────────────────────────────────────────────────────────
@@ -920,6 +984,107 @@ pub fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::span::Pieces;
+
+    // ── to_span: the wrap-aware region projection ────────────────────────────
+
+    #[test]
+    fn to_span_non_wrapping_is_the_ordered_arc() {
+        // Direction-independent: a forward and a backward drag over 3..9 agree.
+        assert_eq!(Selection::range(3, 9).to_span(20), Span::from_range(3..9));
+        assert_eq!(Selection::range(9, 3).to_span(20), Span::from_range(3..9));
+        // A cursor is the empty span.
+        assert_eq!(Selection::cursor(5).to_span(20).len, 0);
+    }
+
+    #[test]
+    fn to_span_wrapping_is_the_origin_crossing_arc() {
+        // anchor 16, focus 4, wrap → covers [16..20) ∪ [0..4), NOT [4..16).
+        let s = Selection {
+            anchor: 16,
+            focus: 4,
+            wrap: true,
+        };
+        let span = s.to_span(20);
+        assert_eq!(span.linear_pieces(20), Pieces::Two(16..20, 0..4));
+        assert!(span.contains(18, 20));
+        assert!(span.contains(2, 20));
+        assert!(!span.contains(10, 20));
+    }
+
+    #[test]
+    fn to_span_wrapping_full_circle_when_anchor_meets_focus() {
+        let s = Selection {
+            anchor: 7,
+            focus: 7,
+            wrap: true,
+        };
+        assert_eq!(s.to_span(20), Span::full(20));
+        assert!(
+            !s.is_cursor(),
+            "anchor==focus with wrap is a full ring, not a cursor"
+        );
+    }
+
+    // ── move_focus_circular: focus steps mod L, wrap toggles at the origin ────
+
+    #[test]
+    fn step_focus_no_cross_keeps_wrap() {
+        // Interior step, rightward and leftward, never toggles wrap.
+        assert_eq!(step_focus_circular(100, false, 1, 2686), (101, false));
+        assert_eq!(step_focus_circular(100, false, -1, 2686), (99, false));
+        assert_eq!(step_focus_circular(100, true, 5, 2686), (105, true));
+    }
+
+    #[test]
+    fn step_focus_rightward_across_origin_toggles_wrap() {
+        // 2685 → +1 lands on the origin (0) and crosses: wrap flips.
+        assert_eq!(step_focus_circular(2685, false, 1, 2686), (0, true));
+        // Continuing past the origin toggles back.
+        assert_eq!(step_focus_circular(2685, true, 1, 2686), (0, false));
+    }
+
+    #[test]
+    fn step_focus_leftward_across_origin_toggles_wrap() {
+        // 0 → -1 wraps to 2685 and crosses the origin.
+        assert_eq!(step_focus_circular(0, false, -1, 2686), (2685, true));
+        assert_eq!(step_focus_circular(0, true, -1, 2686), (2685, false));
+    }
+
+    #[test]
+    fn step_focus_line_jump_across_origin() {
+        // A Down/Up line step (delta ≈ line width) that overshoots the origin.
+        assert_eq!(step_focus_circular(2680, false, 60, 2686), (54, true));
+        assert_eq!(step_focus_circular(30, false, -60, 2686), (2656, true));
+    }
+
+    #[test]
+    fn step_focus_degenerate_length() {
+        assert_eq!(step_focus_circular(0, false, 1, 0), (0, false));
+    }
+
+    #[test]
+    fn move_focus_circular_extends_selection_through_origin() {
+        // A real shift-select: anchor near the end, extend right past 0.
+        let sel = Selection::cursor(2685);
+        let sel = sel.move_focus_circular(1, 2686); // focus → 0, wrap on
+        assert!(sel.wrap);
+        // anchor 2685, focus 0, wrap → [2685..2686) ∪ nothing = one base at 2685.
+        assert_eq!(
+            sel.to_span(2686).linear_pieces(2686),
+            Pieces::One(2685..2686)
+        );
+        let sel = sel.move_focus_circular(3, 2686); // focus → 3
+        assert_eq!(
+            sel.to_span(2686).linear_pieces(2686),
+            Pieces::Two(2685..2686, 0..3)
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

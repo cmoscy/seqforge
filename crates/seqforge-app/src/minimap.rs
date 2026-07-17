@@ -18,6 +18,7 @@ use seqforge_core::{Annotations, BufferId, FeatureId, FeatureKind, Strand, Viewe
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::{Config, MinimapSettings};
+use crate::viewer::FeatureVisibility;
 use crate::workspace::Workspace;
 
 // ── Cached geometry ───────────────────────────────────────────────────────────
@@ -66,45 +67,50 @@ fn build_circular_geom(
     panel_size: f32,
     settings: &MinimapSettings,
     theme: &crate::config::Theme,
+    visibility: &FeatureVisibility,
 ) -> MinimapGeom {
     let center = Pos2::new(panel_size / 2.0, panel_size / 2.0);
     let radius = panel_size * 0.38;
 
     let mut arcs = Vec::with_capacity(ann.len());
     for feat in ann.iter() {
-        let hull = feat.hull(seq_len);
-        let start_a = angle_for_pos(hull.start, seq_len);
-        let end_a = angle_for_pos(hull.end, seq_len);
-
-        // Angular span — handle wrap-around (feature crossing origin)
-        let mut span = end_a - start_a;
-        if span < 0.0 {
-            span += TAU;
+        if !visibility.visible(FeatureKind::classify(&feat.raw_kind), feat.id) {
+            continue;
         }
-        let span_deg = span.to_degrees();
+        let color = theme.feature_color(FeatureKind::classify(&feat.raw_kind));
+        // One arc per linear run (`Feature::pieces`) — the same origin-split the
+        // main viewer derives from, so an origin-spanning feature draws as its two
+        // arms meeting at the origin instead of a near-full ring (the old hull
+        // wrap-hack). Both renderers share this one primitive and can't drift.
+        for piece in feat.pieces(seq_len) {
+            let start_a = angle_for_pos(piece.start, seq_len);
+            let end_a = angle_for_pos(piece.end, seq_len);
+            let span = end_a - start_a; // each piece is non-wrapping ⇒ ≥ 0
+            let span_deg = span.to_degrees();
 
-        if span_deg < settings.min_arc_degrees {
-            continue; // LOD: too small to see
+            if span_deg < settings.min_arc_degrees {
+                continue; // LOD: too small to see
+            }
+
+            // Number of polyline segments: ~1 per 3°, minimum 2.
+            let n_segs = ((span_deg / 3.0).ceil() as usize).max(2);
+            let mut points = Vec::with_capacity(n_segs + 1);
+            for i in 0..=n_segs {
+                let t = i as f32 / n_segs as f32;
+                let a = start_a + t * span;
+                points.push(Pos2::new(
+                    center.x + a.cos() * radius,
+                    center.y + a.sin() * radius,
+                ));
+            }
+
+            arcs.push(PaintArc {
+                points,
+                color,
+                feat_id: feat.id,
+                strand: feat.strand,
+            });
         }
-
-        // Number of polyline segments: ~1 per 3°, minimum 2.
-        let n_segs = ((span_deg / 3.0).ceil() as usize).max(2);
-        let mut points = Vec::with_capacity(n_segs + 1);
-        for i in 0..=n_segs {
-            let t = i as f32 / n_segs as f32;
-            let a = start_a + t * span;
-            points.push(Pos2::new(
-                center.x + a.cos() * radius,
-                center.y + a.sin() * radius,
-            ));
-        }
-
-        arcs.push(PaintArc {
-            points,
-            color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
-            feat_id: feat.id,
-            strand: feat.strand,
-        });
     }
 
     MinimapGeom {
@@ -122,9 +128,17 @@ fn build_linear_geom(
     panel_width: f32,
     settings: &MinimapSettings,
     theme: &crate::config::Theme,
+    visibility: &FeatureVisibility,
 ) -> MinimapGeom {
+    // Only visible features participate — a hidden feature reserves no stack row
+    // (matches the main viewer), so the packing below is over the visible set.
+    let visible: Vec<&seqforge_core::Feature> = ann
+        .iter()
+        .filter(|f| visibility.visible(FeatureKind::classify(&f.raw_kind), f.id))
+        .collect();
+
     // Feature rows packed identically to the text viewer's stacking.
-    let ranges: Vec<(usize, usize)> = ann
+    let ranges: Vec<(usize, usize)> = visible
         .iter()
         .map(|f| {
             let s = f.hull(seq_len);
@@ -133,10 +147,10 @@ fn build_linear_geom(
         .collect();
     let (row_assign, _n_rows) = crate::viewer::greedy_stack(&ranges);
 
-    let mut bars = Vec::with_capacity(ann.len());
+    let mut bars = Vec::with_capacity(visible.len());
     // `feat_idx` is a within-frame render detail (indexes `row_assign`); the
     // stored handle is the stable `feat.id`.
-    for (feat_idx, feat) in ann.iter().enumerate() {
+    for (feat_idx, feat) in visible.iter().enumerate() {
         let hull = feat.hull(seq_len);
         let x = (hull.start as f32 / seq_len as f32) * panel_width;
         let w = ((hull.end - hull.start) as f32 / seq_len as f32) * panel_width;
@@ -172,6 +186,22 @@ fn build_linear_geom(
     }
 }
 
+/// A stable hash of a [`FeatureVisibility`], folded into the geometry cache key
+/// so a visibility toggle re-tessellates (it isn't `buffer.version`-tracked).
+/// Sorts the hidden sets first — `HashSet` iteration order is nondeterministic.
+fn visibility_fingerprint(v: &FeatureVisibility) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.show_all.hash(&mut h);
+    let mut kinds: Vec<u8> = v.hidden_kinds.iter().map(|k| *k as u8).collect();
+    kinds.sort_unstable();
+    kinds.hash(&mut h);
+    let mut ids: Vec<u64> = v.hidden_ids.iter().map(|id| id.0).collect();
+    ids.sort_unstable();
+    ids.hash(&mut h);
+    h.finish()
+}
+
 /// Convert a sequence position to an angle on the ring.
 /// `0` maps to the top (`-PI/2`), increasing clockwise.
 #[inline]
@@ -184,11 +214,12 @@ fn angle_for_pos(pos: usize, seq_len: usize) -> f32 {
 /// Retained state for the minimap panel.
 #[derive(Default)]
 pub struct MiniMap {
-    /// `(buffer_id, buffer.version, panel_size_q, config_epoch)` → cached geometry.
-    /// `panel_size_q` is `(panel_size * 2.0).round() as u32` so sub-0.5px
-    /// resize noise doesn't thrash the cache. `config_epoch` bumps on
-    /// `ReloadConfig` so a theme/sizing change re-tessellates.
-    geom_cache: Cache<(BufferId, u64, u32, u64), MinimapGeom>,
+    /// `(buffer_id, buffer.version, panel_size_q, config_epoch, vis_fingerprint)`
+    /// → cached geometry. `panel_size_q` is `(panel_size * 2.0).round() as u32` so
+    /// sub-0.5px resize noise doesn't thrash the cache. `config_epoch` bumps on
+    /// `ReloadConfig` so a theme/sizing change re-tessellates. `vis_fingerprint`
+    /// invalidates on a feature-visibility toggle (not version-tracked).
+    geom_cache: Cache<(BufferId, u64, u32, u64, u64), MinimapGeom>,
 }
 
 impl MiniMap {
@@ -218,6 +249,7 @@ impl MiniMap {
         // closure releases the read lock before we do any painting so
         // the borrow checker stays happy while we mutate `self` and `cmds`.
         struct Snap {
+            view_id: seqforge_core::ViewId,
             buffer_id: BufferId,
             version: u64,
             seq_len: usize,
@@ -233,6 +265,7 @@ impl MiniMap {
 
         let snap = workspace
             .with_active_buffer(|view, buf, _ann| Snap {
+                view_id: view.id,
                 buffer_id: view.buffer_id,
                 version: buf.version,
                 seq_len: buf.len(),
@@ -249,6 +282,15 @@ impl MiniMap {
         if snap.seq_len == 0 {
             return;
         }
+
+        // The active view's feature-visibility (Source hidden by default, plus any
+        // user toggles) — the minimap honors it like the main map, so a hidden
+        // feature reserves no arc/bar (closes the source-still-shows divergence).
+        let visibility = workspace
+            .seq_views
+            .get(&snap.view_id)
+            .map(|sv| sv.feature_visibility.clone())
+            .unwrap_or_default();
 
         // ── Header label: name + bp count ────────────────────────────────────
         ui.add_space(4.0);
@@ -311,7 +353,15 @@ impl MiniMap {
         // doesn't thrash the cache while still triggering rebuilds on meaningful
         // size changes — same strategy as SequenceView::cut_label_cache.
         let panel_size_q = (geom_dim * 2.0).round() as u32;
-        let cache_key = (snap.buffer_id, snap.version, panel_size_q, cfg.epoch);
+        // Visibility is not version-tracked, so a toggle must invalidate the cache
+        // on its own — fold a stable fingerprint of the visibility set into the key.
+        let cache_key = (
+            snap.buffer_id,
+            snap.version,
+            panel_size_q,
+            cfg.epoch,
+            visibility_fingerprint(&visibility),
+        );
 
         let geom: MinimapGeom = workspace
             .with_active_buffer(|_view, buf, ann| {
@@ -324,6 +374,7 @@ impl MiniMap {
                                 geom_dim,
                                 &cfg.settings.minimap,
                                 &cfg.theme,
+                                &visibility,
                             )
                         } else {
                             build_linear_geom(
@@ -332,6 +383,7 @@ impl MiniMap {
                                 geom_dim,
                                 &cfg.settings.minimap,
                                 &cfg.theme,
+                                &visibility,
                             )
                         }
                     })
@@ -454,20 +506,22 @@ fn paint_circular(
         }
     }
 
-    // Selection range highlight
+    // Selection range highlight — wrap-aware: an origin-crossing selection paints
+    // as its two arms (`Span::linear_pieces`), the same primitive features use.
     if let Some(sel) = selection {
         if !sel.is_cursor() {
-            let (s, e) = sel.ordered();
             let sel_color = theme.minimap.selection.0;
-            paint_arc_range(
-                painter,
-                center,
-                radius + feat_w * 0.5,
-                s,
-                e,
-                seq_len,
-                Stroke::new(feat_w + 4.0, sel_color),
-            );
+            for run in sel.to_span(seq_len).linear_pieces(seq_len).iter() {
+                paint_arc_range(
+                    painter,
+                    center,
+                    radius + feat_w * 0.5,
+                    run.start,
+                    run.end,
+                    seq_len,
+                    Stroke::new(feat_w + 4.0, sel_color),
+                );
+            }
         }
     }
 
@@ -608,17 +662,19 @@ fn paint_linear(
         }
     }
 
-    // Selection range highlight over spine
+    // Selection range highlight over spine (linear ⇒ never wraps, but route
+    // through the same `linear_pieces` primitive for one consistent path).
     if let Some(sel) = selection {
         if !sel.is_cursor() {
-            let (s, e) = sel.ordered();
-            let sx = origin.x + (s as f32 / seq_len as f32) * panel_width;
-            let ex = origin.x + (e as f32 / seq_len as f32) * panel_width;
-            painter.rect_filled(
-                Rect::from_x_y_ranges(sx..=ex, origin.y..=(origin.y + spine_h)),
-                0.0,
-                theme.minimap.selection.0,
-            );
+            for run in sel.to_span(seq_len).linear_pieces(seq_len).iter() {
+                let sx = origin.x + (run.start as f32 / seq_len as f32) * panel_width;
+                let ex = origin.x + (run.end as f32 / seq_len as f32) * panel_width;
+                painter.rect_filled(
+                    Rect::from_x_y_ranges(sx..=ex, origin.y..=(origin.y + spine_h)),
+                    0.0,
+                    theme.minimap.selection.0,
+                );
+            }
         }
     }
 
