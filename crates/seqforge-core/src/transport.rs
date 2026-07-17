@@ -125,7 +125,7 @@ pub fn extract(
             if nf.provenance.is_none() {
                 nf.provenance = Some(Provenance {
                     source_doc: source_doc.to_string(),
-                    source_range: f.span(),
+                    source_range: f.hull(total),
                     operation: "extract".to_string(),
                 });
             }
@@ -190,7 +190,7 @@ impl PosMap {
 /// survive. Containment is decided on the feature's **span** (the doc's
 /// trisection); a contained feature keeps its full segmentation.
 fn localize_feature(f: &Feature, map: &PosMap, policy: PartialPolicy) -> Option<Feature> {
-    let span = f.span();
+    let span = f.hull(map.total);
     if map.contains(span.start, span.end) {
         // Every leaf lies inside — shift each into slice coords.
         let base = map.pos(span.start)?; // == span.start - start (contiguous)
@@ -260,13 +260,16 @@ fn localize_primer(p: &Primer, map: &PosMap, _slice_len: usize) -> Option<Primer
 /// to make room); `place` only re-homes and adds the carried annotations.
 /// Returns the freshly-minted feature ids (decision 12: placed annotations get
 /// new ids — two buffers never share id identity, and pasting twice yields
-/// distinct features).
+/// distinct features). `len_total` is the destination molecule length **after**
+/// the caller's byte splice — threaded through to `merge` so origin-split leaf
+/// geometry (`Location::pieces`) is computed against the right frame.
 pub fn place(
     ann: &mut Annotations,
     slice: &SeqSlice,
     at: usize,
     orient: Orient,
     merge: bool,
+    len_total: usize,
 ) -> Vec<FeatureId> {
     let l = slice.len();
     let mut ids = Vec::with_capacity(slice.features.len());
@@ -305,7 +308,7 @@ pub fn place(
     }
 
     if merge {
-        merge_features(ann);
+        merge_features(ann, len_total);
     }
     ids
 }
@@ -319,10 +322,13 @@ pub fn place(
 /// - gapped same-lineage → one `Join` (SnapGene "segments");
 /// - different lineage (or any `None`) → left separate, **even if names match**
 ///   (name-only merge is a footgun). Idempotent.
-fn merge_features(ann: &mut Annotations) {
+fn merge_features(ann: &mut Annotations, len_total: usize) {
     while let Some((keep, drop)) = find_merge_pair(&ann.features) {
-        let merged_loc =
-            combine_locations(&ann.features[keep].location, &ann.features[drop].location);
+        let merged_loc = combine_locations(
+            &ann.features[keep].location,
+            &ann.features[drop].location,
+            len_total,
+        );
         ann.features[keep].location = merged_loc;
         ann.features.remove(drop);
     }
@@ -349,8 +355,12 @@ fn find_merge_pair(features: &[Feature]) -> Option<(usize, usize)> {
 /// Union two locations into the minimal covering location: collect all leaf
 /// segments, sort, coalesce touching/overlapping ones; one run → `Simple`,
 /// otherwise `Join`. Internal fuzzy boundaries are cleared (now continuous).
-fn combine_locations(a: &Location, b: &Location) -> Location {
-    let mut segs: Vec<Range<usize>> = a.segments().chain(b.segments()).collect();
+fn combine_locations(a: &Location, b: &Location, len_total: usize) -> Location {
+    let mut segs: Vec<Range<usize>> = a
+        .pieces(len_total)
+        .into_iter()
+        .chain(b.pieces(len_total))
+        .collect();
     segs.sort_by_key(|r| (r.start, r.end));
 
     let mut merged: Vec<Range<usize>> = Vec::new();
@@ -465,7 +475,7 @@ mod tests {
         let a = ann(vec![feat(5, 10, Strand::Forward)], vec![]);
         let s = extract(TEXT20, &a, 4..12, false, PartialPolicy::DropPartials, "src");
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].span(), 1..6);
+        assert_eq!(s.features[0].hull(s.len()), 1..6);
         assert_eq!(s.bytes.len(), 8);
         // Provenance stamped with the original span (the merge lineage key).
         let prov = s.features[0].provenance.as_ref().unwrap();
@@ -493,7 +503,7 @@ mod tests {
             "src",
         );
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].span(), 0..3);
+        assert_eq!(s.features[0].hull(s.len()), 0..3);
         assert_eq!(s.features[0].location.fuzzy_ends(), (true, false));
     }
 
@@ -508,7 +518,7 @@ mod tests {
         let s = extract(TEXT20, &a, wrap, true, PartialPolicy::DropPartials, "src");
         assert_eq!(s.bytes.len(), 8);
         assert_eq!(s.features.len(), 1);
-        assert_eq!(s.features[0].span(), 1..3);
+        assert_eq!(s.features[0].hull(s.len()), 1..3);
     }
 
     // ── extract: primer transfer ─────────────────────────────────────────────
@@ -569,14 +579,14 @@ mod tests {
             primers: vec![],
         };
         let mut dst = ann(vec![], vec![]);
-        let ids = place(&mut dst, &slice, 10, Orient::Identity, false);
+        let ids = place(&mut dst, &slice, 10, Orient::Identity, false, 30);
         assert_eq!(ids.len(), 1);
         let placed = dst.get(ids[0]).unwrap();
-        assert_eq!(placed.span(), 11..13);
+        assert_eq!(placed.hull(30), 11..13);
         assert_ne!(placed.id, FeatureId(0)); // freshly minted
 
         // Pasting the same slice again yields distinct ids (decision 12).
-        let ids2 = place(&mut dst, &slice, 20, Orient::Identity, false);
+        let ids2 = place(&mut dst, &slice, 20, Orient::Identity, false, 30);
         assert_ne!(ids[0], ids2[0]);
         assert_eq!(dst.len(), 2);
     }
@@ -590,9 +600,9 @@ mod tests {
             primers: vec![],
         };
         let mut dst = ann(vec![], vec![]);
-        let ids = place(&mut dst, &slice, 0, Orient::Rev, false);
+        let ids = place(&mut dst, &slice, 0, Orient::Rev, false, 10);
         let placed = dst.get(ids[0]).unwrap();
-        assert_eq!(placed.span(), 6..9);
+        assert_eq!(placed.hull(10), 6..9);
         assert_eq!(placed.strand, Strand::Reverse);
     }
 
@@ -604,7 +614,7 @@ mod tests {
             primers: vec![primer(Some(1..4), Strand::Forward)],
         };
         let mut dst = ann(vec![], vec![]);
-        place(&mut dst, &slice, 0, Orient::Rev, false);
+        place(&mut dst, &slice, 0, Orient::Rev, false, 10);
         let p = dst.primers().next().unwrap();
         assert_eq!(p.binding, Some(6..9));
         assert_eq!(p.strand, Strand::Reverse);
@@ -632,7 +642,7 @@ mod tests {
             ],
             vec![],
         );
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         assert_eq!(a.len(), 1);
         assert_eq!(a.iter().next().unwrap().location, Location::simple(0..20));
     }
@@ -646,7 +656,7 @@ mod tests {
             ],
             vec![],
         );
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         assert_eq!(a.len(), 1);
         assert_eq!(
             a.iter().next().unwrap().location,
@@ -664,7 +674,7 @@ mod tests {
             ],
             vec![],
         );
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         assert_eq!(a.len(), 2);
     }
 
@@ -675,7 +685,7 @@ mod tests {
             vec![feat(0, 10, Strand::Forward), feat(10, 20, Strand::Forward)],
             vec![],
         );
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         assert_eq!(a.len(), 2);
     }
 
@@ -688,9 +698,9 @@ mod tests {
             ],
             vec![],
         );
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         let once = a.iter().next().unwrap().location.clone();
-        merge_features(&mut a);
+        merge_features(&mut a, 100);
         assert_eq!(a.len(), 1);
         assert_eq!(a.iter().next().unwrap().location, once);
     }
@@ -704,7 +714,7 @@ mod tests {
         };
         // Destination already holds the other half (same lineage), abutting.
         let mut dst = ann(vec![with_prov(feat(0, 10, Strand::Forward), 0..20)], vec![]);
-        place(&mut dst, &slice, 10, Orient::Identity, false);
+        place(&mut dst, &slice, 10, Orient::Identity, false, 30);
         assert_eq!(dst.len(), 2, "merge=false leaves pieces separate");
     }
 
@@ -719,8 +729,8 @@ mod tests {
         );
         let s = extract(&text, &a, 0..30, false, PartialPolicy::DropPartials, "src");
         let mut dst = ann(vec![], vec![]);
-        place(&mut dst, &s, 0, Orient::Identity, false);
-        let spans: Vec<_> = dst.iter().map(|f| f.span()).collect();
+        place(&mut dst, &s, 0, Orient::Identity, false, 30);
+        let spans: Vec<_> = dst.iter().map(|f| f.hull(30)).collect();
         assert_eq!(spans, vec![3..9, 20..25]);
         assert_eq!(dst.primers().next().unwrap().binding, Some(4..8));
     }

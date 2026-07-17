@@ -145,7 +145,7 @@ impl InspectorState {
                     id: f.id,
                     label: f.label.clone(),
                     kind: f.raw_kind.clone(),
-                    range: f.span(),
+                    range: f.hull(buf.text.len()),
                     strand: f.strand,
                 })
                 .collect();

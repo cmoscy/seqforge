@@ -1162,7 +1162,7 @@ impl SequenceView {
                                 ViewSelection::Feature {
                                     id: feat.id,
                                     range: {
-                                        let s = feat.span();
+                                        let s = feat.hull(seq_len);
                                         Selection::range(s.start, s.end)
                                     },
                                 },
@@ -1222,7 +1222,7 @@ impl SequenceView {
                         ));
                     } else if let Some(fc) = find_hit(&hits, p, Hit::as_feature)
                         .and_then(|fi| render_ann.by_position(fi))
-                        .map(FeatureContext::from_feature)
+                        .map(|f| FeatureContext::from_feature(f, seq_len))
                     {
                         cmds.push((open_edit_feature_cmd(&fc), None));
                     }
@@ -1234,7 +1234,7 @@ impl SequenceView {
                 self.context_feature = ptr.and_then(|p| {
                     find_hit(&hits, p, Hit::as_feature)
                         .and_then(|fi| render_ann.by_position(fi))
-                        .map(FeatureContext::from_feature)
+                        .map(|f| FeatureContext::from_feature(f, seq_len))
                 });
                 // If no feature was hit, capture an ORF run under the pointer.
                 self.context_orf = if self.context_feature.is_some() {

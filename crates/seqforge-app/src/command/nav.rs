@@ -243,7 +243,7 @@ pub(super) fn apply_reveal_feature(
     let before = active_selection(state);
     let range = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| ann.get(id).map(|f| f.span()))
+        .with_active_buffer(|_v, b, ann| ann.get(id).map(|f| f.hull(b.text.len())))
         .ok()
         .flatten();
     if let (Some(view), Some(r)) = (state.workspace.active_view_mut(), range) {
@@ -292,14 +292,14 @@ pub(super) fn apply_edit_feature_in_inspector(
     // Pull the feature's fields to seed the draft (id-addressed; decision 12).
     let fields = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| {
+        .with_active_buffer(|_v, b, ann| {
             ann.get(id).map(|f| {
                 let flag = match f.strand {
                     Strand::Forward => "+",
                     Strand::Reverse => "-",
                     _ => ".",
                 };
-                let span = f.span();
+                let span = f.hull(b.text.len());
                 (
                     f.label.clone(),
                     f.raw_kind.clone(),

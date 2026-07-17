@@ -537,7 +537,8 @@ impl Workspace {
         // plain insertion at `pos`.
         history.record(pos, Vec::new(), slice.bytes.clone(), ann, EditKind::Other);
         mutations::apply_splice(&mut buf, ann, pos..pos, &slice.bytes);
-        transport::place(ann, slice, pos, orient, merge);
+        let len_total = buf.text.len();
+        transport::place(ann, slice, pos, orient, merge, len_total);
         let cursor = pos + slice.bytes.len();
         drop(buf);
 

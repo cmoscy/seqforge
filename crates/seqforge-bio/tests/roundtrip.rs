@@ -222,7 +222,7 @@ fn roundtrip_join_preserves_segments() {
     let loc = Location::Join(vec![Location::simple(11..20), Location::simple(30..40)]);
     let r = roundtrip_location("loc_join", loc.clone(), Strand::Forward);
     assert_eq!(r.location, loc, "join segments preserved (no flatten)");
-    assert_eq!(r.span(), 11..40, "hull spans all segments");
+    assert_eq!(r.hull(60), 11..40, "hull spans all segments");
     assert_eq!(r.strand, Strand::Forward);
 }
 

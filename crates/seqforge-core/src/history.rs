@@ -376,7 +376,7 @@ mod tests {
         assert!(h.undo(&mut b, &mut a));
         assert_eq!(b.text, b"AAAACCCCGGGG");
         assert_eq!(a.features.len(), 1);
-        assert_eq!(a.features[0].span(), 4..8);
+        assert_eq!(a.features[0].hull(b.text.len()), 4..8);
         assert_eq!(a.features[0].label, "mid");
 
         // redo re-applies and re-destroys

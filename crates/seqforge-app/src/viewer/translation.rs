@@ -300,7 +300,7 @@ pub(crate) fn build_translation_cache(
                 // Hull translation (behavior-preserving); segment-aware CDS
                 // translation is a feature-model F0 follow-up.
                 id: f.id,
-                glyphs: cds_glyphs(seq, f.span(), f.strand, cs),
+                glyphs: cds_glyphs(seq, f.hull(seq.len()), f.strand, cs),
             }
         })
         .collect();

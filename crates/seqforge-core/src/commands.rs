@@ -848,7 +848,7 @@ pub fn dispatch<B: BioOps>(
             let features = annotations
                 .iter()
                 .map(|f| {
-                    let span = f.span();
+                    let span = f.hull(buffer.text.len());
                     FeatureInfo {
                         id: f.id,
                         kind: f.raw_kind.clone(),

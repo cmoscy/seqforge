@@ -29,20 +29,21 @@ pub(crate) struct FeaturesTrack;
 /// bugs on origin-spanning features).
 fn feature_segment_rects(
     feat: &Feature,
-    block_start: usize,
-    block_end: usize,
+    len_total: usize,
+    block: std::ops::Range<usize>,
     bar_row_y: f32,
     seq_x0: f32,
     char_width: f32,
     row_h: f32,
 ) -> Vec<Rect> {
     feat.location
-        .segments()
+        .pieces(len_total)
+        .into_iter()
         .filter_map(|seg| {
             clip_range_rect(
                 &seg,
-                block_start,
-                block_end,
+                block.start,
+                block.end,
                 bar_row_y,
                 seq_x0,
                 char_width,
@@ -83,8 +84,8 @@ impl Track for FeaturesTrack {
             // no hit rect, so a click there no longer selects it.
             for r in feature_segment_rects(
                 feat,
-                ctx.block_start,
-                ctx.block_end,
+                ctx.seq_len,
+                ctx.block_start..ctx.block_end,
                 bar_row_y,
                 geom.seq_x0,
                 style.char_width,
@@ -152,8 +153,8 @@ impl Track for FeaturesTrack {
             // feature) ⇒ draw nothing — no fill, no label, no selection outline.
             let segments = feature_segment_rects(
                 feat,
-                ctx.block_start,
-                ctx.block_end,
+                ctx.seq_len,
+                ctx.block_start..ctx.block_end,
                 bar_row_y,
                 geom.seq_x0,
                 style.char_width,
@@ -175,7 +176,8 @@ impl Track for FeaturesTrack {
             // connector, with a strand arrow + torn edges anchored on this block's
             // segment bounds.
             let (fuzzy_left, fuzzy_right) = feat.location.fuzzy_ends();
-            let decorated = feat.location.segments().count() > 1 || fuzzy_left || fuzzy_right;
+            let decorated =
+                feat.location.pieces(ctx.seq_len).len() > 1 || fuzzy_left || fuzzy_right;
             if !decorated {
                 painter.rect_filled(segments[0], 2.0, swatch);
             } else {

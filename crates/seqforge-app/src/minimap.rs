@@ -72,7 +72,7 @@ fn build_circular_geom(
 
     let mut arcs = Vec::with_capacity(ann.len());
     for feat in ann.iter() {
-        let hull = feat.span();
+        let hull = feat.hull(seq_len);
         let start_a = angle_for_pos(hull.start, seq_len);
         let end_a = angle_for_pos(hull.end, seq_len);
 
@@ -127,7 +127,7 @@ fn build_linear_geom(
     let ranges: Vec<(usize, usize)> = ann
         .iter()
         .map(|f| {
-            let s = f.span();
+            let s = f.hull(seq_len);
             (s.start, s.end)
         })
         .collect();
@@ -137,7 +137,7 @@ fn build_linear_geom(
     // `feat_idx` is a within-frame render detail (indexes `row_assign`); the
     // stored handle is the stable `feat.id`.
     for (feat_idx, feat) in ann.iter().enumerate() {
-        let hull = feat.span();
+        let hull = feat.hull(seq_len);
         let x = (hull.start as f32 / seq_len as f32) * panel_width;
         let w = ((hull.end - hull.start) as f32 / seq_len as f32) * panel_width;
 

@@ -456,7 +456,7 @@ pub(super) fn apply_update_feature(
         let cur = ann
             .get(id)
             .ok_or_else(|| DispatchError::InvalidInput(format!("no feature with id {id}")))?;
-        let cur_span = cur.span();
+        let cur_span = cur.hull(buf.text.len());
         let new_start = start.unwrap_or(cur_span.start);
         let new_end = end.unwrap_or(cur_span.end);
         if new_start >= new_end || new_end > buf.text.len() {
@@ -496,7 +496,7 @@ pub(super) fn apply_update_feature(
     {
         let range = state
             .workspace
-            .with_buffer(vid, |_, _, ann| ann.get(id).map(|f| f.span()))
+            .with_buffer(vid, |_, b, ann| ann.get(id).map(|f| f.hull(b.text.len())))
             .ok()
             .flatten();
         if let (Some(r), Some(view)) = (range, state.workspace.view_mut(vid)) {
@@ -1071,7 +1071,7 @@ mod tests {
     fn feature_spans(state: &mut AppState) -> Vec<Range<usize>> {
         state
             .workspace
-            .with_active_buffer(|_, _, ann| ann.iter().map(|f| f.span()).collect())
+            .with_active_buffer(|_, b, ann| ann.iter().map(|f| f.hull(b.text.len())).collect())
             .unwrap()
     }
 
@@ -1257,9 +1257,9 @@ mod tests {
         .unwrap();
         let (label, range) = s
             .workspace
-            .with_active_buffer(|_, _, ann| {
+            .with_active_buffer(|_, b, ann| {
                 let f = ann.get(id).unwrap();
-                (f.label.clone(), f.span())
+                (f.label.clone(), f.hull(b.text.len()))
             })
             .unwrap();
         assert_eq!(label, "renamed");
@@ -1348,11 +1348,11 @@ mod tests {
             std::collections::BTreeMap<String, Option<String>>,
             Option<seqforge_core::Provenance>,
         );
-        fn proj_feats(fs: &[Feature]) -> Vec<FeatProj> {
+        fn proj_feats(fs: &[Feature], len: usize) -> Vec<FeatProj> {
             fs.iter()
                 .map(|f| {
                     (
-                        f.span(),
+                        f.hull(len),
                         f.raw_kind.clone(),
                         f.label.clone(),
                         f.strand,
@@ -1465,8 +1465,8 @@ mod tests {
         assert_eq!(restored.0, original.0, "sequence not restored by undo");
         assert_eq!(restored.1, original.1, "topology not restored by undo");
         assert_eq!(
-            proj_feats(&restored.2),
-            proj_feats(&original.2),
+            proj_feats(&restored.2, restored.0.len()),
+            proj_feats(&original.2, original.0.len()),
             "features not restored by undo"
         );
         assert_eq!(
@@ -1519,9 +1519,9 @@ mod tests {
         .unwrap();
         let (range, kind, label) = s
             .workspace
-            .with_active_buffer(|_, _, ann| {
+            .with_active_buffer(|_, b, ann| {
                 let f = ann.get(id).unwrap();
-                (f.span(), f.raw_kind.clone(), f.label.clone())
+                (f.hull(b.text.len()), f.raw_kind.clone(), f.label.clone())
             })
             .unwrap();
         assert_eq!(range, 4..9);
@@ -1532,7 +1532,7 @@ mod tests {
         s.workspace.undo(vid).unwrap();
         let range = s
             .workspace
-            .with_active_buffer(|_, _, ann| ann.get(id).unwrap().span())
+            .with_active_buffer(|_, b, ann| ann.get(id).unwrap().hull(b.text.len()))
             .unwrap();
         assert_eq!(range, 0..3);
     }

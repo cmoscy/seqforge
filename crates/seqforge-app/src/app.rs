@@ -1419,9 +1419,9 @@ impl eframe::App for SeqForgeApp {
                             return None;
                         }
                         // Hull translation (behavior-preserving): a joined CDS
-                        // still translates through its span. Segment-aware CDS
+                        // still translates through its hull. Segment-aware CDS
                         // translation is a follow-up (feature-model track F0 note).
-                        let span = f.span();
+                        let span = f.hull(buf.text.len());
                         let end = span.end.min(buf.text.len());
                         if span.start >= end {
                             return None;

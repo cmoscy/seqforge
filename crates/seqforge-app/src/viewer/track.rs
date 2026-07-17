@@ -255,7 +255,7 @@ pub(crate) fn build_block_layouts(
             if !visibility.visible(FeatureKind::classify(&f.raw_kind), f.id) {
                 continue;
             }
-            let hull = f.span();
+            let hull = f.hull(seq_len);
             if hull.start < block_end && hull.end > block_start {
                 feat_idx_list.push(i);
                 feat_ranges.push((hull.start.max(block_start), hull.end.min(block_end)));
@@ -1089,8 +1089,8 @@ pub(crate) struct FeatureContext {
 
 impl FeatureContext {
     /// Build a full context snapshot from a feature (right-click / secondary).
-    pub fn from_feature(f: &Feature) -> Self {
-        let span = f.span();
+    pub fn from_feature(f: &Feature, len: usize) -> Self {
+        let span = f.hull(len);
         FeatureContext {
             id: f.id,
             start: span.start,
@@ -1298,7 +1298,7 @@ mod tests {
         FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
         let expected = clip_range_rect(
-            &ann.by_position(0).unwrap().span(),
+            &ann.by_position(0).unwrap().hull(20),
             0,
             20,
             geom.y0, // row 0

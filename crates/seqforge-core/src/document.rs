@@ -194,9 +194,11 @@ pub struct Provenance {
 ///   normalizes the outer complement into it. A **mixed-strand** `Join` (inner
 ///   complements) is stubbed to single-strand for now.
 ///
-/// The bounding hull is the **derived** [`Location::span`] — never stored
-/// (decision 8): the span is a pure function of the location, so storing it
-/// would denormalize with a sync invariant.
+/// The bounding hull is the **derived** [`Location::hull`] — never stored
+/// (decision 8): the hull is a pure function of the location, so storing it
+/// would denormalize with a sync invariant. Geometry consumers pick the
+/// wrap-aware primitive they mean: [`Location::pieces`] (linear render runs),
+/// [`Location::contains`] (hit-test), or [`Location::hull`] (bounds-only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Location {
     /// A single contiguous region ([`Span`], which may wrap the origin on a
@@ -280,48 +282,6 @@ impl Location {
         }
     }
 
-    /// DEPRECATED len-free hull shim — kept only during the Span migration (P1)
-    /// so `.span()` call sites keep compiling. Correct **only while no `Simple`
-    /// wraps** (true until GenBank origin-join normalization lands in P2); a
-    /// wrapping `Simple` would report `start..start+len` past the molecule end.
-    /// Migrate callers to [`Location::hull`] / [`Location::contains`] /
-    /// [`Location::pieces`], then delete this.
-    pub fn span(&self) -> Range<usize> {
-        match self {
-            Location::Simple { span, .. } => span.start..span.start + span.len,
-            Location::Complement(inner) => inner.span(),
-            Location::Join(parts) => {
-                let mut iter = parts.iter().map(Location::span);
-                match iter.next() {
-                    Some(first) => {
-                        iter.fold(first, |acc, r| acc.start.min(r.start)..acc.end.max(r.end))
-                    }
-                    None => 0..0,
-                }
-            }
-        }
-    }
-
-    /// DEPRECATED len-free ordered-leaf-ranges shim (see [`Location::span`]).
-    /// Migrate segment-aware callers to [`Location::pieces`], then delete.
-    pub fn segments(&self) -> impl Iterator<Item = Range<usize>> {
-        let mut out = Vec::new();
-        self.collect_segments(&mut out);
-        out.into_iter()
-    }
-
-    fn collect_segments(&self, out: &mut Vec<Range<usize>>) {
-        match self {
-            Location::Simple { span, .. } => out.push(span.start..span.start + span.len),
-            Location::Complement(inner) => inner.collect_segments(out),
-            Location::Join(parts) => {
-                for p in parts {
-                    p.collect_segments(out);
-                }
-            }
-        }
-    }
-
     /// Fuzzy markers at the spatial ends: `(left, right)` = the `before` (`<`) of
     /// the lowest-start leaf and the `after` (`>`) of the highest-end leaf.
     /// Drives the torn-edge render. `(false, false)` for a crisp location.
@@ -374,7 +334,7 @@ pub struct Feature {
     #[serde(skip)]
     pub id: FeatureId,
     /// GenBank-native geometry. The bounding hull is the derived
-    /// [`Feature::span`]; segment-aware code matches on [`Location`] variants.
+    /// [`Feature::hull`]; segment-aware code matches on [`Location`] variants.
     pub location: Location,
     /// Verbatim GenBank feature-type string (the authoritative type).
     /// Display kind is derived via [`FeatureKind::classify`].
@@ -401,12 +361,6 @@ impl Feature {
     /// Explicit bounds-only hull (lossy on wrap). Delegates to [`Location::hull`].
     pub fn hull(&self, len: usize) -> Range<usize> {
         self.location.hull(len)
-    }
-
-    /// DEPRECATED len-free hull shim (see [`Location::span`]) — migrate to
-    /// [`Feature::hull`] / [`Feature::contains`] / [`Feature::pieces`].
-    pub fn span(&self) -> Range<usize> {
-        self.location.span()
     }
 }
 
@@ -475,28 +429,38 @@ mod location_tests {
     use super::*;
 
     #[test]
-    fn span_of_simple_is_the_range() {
-        assert_eq!(Location::simple(3..9).span(), 3..9);
+    fn hull_of_simple_is_the_range() {
+        assert_eq!(Location::simple(3..9).hull(50), 3..9);
     }
 
     #[test]
-    fn span_of_join_is_the_hull() {
+    fn hull_of_join_is_the_bounding_box() {
         let j = Location::Join(vec![Location::simple(30..40), Location::simple(11..20)]);
         // Hull spans min start .. max end, regardless of segment order.
-        assert_eq!(j.span(), 11..40);
+        assert_eq!(j.hull(50), 11..40);
     }
 
     #[test]
-    fn span_of_complement_is_inner_span() {
+    fn hull_of_complement_is_inner_hull() {
         let c = Location::Complement(Box::new(Location::simple(5..8)));
-        assert_eq!(c.span(), 5..8);
+        assert_eq!(c.hull(50), 5..8);
     }
 
     #[test]
-    fn segments_yields_ordered_leaves() {
+    fn pieces_yields_ordered_leaves() {
         let j = Location::Join(vec![Location::simple(0..3), Location::simple(6..9)]);
-        let segs: Vec<_> = j.segments().collect();
-        assert_eq!(segs, vec![0..3, 6..9]);
+        assert_eq!(j.pieces(50), vec![0..3, 6..9]);
+    }
+
+    #[test]
+    fn wrapping_simple_pieces_split_at_origin() {
+        // A single origin-spanning Simple on a len-20 molecule → two runs.
+        let w = Location::from_span(Span::new(16, 8));
+        assert_eq!(w.pieces(20), vec![16..20, 0..4]);
+        assert_eq!(w.hull(20), 0..20); // lossy on wrap
+        assert!(w.contains(18, 20));
+        assert!(w.contains(2, 20));
+        assert!(!w.contains(10, 20));
     }
 
     #[test]
