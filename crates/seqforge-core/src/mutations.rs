@@ -20,6 +20,7 @@
 
 use std::ops::Range;
 
+use crate::span::Span;
 use crate::{Annotations, Buffer, Location, Strand};
 
 /// Replace `buf.text[range]` with `new_bytes`, shift features per the §2
@@ -145,14 +146,19 @@ fn shift_location(
 ) -> Option<Location> {
     match loc {
         Location::Simple {
-            range,
+            span,
             before,
             after,
-        } => shift_range(range, start, removed, inserted).map(|range| Location::Simple {
-            range,
-            before: *before,
-            after: *after,
-        }),
+        } => {
+            // P1: no Simple wraps yet, so the span is a plain range for the
+            // splice-clamp policy; re-wrap the result into a Span.
+            let range = span.start..span.start + span.len;
+            shift_range(&range, start, removed, inserted).map(|r| Location::Simple {
+                span: Span::from_range(r),
+                before: *before,
+                after: *after,
+            })
+        }
         Location::Complement(inner) => shift_location(inner, start, removed, inserted)
             .map(|l| Location::Complement(Box::new(l))),
         Location::Join(parts) => {

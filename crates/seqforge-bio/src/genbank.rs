@@ -1,8 +1,8 @@
 use gb_io::reader::SeqReader;
 use gb_io::seq::{After, Before, Feature as GbFeature, Location, Seq, Topology as GbTopology};
 use seqforge_core::{
-    Annotations, Buffer, Document, Feature, Location as CoreLocation, Primer, Provenance, Strand,
-    Topology,
+    Annotations, Buffer, Document, Feature, Location as CoreLocation, Primer, Provenance,
+    Span as CoreSpan, Strand, Topology,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -223,7 +223,7 @@ fn gb_geometry(loc: &Location) -> Option<CoreLocation> {
             let start = (*a).max(0) as usize;
             let end = (*b).max(0) as usize;
             (start < end).then_some(CoreLocation::Simple {
-                range: start..end,
+                span: CoreSpan::from_range(start..end),
                 before: *before,
                 after: *after,
             })
@@ -261,12 +261,14 @@ fn core_location_to_gb(loc: &CoreLocation, strand: Strand) -> Location {
 fn geometry_to_gb(loc: &CoreLocation) -> Location {
     match loc {
         CoreLocation::Simple {
-            range,
+            span,
             before,
             after,
         } => Location::Range(
-            (range.start as i64, Before(*before)),
-            (range.end as i64, After(*after)),
+            // P1: no Simple wraps yet; a plain range. (P2 emits join(...) for a
+            // wrapping span.)
+            (span.start as i64, Before(*before)),
+            ((span.start + span.len) as i64, After(*after)),
         ),
         CoreLocation::Join(parts) => Location::Join(parts.iter().map(geometry_to_gb).collect()),
         CoreLocation::Complement(inner) => Location::Complement(Box::new(geometry_to_gb(inner))),

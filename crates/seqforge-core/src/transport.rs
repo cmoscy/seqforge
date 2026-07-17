@@ -13,6 +13,7 @@
 
 use std::ops::Range;
 
+use crate::span::Span;
 use crate::{Annotations, Feature, FeatureId, Location, Primer, Provenance, Strand, Topology};
 
 /// The carrier: an annotated subsequence in **local** (0-based, slice-relative)
@@ -218,7 +219,7 @@ fn localize_feature(f: &Feature, map: &PosMap, policy: PartialPolicy) -> Option<
             let after = span.end > map.end; // 3' cut → `>`
             Some(Feature {
                 location: Location::Simple {
-                    range: (a - map.start)..(b - map.start),
+                    span: Span::from_range((a - map.start)..(b - map.start)),
                     before,
                     after,
                 },
@@ -349,7 +350,7 @@ fn find_merge_pair(features: &[Feature]) -> Option<(usize, usize)> {
 /// segments, sort, coalesce touching/overlapping ones; one run → `Simple`,
 /// otherwise `Join`. Internal fuzzy boundaries are cleared (now continuous).
 fn combine_locations(a: &Location, b: &Location) -> Location {
-    let mut segs: Vec<Range<usize>> = a.segments().chain(b.segments()).cloned().collect();
+    let mut segs: Vec<Range<usize>> = a.segments().chain(b.segments()).collect();
     segs.sort_by_key(|r| (r.start, r.end));
 
     let mut merged: Vec<Range<usize>> = Vec::new();
@@ -374,11 +375,11 @@ fn combine_locations(a: &Location, b: &Location) -> Location {
 fn offset_location(loc: &Location, delta: isize) -> Location {
     match loc {
         Location::Simple {
-            range,
+            span,
             before,
             after,
         } => Location::Simple {
-            range: (range.start as isize + delta) as usize..(range.end as isize + delta) as usize,
+            span: span.shift(delta),
             before: *before,
             after: *after,
         },
@@ -397,11 +398,12 @@ fn offset_location(loc: &Location, delta: isize) -> Location {
 fn mirror_location(loc: &Location, l: usize) -> Location {
     match loc {
         Location::Simple {
-            range,
+            span,
             before,
             after,
         } => Location::Simple {
-            range: l.saturating_sub(range.end)..l.saturating_sub(range.start),
+            // [a, b) → [l-b, l-a); with start+len form: new start = l-(start+len).
+            span: Span::new(l.saturating_sub(span.start + span.len), span.len),
             // 5'/3' swap under mirroring.
             before: *after,
             after: *before,

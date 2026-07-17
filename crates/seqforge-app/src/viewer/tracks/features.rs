@@ -40,7 +40,7 @@ fn feature_segment_rects(
         .segments()
         .filter_map(|seg| {
             clip_range_rect(
-                seg,
+                &seg,
                 block_start,
                 block_end,
                 bar_row_y,

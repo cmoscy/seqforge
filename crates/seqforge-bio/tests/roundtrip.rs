@@ -230,7 +230,7 @@ fn roundtrip_join_preserves_segments() {
 fn roundtrip_before_fuzzy_preserved() {
     // `<10..40` — a 5'-truncated feature.
     let loc = Location::Simple {
-        range: 10..40,
+        span: seqforge_core::Span::from_range(10..40),
         before: true,
         after: false,
     };
@@ -242,7 +242,7 @@ fn roundtrip_before_fuzzy_preserved() {
 fn roundtrip_after_fuzzy_preserved() {
     // `10..>40` — a 3'-truncated feature.
     let loc = Location::Simple {
-        range: 10..40,
+        span: seqforge_core::Span::from_range(10..40),
         before: false,
         after: true,
     };
