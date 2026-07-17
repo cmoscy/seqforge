@@ -81,38 +81,44 @@ pub enum Orient {
 
 // ── extract ─────────────────────────────────────────────────────────────────
 
-/// Extract `range` from `text` + `ann` into a [`SeqSlice`] in local coordinates.
+/// Extract `span` from `text` + `ann` into a [`SeqSlice`] in local coordinates.
 ///
-/// `circular` allows a range that wraps the origin (`range.start > range.end`).
-/// The partial-feature policy is decided **here**. Each carried feature/primer is
-/// re-homed to slice-local coordinates; provenance is stamped on features so a
-/// later [`place`] with `merge` can reunite split pieces by lineage.
+/// The [`Span`] is the single wrap encoding — `span.wraps(text.len())` drives
+/// origin crossing, so there is no separate `circular` flag or `start > end`
+/// convention. The partial-feature policy is decided **here**. Each carried
+/// feature/primer is re-homed to slice-local coordinates; provenance is stamped
+/// on features so a later [`place`] with `merge` can reunite split pieces by
+/// lineage.
 ///
 /// `source_doc` names the origin buffer (for the provenance lineage key).
 pub fn extract(
     text: &[u8],
     ann: &Annotations,
-    range: Range<usize>,
-    circular: bool,
+    span: Span,
     policy: PartialPolicy,
     source_doc: &str,
 ) -> SeqSlice {
     let total = text.len();
-    let wrap = circular && range.start > range.end;
-
-    // Slice bytes.
-    let bytes: Vec<u8> = if wrap {
-        let mut v = text[range.start..].to_vec();
-        v.extend_from_slice(&text[..range.end]);
-        v
+    let wrap = span.wraps(total);
+    // `PosMap` keeps the `start > end` convention internally; derive it from the
+    // span (a wrapping span's tail end is `span.end(total) < start`).
+    let start = span.start;
+    let end = if wrap {
+        span.end(total)
     } else {
-        text[range.start..range.end.min(total)].to_vec()
+        span.start + span.len
     };
+
+    // Slice bytes — concatenate the span's 1-or-2 linear runs (`linear_pieces`).
+    let mut bytes: Vec<u8> = Vec::with_capacity(span.len);
+    for run in span.linear_pieces(total).iter() {
+        bytes.extend_from_slice(&text[run.start..run.end.min(total)]);
+    }
     let slice_len = bytes.len();
 
     let map = PosMap {
-        start: range.start,
-        end: range.end,
+        start,
+        end,
         total,
         wrap,
     };
@@ -473,7 +479,13 @@ mod tests {
     fn extract_contained_feature_is_localized() {
         // text 0..20; feature [5,10); extract [4,12) → local [1,6).
         let a = ann(vec![feat(5, 10, Strand::Forward)], vec![]);
-        let s = extract(TEXT20, &a, 4..12, false, PartialPolicy::DropPartials, "src");
+        let s = extract(
+            TEXT20,
+            &a,
+            Span::from_range(4..12),
+            PartialPolicy::DropPartials,
+            "src",
+        );
         assert_eq!(s.features.len(), 1);
         assert_eq!(s.features[0].hull(s.len()), 1..6);
         assert_eq!(s.bytes.len(), 8);
@@ -486,7 +498,13 @@ mod tests {
     fn extract_straddler_dropped_by_default() {
         // feature [2,8); extract [5,15) → straddles the left edge → dropped.
         let a = ann(vec![feat(2, 8, Strand::Forward)], vec![]);
-        let s = extract(TEXT20, &a, 5..15, false, PartialPolicy::DropPartials, "src");
+        let s = extract(
+            TEXT20,
+            &a,
+            Span::from_range(5..15),
+            PartialPolicy::DropPartials,
+            "src",
+        );
         assert!(s.features.is_empty());
     }
 
@@ -497,8 +515,7 @@ mod tests {
         let s = extract(
             TEXT20,
             &a,
-            5..15,
-            false,
+            Span::from_range(5..15),
             PartialPolicy::TruncatePartials,
             "src",
         );
@@ -512,10 +529,9 @@ mod tests {
         // total 20; circular range [16, 4) wraps origin → slice len 8.
         // feature [17,19) is inside the first arm → local [1,3).
         let a = ann(vec![feat(17, 19, Strand::Forward)], vec![]);
-        // A wrapping range (start > end); written explicitly so clippy doesn't
-        // read the `16..4` literal as an empty range.
-        let wrap = Range { start: 16, end: 4 };
-        let s = extract(TEXT20, &a, wrap, true, PartialPolicy::DropPartials, "src");
+        // A wrapping span: start 16, len 8 on L=20 crosses the origin.
+        let wrap = Span::new(16, 8);
+        let s = extract(TEXT20, &a, wrap, PartialPolicy::DropPartials, "src");
         assert_eq!(s.bytes.len(), 8);
         assert_eq!(s.features.len(), 1);
         assert_eq!(s.features[0].hull(s.len()), 1..3);
@@ -529,8 +545,7 @@ mod tests {
         let s = extract(
             TEXT20,
             &ann(vec![], vec![p]),
-            4..14,
-            false,
+            Span::from_range(4..14),
             PartialPolicy::DropPartials,
             "src",
         );
@@ -545,8 +560,7 @@ mod tests {
         let s = extract(
             TEXT20,
             &ann(vec![], vec![p]),
-            5..14,
-            false,
+            Span::from_range(5..14),
             PartialPolicy::DropPartials,
             "src",
         );
@@ -561,8 +575,7 @@ mod tests {
         let s = extract(
             TEXT20,
             &ann(vec![], vec![outside, detached]),
-            0..10,
-            false,
+            Span::from_range(0..10),
             PartialPolicy::DropPartials,
             "src",
         );
@@ -727,7 +740,13 @@ mod tests {
             vec![feat(3, 9, Strand::Forward), feat(20, 25, Strand::Reverse)],
             vec![primer(Some(4..8), Strand::Forward)],
         );
-        let s = extract(&text, &a, 0..30, false, PartialPolicy::DropPartials, "src");
+        let s = extract(
+            &text,
+            &a,
+            Span::from_range(0..30),
+            PartialPolicy::DropPartials,
+            "src",
+        );
         let mut dst = ann(vec![], vec![]);
         place(&mut dst, &s, 0, Orient::Identity, false, 30);
         let spans: Vec<_> = dst.iter().map(|f| f.hull(30)).collect();

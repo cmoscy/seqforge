@@ -24,7 +24,7 @@ use std::ops::Range;
 
 use seqforge_core::{
     DispatchError, EditKind, Feature, FeatureId, Location, Orient, PartialPolicy, Primer, PrimerId,
-    Selection, SeqSlice, Strand, ViewId, ViewSelection, ViewerResponse,
+    Selection, SeqSlice, Span, Strand, ViewId, ViewSelection, ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -141,18 +141,28 @@ fn extract_region(
     vid: ViewId,
     range: Range<usize>,
 ) -> Result<SeqSlice, DispatchError> {
-    state.workspace.with_buffer(vid, |_v, buf, ann| {
-        if range.end > buf.text.len() {
+    state.workspace.with_buffer(vid, |v, buf, ann| {
+        let total = buf.text.len();
+        if range.end > total {
             return Err(DispatchError::OutOfRange {
                 position: range.end,
-                seq_len: buf.text.len(),
+                seq_len: total,
             });
         }
+        // The `Span` is the single wrap encoding. Honor a live wrapping selection
+        // (P3): a shift-select through the origin whose bounds match this request
+        // extracts the origin-crossing arc, not the `[lo, hi)` interval it is the
+        // complement of. Any other range is a plain linear span.
+        let span = match v.selection.text_range() {
+            Some(sel) if sel.wrap && sel.ordered() == (range.start, range.end) => {
+                sel.to_span(total)
+            }
+            _ => Span::from_range(range),
+        };
         Ok(seqforge_core::transport::extract(
             &buf.text,
             ann,
-            range,
-            buf.is_circular(),
+            span,
             PartialPolicy::DropPartials,
             &buf.name,
         ))
