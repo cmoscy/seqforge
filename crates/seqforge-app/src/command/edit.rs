@@ -1526,8 +1526,8 @@ mod tests {
                 .collect()
         }
 
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/pUC19.gbk");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../seqforge-bio/tests/fixtures/pUC19.gbk");
         let mut s = AppState::default();
         let vid = s
             .workspace
