@@ -1270,7 +1270,15 @@ mod tests {
         // Click at the SOL caret column.
         let pos = Pos2::new(left_margin + 1.0, 5.0);
         assert_eq!(
-            screen_to_seq(pos, rect, style.char_width, style.line_width, 0, &offsets, left_margin),
+            screen_to_seq(
+                pos,
+                rect,
+                style.char_width,
+                style.line_width,
+                0,
+                &offsets,
+                left_margin
+            ),
             Some(0)
         );
         // Empty-only policy: any in-block column maps to insert-at-0.
@@ -1289,8 +1297,7 @@ mod tests {
         );
         // Non-empty: a column past the last base still returns None (refocus
         // must not invent an EOF caret).
-        let (_layouts_ne, offsets_ne) =
-            build_block_layouts(&ann, &[], 4, &style, &vis, 0.0, None);
+        let (_layouts_ne, offsets_ne) = build_block_layouts(&ann, &[], 4, &style, &vis, 0.0, None);
         let past_eof = Pos2::new(left_margin + style.char_width * 10.0, 5.0);
         assert_eq!(
             screen_to_seq(
