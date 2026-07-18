@@ -1828,6 +1828,138 @@ mod tests {
     }
 
     #[test]
+    fn pcr_builds_product_buffer_inheriting_annotations() {
+        // Template (30 bp), forward primer at [4,10), reverse primer at [20,26)
+        // → amplicon [4,26) = 22 bp, no tails (tail_f_len 0).
+        const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
+        let mut s = state_with(T);
+
+        let fwd_seq = std::str::from_utf8(&T[4..10]).unwrap().to_string();
+        let rev_seq = String::from_utf8(seqforge_bio::reverse_complement(&T[20..26])).unwrap();
+        let fwd = add_primer(&mut s, Some("F"), &fwd_seq, Some(4), Some(10), "+");
+        let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
+        // A primer straddling the amplicon's 3' edge → detaches on extract → dropped.
+        add_primer(
+            &mut s,
+            Some("straddler-primer"),
+            "ACGTAC",
+            Some(24),
+            Some(30),
+            "+",
+        );
+
+        add_feat(&mut s, 12, 16, "interior"); // fully inside → carries, shifted
+        add_feat(&mut s, 22, 28, "straddle"); // crosses re=26 → truncated + fuzzy
+        add_feat(&mut s, 0, 3, "outside"); // fully outside → dropped
+
+        // product_feature = true → the whole-product label feature is added.
+        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, true).unwrap();
+
+        // The active view is now the product; its bytes are the amplicon.
+        assert_eq!(text(&mut s), T[4..26].to_vec());
+
+        let (labels, interior_bounds, straddle, fuzzy_count, primer_count, all_attached) = s
+            .workspace
+            .with_active_buffer(|_, buf, ann| {
+                let len = buf.text.len();
+                let labels: Vec<String> = ann.iter().map(|f| f.label.clone()).collect();
+                let interior = ann
+                    .iter()
+                    .find(|f| f.label == "interior")
+                    .map(|f| f.bounds(len));
+                let straddle = ann
+                    .iter()
+                    .find(|f| f.label == "straddle")
+                    .map(|f| (f.bounds(len), f.location.is_fuzzy()));
+                let fuzzy_count = ann.iter().filter(|f| f.location.is_fuzzy()).count();
+                let primer_count = ann.primers().count();
+                let all_attached = ann.primers().all(|p| p.binding.is_some());
+                (
+                    labels,
+                    interior,
+                    straddle,
+                    fuzzy_count,
+                    primer_count,
+                    all_attached,
+                )
+            })
+            .unwrap();
+
+        // Interior feature re-homed by tail_f_len (0) → template [12,16) → [8,12).
+        assert_eq!(
+            interior_bounds,
+            Some(8..12),
+            "interior feature shifted onto product"
+        );
+        // Straddler truncated to the amplicon edge (template [22,26) → [18,22)) + fuzzy.
+        assert_eq!(
+            straddle,
+            Some((18..22, true)),
+            "straddler truncated + fuzzy-marked"
+        );
+        assert_eq!(fuzzy_count, 1, "only the straddler is fuzzy");
+        assert!(
+            !labels.iter().any(|l| l == "outside"),
+            "outside feature dropped"
+        );
+        // Whole-product provenance feature present.
+        assert!(
+            labels.iter().any(|l| l.starts_with("PCR product")),
+            "product carries a provenance feature: {labels:?}"
+        );
+        // Only the two in-amplicon primers carry; the straddler primer is dropped.
+        assert_eq!(primer_count, 2, "fwd + rev carried, straddler dropped");
+        assert!(
+            all_attached,
+            "carried primers keep their bindings (no floating)"
+        );
+    }
+
+    #[test]
+    fn pcr_detached_primer_errors() {
+        const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
+        let mut s = state_with(T);
+        let fwd_seq = std::str::from_utf8(&T[4..10]).unwrap().to_string();
+        let rev_seq = String::from_utf8(seqforge_bio::reverse_complement(&T[20..26])).unwrap();
+        // Forward primer created floating (no binding) → PCR refuses.
+        let fwd = add_primer(&mut s, Some("F"), &fwd_seq, None, None, "+");
+        let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
+        let err = crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, false).unwrap_err();
+        assert!(
+            matches!(err, DispatchError::InvalidInput(ref m) if m.contains("attach or rescan")),
+            "detached primer errors with an attach/rescan hint: {err:?}"
+        );
+    }
+
+    #[test]
+    fn pcr_product_feature_is_opt_in() {
+        // Off by default: the product carries the inherited annotations but *no*
+        // whole-product label feature.
+        const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
+        let mut s = state_with(T);
+        let fwd_seq = std::str::from_utf8(&T[4..10]).unwrap().to_string();
+        let rev_seq = String::from_utf8(seqforge_bio::reverse_complement(&T[20..26])).unwrap();
+        let fwd = add_primer(&mut s, Some("F"), &fwd_seq, Some(4), Some(10), "+");
+        let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
+        add_feat(&mut s, 12, 16, "interior");
+
+        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, false).unwrap();
+
+        let labels: Vec<String> = s
+            .workspace
+            .with_active_buffer(|_, _, ann| ann.iter().map(|f| f.label.clone()).collect())
+            .unwrap();
+        assert!(
+            labels.iter().any(|l| l == "interior"),
+            "inherited feature still carries: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.starts_with("PCR product")),
+            "no product label feature when opted out: {labels:?}"
+        );
+    }
+
+    #[test]
     fn add_primer_attached_and_floating() {
         let mut s = state_with(b"ATGCATGCATGC");
         let attached = add_primer(&mut s, Some("fwd"), "atg c", Some(0), Some(4), "+");

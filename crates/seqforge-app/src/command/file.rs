@@ -126,6 +126,129 @@ pub(super) fn apply_new(
     Ok(Some(ViewerResponse::Ok))
 }
 
+/// Amplify between two attached primers → a new **linear** product buffer that
+/// inherits the template's annotations (Primers Phase 3.1a). The biology lives
+/// in `seqforge_bio::pcr`; here we re-home the amplicon's annotations onto the
+/// fresh product via `transport::{extract,place}` and open it as a tab (the
+/// `apply_new` buffer/tab flow).
+pub(super) fn apply_pcr(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    fwd: seqforge_core::PrimerId,
+    rev: seqforge_core::PrimerId,
+    name: Option<String>,
+    product_feature: bool,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    use seqforge_core::{
+        Annotations, Feature, FeatureId, Location, Orient, PartialPolicy, Provenance, Span, Strand,
+        transport,
+    };
+
+    let vid = edit::resolve_target(state, view)?;
+
+    struct Built {
+        bytes: Vec<u8>,
+        ann: Annotations,
+        name: String,
+        warnings: Vec<String>,
+    }
+
+    // ── Read-only over the template: build product bytes + inherit annotations ──
+    let built = state.workspace.with_buffer(vid, |_, buf, ann| {
+        let fwd_p = ann
+            .primer(fwd)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {fwd}")))?;
+        let rev_p = ann
+            .primer(rev)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {rev}")))?;
+
+        let prod = seqforge_bio::pcr(&buf.text, fwd_p, rev_p, buf.is_circular())
+            .map_err(|e| DispatchError::InvalidInput(e.to_string()))?;
+
+        // Inherit template annotations across the amplicon. Straddling features
+        // are clamped + fuzzy-marked (TruncatePartials); straddling primers are
+        // detached by `extract` (binding = None) — we drop those below.
+        let mut slice = transport::extract(
+            &buf.text,
+            ann,
+            prod.amplicon,
+            PartialPolicy::TruncatePartials,
+            &buf.name,
+        );
+        slice.primers.retain(|p| p.binding.is_some());
+
+        // Place at the forward tail offset (the tail prepends bases ahead of the
+        // first template column). Fresh product → nothing to reunite (merge=false).
+        let mut prod_ann = Annotations::default();
+        transport::place(
+            &mut prod_ann,
+            &slice,
+            prod.tail_f_len,
+            Orient::Identity,
+            false,
+            prod.bytes.len(),
+        );
+
+        // Optional whole-product label feature (opt-in; reuses the
+        // `/seqforge_provenance` round-trip, records the template + the two
+        // primers). Off by default — the inherited amplicon features already carry
+        // their own extract-stamped lineage, so this is purely the top-level label.
+        if product_feature {
+            prod_ann.add(Feature {
+                id: FeatureId(0),
+                location: Location::from_span(Span::new(0, prod.bytes.len())),
+                raw_kind: "misc_feature".to_string(),
+                label: format!("PCR product ({} + {})", fwd_p.name, rev_p.name),
+                strand: Strand::Forward,
+                qualifiers: Default::default(),
+                provenance: Some(Provenance {
+                    source_doc: buf.name.clone(),
+                    source_range: prod.amplicon.bounds(buf.text.len()),
+                    operation: format!("pcr(fwd={fwd}, rev={rev})"),
+                }),
+            });
+        }
+
+        let name = name
+            .clone()
+            .unwrap_or_else(|| format!("{} amplicon", buf.name));
+        Ok::<Built, DispatchError>(Built {
+            bytes: prod.bytes,
+            ann: prod_ann,
+            name,
+            warnings: prod.warnings,
+        })
+    })??;
+
+    // ── Materialize the product buffer + open it (mirrors `apply_new`) ──
+    let len = built.bytes.len();
+    let view_id =
+        state
+            .workspace
+            .new_buffer_annotated(built.name, built.bytes, Topology::Linear, built.ann);
+
+    layout::place_view_tab(state, view_id);
+    layout::ensure_welcome_invariant(state);
+    layout::dock_activate_view(state, view_id);
+    state.focus.set_scope(FocusScope::View(view_id));
+
+    if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
+        state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
+            arc.read()
+                .ok()
+                .map(|b| (crate::workspace::display_name(&b), b.len()))
+        })
+    }) {
+        state.events.emit(AppEvent::DocOpened { name, len });
+    }
+
+    for w in &built.warnings {
+        state.toasts.warning(format!("PCR: {w}"));
+    }
+
+    Ok(Some(ViewerResponse::Edited { len, changed: true }))
+}
+
 pub(super) fn apply_close_doc(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {

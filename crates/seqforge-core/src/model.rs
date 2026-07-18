@@ -586,6 +586,15 @@ pub enum ViewSelection {
     Primer(PrimerId),
     /// A restriction cut site; `range` == the recognition span.
     CutSite { key: CutSiteKey, range: Selection },
+    /// An ordered PCR primer pair (Primers Phase 3.1b; extends ROADMAP decision
+    /// 20). Bounded — **not** a general multi-select (that stays deferred to the
+    /// assembly cart). `range` == the amplicon span (fwd 5'-anchor → rev
+    /// 5'-anchor), so selecting the pair highlights what `Pcr` would produce.
+    PrimerPair {
+        fwd: PrimerId,
+        rev: PrimerId,
+        range: Selection,
+    },
 }
 
 impl ViewSelection {
@@ -596,7 +605,8 @@ impl ViewSelection {
         match self {
             ViewSelection::Text(s)
             | ViewSelection::Feature { range: s, .. }
-            | ViewSelection::CutSite { range: s, .. } => Some(*s),
+            | ViewSelection::CutSite { range: s, .. }
+            | ViewSelection::PrimerPair { range: s, .. } => Some(*s),
             ViewSelection::Primer(_) | ViewSelection::None => None,
         }
     }
@@ -613,6 +623,14 @@ impl ViewSelection {
     pub fn selected_primer(&self) -> Option<PrimerId> {
         match self {
             ViewSelection::Primer(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The selected `(fwd, rev)` primer ids, if a PCR primer pair is selected.
+    pub fn selected_primer_pair(&self) -> Option<(PrimerId, PrimerId)> {
+        match self {
+            ViewSelection::PrimerPair { fwd, rev, .. } => Some((*fwd, *rev)),
             _ => None,
         }
     }
@@ -640,9 +658,10 @@ impl ViewSelection {
         match self {
             ViewSelection::Feature { id, .. } => DeleteIntent::Feature(*id),
             ViewSelection::Primer(id) => DeleteIntent::Primer(*id),
-            ViewSelection::Text(_) | ViewSelection::CutSite { .. } | ViewSelection::None => {
-                DeleteIntent::Sequence
-            }
+            ViewSelection::Text(_)
+            | ViewSelection::CutSite { .. }
+            | ViewSelection::PrimerPair { .. }
+            | ViewSelection::None => DeleteIntent::Sequence,
         }
     }
 }
@@ -948,6 +967,35 @@ mod tests {
             Some(10)
         );
         assert_eq!(cut.text_range(), Some(Selection::range(10, 16)));
+    }
+
+    #[test]
+    fn primer_pair_carries_amplicon_range_not_a_single_primer() {
+        // A PCR pair (Phase 3.1b) is bounded + ordered; its `range` is the amplicon
+        // (what PCR would produce), so `text_range` drives the sequence highlight —
+        // but it is *not* a single-primer object selection.
+        let pair = ViewSelection::PrimerPair {
+            fwd: PrimerId(1),
+            rev: PrimerId(2),
+            range: Selection::range(4, 26),
+        };
+        assert_eq!(
+            pair.selected_primer_pair(),
+            Some((PrimerId(1), PrimerId(2)))
+        );
+        assert_eq!(
+            pair.selected_primer(),
+            None,
+            "a pair is not a single primer"
+        );
+        assert_eq!(pair.selected_feature(), None);
+        assert_eq!(
+            pair.text_range(),
+            Some(Selection::range(4, 26)),
+            "the amplicon range highlights what PCR produces"
+        );
+        // Delete over a pair falls through to the sequence path (not object-delete).
+        assert_eq!(pair.delete_intent(), DeleteIntent::Sequence);
     }
 
     #[test]

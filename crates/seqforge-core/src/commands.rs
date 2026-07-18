@@ -463,6 +463,36 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Amplify between two attached primers (Primers Phase 3.1). Produces a new
+    /// **linear** product buffer inheriting the template's annotations: features
+    /// straddling the amplicon edge are truncated + fuzzy-marked; features fully
+    /// inside carry over; straddling primers are dropped. Mismatches bake in
+    /// (mutagenesis), 5' tails become the product ends (overhangs), and a
+    /// circular template gives around-the-horn / whole-plasmid amplification.
+    /// `fwd` must be a Forward primer, `rev` a Reverse one; both must be
+    /// attached (errors if a primer is detached — attach or rescan it first).
+    Pcr {
+        /// Forward primer id (from `primers list`).
+        #[arg(long)]
+        fwd: PrimerId,
+        /// Reverse primer id (from `primers list`).
+        #[arg(long)]
+        rev: PrimerId,
+        /// Optional product buffer name (defaults to `<template> amplicon`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Add a whole-product `misc_feature` labelling the amplicon (carries the
+        /// reaction provenance). Off by default — inherited amplicon features keep
+        /// their own lineage regardless; this only adds the top-level label.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        product_feature: bool,
+        /// The **template** view (defaults to the active view).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Save the active buffer to its source path.
     Save {
         /// Overwrite even if the file changed on disk since it was loaded
@@ -527,6 +557,7 @@ impl ViewerRequest {
             ViewerRequest::RescanPrimer { view, .. } => *view,
             ViewerRequest::AddPrimerSite { view, .. } => *view,
             ViewerRequest::RemovePrimer { view, .. } => *view,
+            ViewerRequest::Pcr { view, .. } => *view,
             ViewerRequest::Save { view, .. } => *view,
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
@@ -840,6 +871,7 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::RescanPrimer { .. }
         | ViewerRequest::AddPrimerSite { .. }
         | ViewerRequest::RemovePrimer { .. }
+        | ViewerRequest::Pcr { .. }
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
         | ViewerRequest::Undo { .. }
@@ -1855,7 +1887,10 @@ mod tests {
         scan(&mut view, &buf, &mut ann, &bio, "EcoRI");
         assert_eq!(view.cut_sites.len(), 1);
         assert_eq!(view.results_version, Some(buf.version));
-        assert!(!view.cut_sites_stale(buf.version), "fresh right after a scan");
+        assert!(
+            !view.cut_sites_stale(buf.version),
+            "fresh right after a scan"
+        );
 
         // An edit bumps the buffer version; the overlay is now stale.
         buf.version += 1;

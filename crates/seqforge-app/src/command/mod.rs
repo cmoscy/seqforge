@@ -131,6 +131,11 @@ pub enum AppCommand {
     RevealPrimer {
         id: seqforge_core::PrimerId,
     },
+    /// Cmd-click a primer (Inspector row or map arrow) to build / edit a PCR
+    /// `PrimerPair` selection (Phase 3.1b). Bounded, ordered — not multi-select.
+    PromotePrimerPair {
+        id: seqforge_core::PrimerId,
+    },
     /// Select a feature by id (Inspector row-click): sets `View.selected_feature`
     /// and selects + reveals its range.
     RevealFeature {
@@ -330,6 +335,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         RevealPrimer { .. } | RevealFeature { .. } | RevealCutSite { .. } => {
             state.workspace.active_view().is_some()
         }
+        PromotePrimerPair { .. } => state.workspace.active_view().is_some(),
         EditFeatureInInspector { .. } | EditPrimerInInspector { .. } => {
             state.workspace.active_view().is_some()
         }
@@ -570,6 +576,7 @@ pub fn apply<B: BioOps>(
         // ── Selection ───────────────────────────────────────────────
         Select(sel) => nav::apply_select(state, sel),
         RevealPrimer { id } => nav::apply_reveal_primer(state, id),
+        PromotePrimerPair { id } => nav::apply_promote_primer_pair(state, id),
         RevealFeature { id } => nav::apply_reveal_feature(state, id),
         RevealCutSite { key, start, end } => nav::apply_reveal_cut_site(state, key, start, end),
         EditFeatureInInspector { id, arm_delete } => {
@@ -781,6 +788,13 @@ pub fn apply<B: BioOps>(
                 view,
             } => edit::apply_add_primer_site(state, view, id, enzyme, overhang, flank),
             ViewerRequest::RemovePrimer { id, view } => edit::apply_remove_primer(state, view, id),
+            ViewerRequest::Pcr {
+                fwd,
+                rev,
+                name,
+                product_feature,
+                view,
+            } => file::apply_pcr(state, view, fwd, rev, name, product_feature),
             ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.

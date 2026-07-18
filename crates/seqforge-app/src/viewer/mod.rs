@@ -1120,6 +1120,7 @@ impl SequenceView {
             });
 
             let shift_held = ui.input(|i| i.modifiers.shift);
+            let cmd_held = ui.input(|i| i.modifiers.command);
 
             // One selection setter — the whole intent (range / object) in one
             // atomic `Select(ViewSelection)` (mutual exclusion is structural now).
@@ -1173,12 +1174,19 @@ impl SequenceView {
                             .and_then(|id| render_ann.primer(id))
                             .filter(|p| p.binding.is_some())
                         {
-                            // Clicking a primer selects the oligo *object* (Phase
-                            // 1.5e): its own drawn bases highlight on the track, not
-                            // a template range (wrong strand for a reverse primer; a
-                            // 5' tail has no template column). Drives the Inspector
-                            // highlight by id — map↔panel sync.
-                            push_select(cmds, ViewSelection::Primer(primer.id));
+                            // Cmd-click builds / edits a PCR primer pair (Phase
+                            // 3.1b) — the same bounded-pair gesture as the Inspector
+                            // list; Shift stays reserved for the future cart.
+                            if cmd_held {
+                                cmds.push((AppCommand::PromotePrimerPair { id: primer.id }, None));
+                            } else {
+                                // A plain click selects the oligo *object* (Phase
+                                // 1.5e): its own drawn bases highlight on the track,
+                                // not a template range (wrong strand for a reverse
+                                // primer; a 5' tail has no template column). Drives
+                                // the Inspector highlight by id — map↔panel sync.
+                                push_select(cmds, ViewSelection::Primer(primer.id));
+                            }
                         } else if let Some(feat_idx) = find_hit(&hits, pos, Hit::as_feature) {
                             let feat = render_ann
                                 .by_position(feat_idx)

@@ -216,6 +216,24 @@ impl BufferStore {
         id
     }
 
+    /// Create a scratch buffer seeded with pre-built annotations — the materialize
+    /// path for a derived product (a PCR amplicon, later an assembly product). Like
+    /// [`Self::new_scratch`] but adopts `ann` (ids already minted by the producer,
+    /// e.g. `transport::place`) instead of the empty default.
+    pub fn new_scratch_annotated(
+        &mut self,
+        name: String,
+        text: Vec<u8>,
+        topology: seqforge_core::Topology,
+        ann: Annotations,
+    ) -> BufferId {
+        let buffer = Buffer::new(name, None, text, topology);
+        let id = self.alloc_id();
+        self.buffers.insert(id, Arc::new(RwLock::new(buffer)));
+        self.annotations.insert(id, ann);
+        id
+    }
+
     pub fn len(&self) -> usize {
         self.buffers.len()
     }
@@ -360,6 +378,23 @@ impl Workspace {
         topology: seqforge_core::Topology,
     ) -> ViewId {
         let buffer_id = self.buffers.new_scratch(name, text, topology);
+        self.add_view(buffer_id, ViewKind::TextView)
+    }
+
+    /// Create a new in-memory buffer seeded with `text` **and** `ann`, and open a
+    /// view onto it. The product-buffer sibling of [`Self::new_buffer`] — used by
+    /// PCR (and later assembly) to materialize a derived molecule that already
+    /// carries inherited annotations.
+    pub fn new_buffer_annotated(
+        &mut self,
+        name: String,
+        text: Vec<u8>,
+        topology: seqforge_core::Topology,
+        ann: Annotations,
+    ) -> ViewId {
+        let buffer_id = self
+            .buffers
+            .new_scratch_annotated(name, text, topology, ann);
         self.add_view(buffer_id, ViewKind::TextView)
     }
 
@@ -562,7 +597,8 @@ impl Workspace {
             match view.selection {
                 ViewSelection::Text(s)
                 | ViewSelection::Feature { range: s, .. }
-                | ViewSelection::CutSite { range: s, .. } => {
+                | ViewSelection::CutSite { range: s, .. }
+                | ViewSelection::PrimerPair { range: s, .. } => {
                     view.selection = ViewSelection::Text(s.clamp_to_len(len));
                 }
                 ViewSelection::Primer(_) | ViewSelection::None => {}
@@ -1028,9 +1064,9 @@ mod tests {
         // length-preserving). Tested at the Workspace layer because the command
         // applier runs `edit` first, which would mask the collapse.
         let mut ws = Workspace::default();
-        let bid =
-            ws.buffers
-                .new_scratch("x".into(), b"ATGCATGCAT".to_vec(), Topology::Circular);
+        let bid = ws
+            .buffers
+            .new_scratch("x".into(), b"ATGCATGCAT".to_vec(), Topology::Circular);
         let vid = ws.add_view(bid, ViewKind::TextView);
         ws.view_mut(vid).unwrap().selection = ViewSelection::Feature {
             id: seqforge_core::FeatureId::default(),
@@ -1045,7 +1081,10 @@ mod tests {
             "RC must collapse a stale Feature selection to Text, got {sel:?}"
         );
         let s = sel.text_range().unwrap();
-        assert!(s.anchor <= 10 && s.focus <= 10, "caret stays within 0..=len");
+        assert!(
+            s.anchor <= 10 && s.focus <= 10,
+            "caret stays within 0..=len"
+        );
     }
 
     #[test]
@@ -1087,7 +1126,13 @@ mod tests {
             fn load(&self, _: &Path) -> Result<seqforge_core::Document, String> {
                 unreachable!()
             }
-            fn find_matches(&self, _: &[u8], _: &[u8], _: u8, _: bool) -> Vec<seqforge_core::SearchHit> {
+            fn find_matches(
+                &self,
+                _: &[u8],
+                _: &[u8],
+                _: u8,
+                _: bool,
+            ) -> Vec<seqforge_core::SearchHit> {
                 vec![]
             }
             fn find_cut_sites(&self, _: &[u8], enzymes: &[&str], _: bool) -> Vec<CutSite> {
@@ -1106,7 +1151,12 @@ mod tests {
             fn resolve_enzyme_names(&self, _: &[u8], q: &str, _: bool) -> Vec<String> {
                 vec![q.to_string()]
             }
-            fn primer_infos(&self, _: &[u8], _: &[&seqforge_core::Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
+            fn primer_infos(
+                &self,
+                _: &[u8],
+                _: &[&seqforge_core::Primer],
+                _: bool,
+            ) -> Vec<seqforge_core::PrimerInfo> {
                 vec![]
             }
             fn methyl_states_for_sites(

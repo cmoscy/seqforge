@@ -234,6 +234,86 @@ pub(super) fn apply_reveal_primer(
     Ok(None)
 }
 
+/// Build a [`ViewSelection::PrimerPair`] from two primer ids in the given order
+/// (no strand reordering — the caller decides `fwd`/`rev`). `range` is the
+/// amplicon span (fwd 5'-anchor → rev 5'-anchor), wrap-aware on a circular
+/// template; it falls back to an empty caret when a binding is missing so a
+/// detached primer can still be paired (the `Pcr` op reports the detach).
+fn pair_selection(state: &mut AppState, fwd: PrimerId, rev: PrimerId) -> ViewSelection {
+    let range = state
+        .workspace
+        .with_active_buffer(|_v, b, ann| {
+            let len = b.text.len();
+            let bf = ann.primer(fwd).and_then(|p| p.binding);
+            let br = ann.primer(rev).and_then(|p| p.binding);
+            match (bf, br) {
+                (Some(bf), Some(br)) => {
+                    let (fs, re) = (bf.start, br.start + br.len);
+                    let span = if b.is_circular() {
+                        seqforge_core::Span::between(fs, re, len)
+                    } else if fs <= re {
+                        seqforge_core::Span::from_range(fs..re)
+                    } else {
+                        seqforge_core::Span::empty(fs)
+                    };
+                    Selection::from_span(span, len)
+                }
+                _ => Selection::cursor(0),
+            }
+        })
+        .unwrap_or_else(|_| Selection::cursor(0));
+    ViewSelection::PrimerPair { fwd, rev, range }
+}
+
+/// Order two primers into (fwd, rev) by strand — a top-strand (Forward) binder
+/// is the forward primer — then build the pair. Same-strand primers keep the
+/// click order (the pair still forms; the `Pcr` op reports the orientation).
+fn make_pair(state: &mut AppState, a: PrimerId, b: PrimerId) -> ViewSelection {
+    let a_rev = state
+        .workspace
+        .with_active_buffer(|_v, _b, ann| {
+            matches!(ann.primer(a).map(|p| p.strand), Some(Strand::Reverse))
+        })
+        .unwrap_or(false);
+    if a_rev {
+        pair_selection(state, b, a)
+    } else {
+        pair_selection(state, a, b)
+    }
+}
+
+/// Cmd-click a primer (Inspector row or map arrow) to build / edit a PCR
+/// [`ViewSelection::PrimerPair`] (Phase 3.1b). First Cmd-click anchors the
+/// forward primer; the next sets/replaces the reverse; Cmd-clicking a member
+/// removes it (collapsing back to the other as a single `Primer`); Cmd-clicking
+/// the lone anchor again clears the selection. A bounded, ordered pair — **not**
+/// a general multi-select (Shift stays reserved for the future cart).
+pub(super) fn apply_promote_primer_pair(
+    state: &mut AppState,
+    id: PrimerId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let current = state
+        .workspace
+        .active_view()
+        .map(|v| v.selection.clone())
+        .unwrap_or_default();
+    let new_sel = match current {
+        ViewSelection::Primer(a) if a == id => ViewSelection::None,
+        ViewSelection::Primer(a) => make_pair(state, a, id),
+        ViewSelection::PrimerPair { fwd, rev, .. } => {
+            if id == fwd {
+                ViewSelection::Primer(rev)
+            } else if id == rev {
+                ViewSelection::Primer(fwd)
+            } else {
+                pair_selection(state, fwd, id)
+            }
+        }
+        _ => ViewSelection::Primer(id),
+    };
+    apply_select(state, new_sel)
+}
+
 /// Select a feature by id (Inspector row-click): sets the `Feature` object
 /// selection (id + span) and reveals its range. Mirror of [`apply_reveal_primer`].
 pub(super) fn apply_reveal_feature(
@@ -614,6 +694,76 @@ mod tests {
             Some(2),
             "still scrolls the footprint into view"
         );
+    }
+
+    #[test]
+    fn promote_primer_pair_state_machine() {
+        // Two attached primers on one buffer; Cmd-click builds/edits the pair.
+        let (mut state, a) = open_with_primer(Some(1..4), "pairA");
+        let b = state
+            .workspace
+            .with_active_buffer_mut(|_v, _b, ann| {
+                ann.add_primer(Primer {
+                    id: PrimerId::default(),
+                    name: "b".into(),
+                    sequence: "GTA".into(),
+                    binding: Some(seqforge_core::Span::from_range(6..9)),
+                    strand: Strand::Reverse,
+                    qualifiers: Default::default(),
+                })
+            })
+            .unwrap();
+
+        // First Cmd-click with nothing selected → single anchor.
+        apply_promote_primer_pair(&mut state, a).unwrap();
+        assert_eq!(
+            state
+                .workspace
+                .active_view()
+                .unwrap()
+                .selection
+                .selected_primer(),
+            Some(a)
+        );
+
+        // Second Cmd-click on the other primer → a pair (fwd = forward binder).
+        apply_promote_primer_pair(&mut state, b).unwrap();
+        assert_eq!(
+            state
+                .workspace
+                .active_view()
+                .unwrap()
+                .selection
+                .selected_primer_pair(),
+            Some((a, b)),
+            "forward primer a is fwd, reverse primer b is rev"
+        );
+        // The amplicon range is the highlight (a.start=1 → b.end=9).
+        assert_eq!(
+            state
+                .workspace
+                .active_view()
+                .unwrap()
+                .selection
+                .text_range(),
+            Some(Selection::range(1, 9))
+        );
+
+        // Cmd-click a member removes it → collapses to the other as a single.
+        apply_promote_primer_pair(&mut state, b).unwrap();
+        assert_eq!(
+            state
+                .workspace
+                .active_view()
+                .unwrap()
+                .selection
+                .selected_primer(),
+            Some(a)
+        );
+
+        // Cmd-click the lone anchor again → clears the selection.
+        apply_promote_primer_pair(&mut state, a).unwrap();
+        assert!(state.workspace.active_view().unwrap().selection.is_none());
     }
 
     #[test]

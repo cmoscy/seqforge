@@ -618,10 +618,17 @@ impl InspectorState {
         // Attached-first, floating oligos last (list mirrors the map top→bottom).
         let mut primers = self.primers().to_vec();
         primers.sort_by_key(|p| p.binding.as_ref().map_or(usize::MAX, |b| b.start));
+        let pair = match &self.selected {
+            Some(super::SelectedNoun::PrimerPair { fwd, rev }) => Some((*fwd, *rev)),
+            _ => None,
+        };
         let selected = match &self.selected {
             Some(super::SelectedNoun::Primer(id)) => Some(*id),
             _ => None,
         };
+        // Pane-local: whether Run PCR labels the product (opt-in, off by default).
+        // A local so it stays disjoint from the `editing` field borrow below.
+        let mut pcr_label = self.pcr_label;
         let editing = &mut self.editing_primer;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -639,27 +646,73 @@ impl InspectorState {
                 ui.separator();
             }
 
+            // PCR primer-pair banner (Phase 3.1b): Cmd-click two primers to form a
+            // pair, then Run PCR. Orientation is derived from strand (fwd = the
+            // top-strand binder), so there is no swap. One `Pcr` op — the same
+            // `seqforge pcr --fwd --rev` the CLI/agent drives.
+            if let Some((fwd, rev)) = pair {
+                let name_of = |id: PrimerId| {
+                    primers
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map_or_else(|| format!("primer {id}"), |p| p.name.clone())
+                };
+                detail_frame().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong("PCR pair");
+                        ui.weak(format!("{} → {}", name_of(fwd), name_of(rev)));
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Run PCR").clicked() {
+                            pending.push((
+                                AppCommand::Viewer(ViewerRequest::Pcr {
+                                    fwd,
+                                    rev,
+                                    name: None,
+                                    product_feature: pcr_label,
+                                    view: None,
+                                }),
+                                None,
+                            ));
+                        }
+                        ui.checkbox(&mut pcr_label, "Label product")
+                            .on_hover_text("Add a whole-product feature labelling the amplicon");
+                    });
+                });
+                ui.separator();
+            }
+
             if primers.is_empty() {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| ui.weak("No primers on this sequence."));
                 return;
             }
 
+            let cmd_held = ui.input(|i| i.modifiers.command);
             for p in &primers {
-                let is_sel = selected == Some(p.id);
+                let in_pair = pair.is_some_and(|(f, r)| f == p.id || r == p.id);
+                let is_sel = selected == Some(p.id) || in_pair;
                 let resp = row_shell(ui, &primer_display_row(p, is_sel));
                 if resp.double_clicked() {
                     *editing = Some(PrimerDraft::from_info(p));
                     pending.push((AppCommand::RevealPrimer { id: p.id }, None));
                 } else if resp.clicked() {
-                    // Selecting a different row cancels an in-flight edit.
-                    if editing.as_ref().is_some_and(|d| d.id != Some(p.id)) {
-                        *editing = None;
+                    // Cmd-click builds / edits the PCR pair (bounded multi-select);
+                    // a plain click selects the single primer as before.
+                    if cmd_held {
+                        pending.push((AppCommand::PromotePrimerPair { id: p.id }, None));
+                    } else {
+                        // Selecting a different row cancels an in-flight edit.
+                        if editing.as_ref().is_some_and(|d| d.id != Some(p.id)) {
+                            *editing = None;
+                        }
+                        pending.push((AppCommand::RevealPrimer { id: p.id }, None));
                     }
-                    pending.push((AppCommand::RevealPrimer { id: p.id }, None));
                 }
 
-                if is_sel {
+                // The inline viewer/editor expands only under the single selection
+                // (a pair is a run action, not a per-primer detail).
+                if selected == Some(p.id) {
                     let editing_this = editing.as_ref().is_some_and(|d| d.id == Some(p.id));
                     if editing_this {
                         let d = editing.as_mut().expect("editing_this ⇒ Some");
@@ -673,6 +726,7 @@ impl InspectorState {
                 }
             }
         });
+        self.pcr_label = pcr_label;
     }
 
     /// Begin a create-from-selection primer draft: binding = the current range

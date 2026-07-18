@@ -55,6 +55,11 @@ enum InspectorTab {
 pub(super) enum SelectedNoun {
     Feature(FeatureId),
     Primer(PrimerId),
+    /// A PCR primer pair (Phase 3.1b) — drives the Primers tab's Run-PCR banner.
+    PrimerPair {
+        fwd: PrimerId,
+        rev: PrimerId,
+    },
     CutSite(CutSiteKey),
 }
 
@@ -63,7 +68,7 @@ impl SelectedNoun {
     fn inspector_tab(&self) -> InspectorTab {
         match self {
             SelectedNoun::Feature(_) => InspectorTab::Features,
-            SelectedNoun::Primer(_) => InspectorTab::Primers,
+            SelectedNoun::Primer(_) | SelectedNoun::PrimerPair { .. } => InspectorTab::Primers,
             SelectedNoun::CutSite(_) => InspectorTab::CutSites,
         }
     }
@@ -119,6 +124,9 @@ pub struct InspectorState {
     enzyme_expanded: HashSet<String>,
     /// One-shot: grab keyboard focus for the enzyme query next frame (set by ⌘E).
     focus_enzyme_query: bool,
+    /// Primers tab: whether Run PCR labels the product with a whole-product
+    /// feature (opt-in; `Default` = false). Pane-local; rides the posted `Pcr`.
+    pcr_label: bool,
     /// The active view's primer map-overlay display (mirrored for the header
     /// toggles; source of truth stays on the `SequenceView`).
     primer_display: PrimerDisplay,
@@ -169,8 +177,9 @@ impl InspectorState {
             // Project the one selection to a single object (mutually exclusive).
             let selected = v
                 .selection
-                .selected_feature()
-                .map(SelectedNoun::Feature)
+                .selected_primer_pair()
+                .map(|(fwd, rev)| SelectedNoun::PrimerPair { fwd, rev })
+                .or_else(|| v.selection.selected_feature().map(SelectedNoun::Feature))
                 .or_else(|| v.selection.selected_primer().map(SelectedNoun::Primer))
                 .or_else(|| {
                     v.selection

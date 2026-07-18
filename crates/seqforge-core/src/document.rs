@@ -352,9 +352,9 @@ impl Location {
                 before: *before,
                 after: *after,
             }),
-            Location::Complement(inner) => {
-                inner.map_spans(f).map(|l| Location::Complement(Box::new(l)))
-            }
+            Location::Complement(inner) => inner
+                .map_spans(f)
+                .map(|l| Location::Complement(Box::new(l))),
             Location::Join(parts) => {
                 let mut survivors: Vec<Location> =
                     parts.iter().filter_map(|p| p.map_spans(f)).collect();
@@ -557,10 +557,7 @@ mod location_tests {
     fn map_spans_preserves_complement_nesting() {
         let loc = Location::Complement(Box::new(Location::simple(4..8)));
         let out = loc.map_spans(&|s| Some(s.shift(2))).unwrap();
-        assert_eq!(
-            out,
-            Location::Complement(Box::new(Location::simple(6..10)))
-        );
+        assert_eq!(out, Location::Complement(Box::new(Location::simple(6..10))));
     }
 
     // ── mirrored: leaf mirror + fuzzy-end swap + Join reversal ─────────────────

@@ -1,8 +1,8 @@
 # Primers + Sequence Thermodynamics — Plan & Tracker
 
-> **Status: Phases 1, 1.5, and 2.1 complete on `main` (0.1–2.1 landed); next =
-> Phase 2.2 (constructive generation) / 2.3 `oligo random`. Phase 2+ design
-> settled.**
+> **Status: Phases 1, 1.5, 2.1–2.2a, and 3.1 (PCR) complete on `main`; next =
+> Phase 2.2b (generative package) / 3.1c (assembly `FragmentSource::Pcr` hook) /
+> 3.2 hetero-dimer. Phase 2+/3 design settled.**
 > Architecture, sourcing, and consistency-with-the-implemented-model all worked
 > out (see "Decisions locked" and "Consistency with the implemented model"
 > below). **Done:** 0.1–0.5 (thermo + `seqforge tm`; live Tm/%GC readout;
@@ -746,33 +746,41 @@ existing outputs*, not new biology.
 > `place(Δ=tail_f_len, Identity)`. Build **F0 (Feature `Location`) + F1 (transport,
 > via copy/paste)** before this phase.
 
-- [ ] 3.1a **PCR MVP — select two primers → product.** `seqforge-bio::pcr`: given
-      (template, fwd, rev), validate orientation/spacing, emit product =
-      `fwd_full (tail+annealed) + interior template + revcomp(rev_full)`. **Mismatches
-      bake in** (mutagenesis, via `decompose_primer`); **tails become the ends**
-      (overhangs, for free). Product = a new blunt `Buffer` carrying **provenance**
-      (template handle + primer ids + sites) **and the template's inherited
-      annotations** (amplicon features re-homed via `Annotations::extract` +
-      `place(Δ=tail_f_len)`, decision 23) plus a whole-product `Provenance` feature;
-      opens as `Tab::View`.
-      **Circular templates give around-the-horn / whole-plasmid amplification for
-      free** (outward-facing primers on a circular template = Q5/KLD site-directed
-      mutagenesis) — the scan is already circular-aware; `fwd-3′ → around → rev-3′`
-      needs no special case. Op reports (not blocks): no-product, multiple products
-      (mispriming), detached/floating primer ("attach or rescan first", decision
-      16), tail-frame warning.
-- [ ] 3.1b **`PrimerPair` selection (extends decision 17).** A bounded, ordered
-      selection variant `Primer` → `PrimerPair { fwd, rev }` — **not** a general
+- [x] 3.1a **PCR MVP — select two primers → product.** `seqforge-bio::pcr`
+      (`crates/seqforge-bio/src/primer/pcr.rs`): given (template, fwd, rev,
+      circular), validate orientation/attachment, emit product = `fwd.sequence
+      (tail+annealed) + interior template + revcomp(rev.sequence)`. **Mismatches
+      bake in** (mutagenesis); **tails become the ends** (overhangs, for free).
+      Returns `PcrProduct { bytes, amplicon: Span, tail_f_len, warnings }`. The
+      applier (`command/file.rs::apply_pcr`) inherits the template's annotations —
+      `transport::extract(amplicon, TruncatePartials)` (straddling features
+      clamped + fuzzy-marked; straddling primers dropped) + `place(Δ=tail_f_len,
+      Identity, merge=false)` — adds a whole-product `Provenance` feature, and
+      materializes a new **linear** `Buffer` via `Workspace::new_buffer_annotated`
+      that opens as `Tab::View`. **Circular templates give around-the-horn /
+      whole-plasmid amplification for free** (`Span::between` wraps; Q5/KLD
+      site-directed mutagenesis). Op reports (not blocks): mispriming (>1 site,
+      toast warnings); errors on detached ("attach or rescan first", decision 16),
+      orientation, no-product. The whole-product label feature is **opt-in**
+      (`product_feature` / `--product-feature`, default off) — inherited amplicon
+      features already carry their own extract-stamped lineage, so this only adds
+      the top-level label. `ViewerRequest::Pcr { fwd, rev, name?, product_feature,
+      view? }` → CLI/agent `seqforge pcr --fwd <id> --rev <id> [--product-feature]`
+      for free (flattened, socket).
+- [x] 3.1b **`PrimerPair` selection (extends decision 17).** A bounded, ordered
+      variant `ViewSelection::PrimerPair { fwd, rev, range }` — **not** a general
       multi-select (that stays deferred to the cloning cart). **Cmd-click** (macOS
       list convention; **Shift reserved** for the future range/N-select cart) on a
-      Primers-tab row *or* a map arrow promotes a selected primer to a pair:
-      first-clicked = fwd anchor, each subsequent Cmd-click sets/replaces rev,
-      Cmd-click-an-included-primer removes it, plain click collapses to single.
-      Orientation defaults from strand (top-strand binder → fwd) with a **⇄ swap**
-      affordance. The pair's derived `text_range()` = the **amplicon span**
-      (fwd-anchor→rev-anchor) → selecting the pair highlights what PCR produces.
-      Both surfaces set the same variant; Shift is a no-op on the map. GUI Run =
-      `seqforge pcr --fwd <id> --rev <id> [--template <handle>]` (same op).
+      Primers-tab row *or* a map arrow (`AppCommand::PromotePrimerPair`) promotes:
+      first Cmd-click = anchor, next sets/replaces rev, Cmd-click-a-member removes
+      it, plain click collapses to single. **Orientation is derived from strand**
+      (top-strand binder → fwd; `make_pair` normalizes), so there is **no swap** —
+      swapping a valid one-Forward/one-Reverse pair could only make it invalid.
+      `text_range()` = the **amplicon span** (fwd-anchor→rev-anchor) → selecting
+      the pair highlights what PCR produces. The Primers tab shows a **PCR pair**
+      banner with **Run PCR** (posts `Pcr`) + a **Label product** checkbox
+      (opt-in). Both surfaces set the same variant; Shift is a no-op on the map.
+      GUI Run = the same `seqforge pcr` op — one dispatch, three faces.
 - [ ] 3.1c **`FragmentSource::Pcr`** hook — the assembly cart addresses PCR
       products by name ([assembly.md](assembly.md) A1). Product is *also* just a
       buffer, so PCR neither blocks nor is blocked by the assembly track.

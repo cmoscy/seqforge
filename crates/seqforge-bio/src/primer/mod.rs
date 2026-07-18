@@ -21,6 +21,7 @@
 mod anneal;
 mod design;
 mod evaluate;
+mod pcr;
 
 use std::ops::Range;
 
@@ -36,6 +37,7 @@ pub use design::{DesignError, EnzymeSpec, enzyme_catalog, enzyme_cuts, restricti
 pub use evaluate::{
     PrimerQc, PrimerQcPlusAnneal, anneal_tm, primer_infos, primer_qc, primer_qc_with_anneal,
 };
+pub use pcr::{PcrError, PcrProduct, pcr};
 
 /// One template column covered by a primer's annealed footprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
