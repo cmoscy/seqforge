@@ -33,6 +33,25 @@ use seqforge_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// How a committed mutation should update the selections of every view on the
+/// buffer — the one thing that legitimately varies per write op. Declared by the
+/// `commit_edit` body so the epilogue can never forget (or wrongly apply) a rehome.
+enum SelUpdate {
+    /// Bytes changed with a known caret target: set the editing view's caret to
+    /// `pos`, then rehome (clamp + collapse to `Text`) every other view of the
+    /// buffer. (`edit` / `paste_slice`.)
+    Cursor(ViewId, usize),
+    /// Bytes/topology changed with no specific caret: rehome every view of the
+    /// buffer. (`replace_whole` / whole-molecule RC / undo / redo.)
+    Rehome,
+    /// Annotation-only edit: leave selections untouched — a `Feature`/`CutSite`
+    /// selection must survive a rename (rehome would collapse it to `Text`).
+    Keep,
+    /// The body made no change (e.g. undo with an empty stack): skip the whole
+    /// epilogue — no version bump, no `dirty`, no selection update.
+    Skip,
+}
+
 /// Hash the raw bytes of a file on disk, for the external-change guard.
 /// Returns `None` if the file can't be read (treated as "no baseline" —
 /// the guard then can't fire). `DefaultHasher` is fine: the value only ever
@@ -467,6 +486,70 @@ impl Workspace {
         self.with_buffer_mut(id, f)
     }
 
+    /// The single buffer-mutation lowering. Resolves the buffer write lock +
+    /// annotation/history handles, runs `body` (which records history and mutates
+    /// text/annotations/topology), then applies the uniform epilogue: bump
+    /// `version` + `dirty`, and perform the [`SelUpdate`] the body declared.
+    ///
+    /// Every byte/annotation/topology write funnels through here so no path can
+    /// forget an invariant (the empty-buffer caret crash came from a path that
+    /// skipped the rehome; `version` bumps here invalidate the version-keyed
+    /// render caches). A future *in-place* multi-splice editor op that must undo
+    /// as one unit (find/replace-all, multi-site trim — not assembly, which
+    /// produces new buffers) would plug in by grouping the `history.record` calls
+    /// inside `body`; nothing needs it today.
+    fn commit_edit<R>(
+        &mut self,
+        view_id: ViewId,
+        body: impl FnOnce(
+            &mut Buffer,
+            &mut Annotations,
+            &mut History,
+        ) -> Result<(R, SelUpdate), DispatchError>,
+    ) -> Result<R, DispatchError> {
+        let bid = self
+            .views
+            .get(&view_id)
+            .ok_or(DispatchError::ViewNotFound(view_id))?
+            .buffer_id;
+        let buf_arc = self
+            .buffers
+            .get(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+        let (ann, history) = self
+            .buffers
+            .ann_and_history_mut(bid)
+            .ok_or(DispatchError::ViewNotFound(view_id))?;
+
+        // Force exactly one version tick per commit, idempotent regardless of how
+        // many `apply_splice` calls the body made (each of which also bumps).
+        // `version` is a monotonic change token — one commit = one tick — so this
+        // is the single source of truth even though the byte primitive self-bumps.
+        let version_before = buf.version;
+        let (result, sel) = body(&mut buf, ann, history)?;
+
+        if matches!(sel, SelUpdate::Skip) {
+            return Ok(result); // body was a no-op (e.g. empty undo): touch nothing.
+        }
+        buf.version = version_before + 1;
+        buf.dirty = true;
+        let len = buf.text.len();
+        drop(buf);
+
+        match sel {
+            SelUpdate::Cursor(vid, pos) => {
+                if let Some(v) = self.views.get_mut(&vid) {
+                    v.selection = ViewSelection::Text(Selection::cursor(pos));
+                }
+                self.rehome_views_for_buffer(bid, len);
+            }
+            SelUpdate::Rehome => self.rehome_views_for_buffer(bid, len),
+            SelUpdate::Keep | SelUpdate::Skip => {}
+        }
+        Ok(result)
+    }
+
     /// After a buffer-length change, clamp every text-bearing selection on
     /// views of `bid` into `0..=len` (empty → `cursor(0)`). Feature / CutSite
     /// object selections reduce to clamped `Text`, matching the caret edit
@@ -501,40 +584,19 @@ impl Workspace {
         range: Range<usize>,
         new_bytes: &[u8],
     ) -> Result<(), DispatchError> {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-
-        if range.start > range.end || range.end > buf.text.len() {
-            return Err(DispatchError::OutOfRange {
-                position: range.end,
-                seq_len: buf.text.len(),
-            });
-        }
-
-        let (ann, history) = self
-            .buffers
-            .ann_and_history_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let old_bytes = buf.text[range.clone()].to_vec();
-        history.record(range.start, old_bytes, new_bytes.to_vec(), ann, kind);
-        mutations::apply_splice(&mut buf, ann, range.clone(), new_bytes);
-        let cursor = range.start + new_bytes.len();
-        let len = buf.text.len();
-        drop(buf);
-
-        if let Some(view) = self.views.get_mut(&view_id) {
-            view.selection = ViewSelection::Text(Selection::cursor(cursor));
-        }
-        self.rehome_views_for_buffer(bid, len);
-        Ok(())
+        self.commit_edit(view_id, |buf, ann, history| {
+            if range.start > range.end || range.end > buf.text.len() {
+                return Err(DispatchError::OutOfRange {
+                    position: range.end,
+                    seq_len: buf.text.len(),
+                });
+            }
+            let old_bytes = buf.text[range.clone()].to_vec();
+            history.record(range.start, old_bytes, new_bytes.to_vec(), ann, kind);
+            mutations::apply_splice(buf, ann, range.clone(), new_bytes);
+            let cursor = range.start + new_bytes.len();
+            Ok(((), SelUpdate::Cursor(view_id, cursor)))
+        })
     }
 
     /// Paste an annotated [`SeqSlice`] at `pos` in **one undo transaction**: the
@@ -554,42 +616,22 @@ impl Workspace {
         orient: Orient,
         merge: bool,
     ) -> Result<(), DispatchError> {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-
-        if pos > buf.text.len() {
-            return Err(DispatchError::OutOfRange {
-                position: pos,
-                seq_len: buf.text.len(),
-            });
-        }
-
-        let (ann, history) = self
-            .buffers
-            .ann_and_history_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        // Snapshot annotations before the splice + place; the reverse delta is a
-        // plain insertion at `pos`.
-        history.record(pos, Vec::new(), slice.bytes.clone(), ann, EditKind::Other);
-        mutations::apply_splice(&mut buf, ann, pos..pos, &slice.bytes);
-        let len_total = buf.text.len();
-        transport::place(ann, slice, pos, orient, merge, len_total);
-        let cursor = pos + slice.bytes.len();
-        drop(buf);
-
-        if let Some(view) = self.views.get_mut(&view_id) {
-            view.selection = ViewSelection::Text(Selection::cursor(cursor));
-        }
-        self.rehome_views_for_buffer(bid, len_total);
-        Ok(())
+        self.commit_edit(view_id, |buf, ann, history| {
+            if pos > buf.text.len() {
+                return Err(DispatchError::OutOfRange {
+                    position: pos,
+                    seq_len: buf.text.len(),
+                });
+            }
+            // Snapshot annotations before the splice + place; the reverse delta is
+            // a plain insertion at `pos`.
+            history.record(pos, Vec::new(), slice.bytes.clone(), ann, EditKind::Other);
+            mutations::apply_splice(buf, ann, pos..pos, &slice.bytes);
+            let len_total = buf.text.len();
+            transport::place(ann, slice, pos, orient, merge, len_total);
+            let cursor = pos + slice.bytes.len();
+            Ok(((), SelUpdate::Cursor(view_id, cursor)))
+        })
     }
 
     // ── Topology / buffer-lifecycle ops ───────────────────────────────────────
@@ -604,40 +646,22 @@ impl Workspace {
     where
         F: FnOnce(&Buffer, &Annotations) -> (Vec<u8>, Annotations, seqforge_core::Topology),
     {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-        let (ann, history) = self
-            .buffers
-            .ann_and_history_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
+        self.commit_edit(view_id, |buf, ann, history| {
+            let old_text = buf.text.clone();
+            let old_topo = buf.topology;
+            let (new_text, new_ann, new_topo) = f(buf, ann);
 
-        let old_text = buf.text.clone();
-        let old_topo = buf.topology;
-        let (new_text, new_ann, new_topo) = f(&buf, ann);
-
-        // Record with the pre-edit annotations (still live in `ann`) + full-text
-        // delta, then swap in the new state.
-        history.record(0, old_text, new_text.clone(), ann, EditKind::Other);
-        if new_topo != old_topo {
-            history.stamp_topology(old_topo);
-        }
-        buf.text = new_text;
-        buf.topology = new_topo;
-        buf.version += 1;
-        buf.dirty = true;
-        *ann = new_ann;
-        let len = buf.text.len();
-        drop(buf);
-        self.rehome_views_for_buffer(bid, len);
-        Ok(())
+            // Record with the pre-edit annotations (still live in `ann`) +
+            // full-text delta, then swap in the new state.
+            history.record(0, old_text, new_text.clone(), ann, EditKind::Other);
+            if new_topo != old_topo {
+                history.stamp_topology(old_topo);
+            }
+            buf.text = new_text;
+            buf.topology = new_topo;
+            *ann = new_ann;
+            Ok(((), SelUpdate::Rehome))
+        })
     }
 
     /// Set Origin: rotate a **circular** buffer so `index` becomes position 0.
@@ -698,24 +722,14 @@ impl Workspace {
         &mut self,
         view_id: ViewId,
     ) -> Result<(), DispatchError> {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-        let len = buf.text.len();
-        let ann = self
-            .buffers
-            .annotations_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        seqforge_core::reverse_complement_circular(ann, len);
-        buf.version += 1;
-        Ok(())
+        self.commit_edit(view_id, |buf, ann, _history| {
+            let len = buf.text.len();
+            seqforge_core::reverse_complement_circular(ann, len);
+            // No history entry: this rides the preceding byte-RC edit's undo unit
+            // (the applier calls `edit` then this). `Rehome` collapses any stale
+            // Feature/CutSite selection pointing at the pre-mirror coordinates.
+            Ok(((), SelUpdate::Rehome))
+        })
     }
 
     fn require_circular(&self, view_id: ViewId) -> Result<(), DispatchError> {
@@ -755,26 +769,14 @@ impl Workspace {
         view_id: ViewId,
         f: impl FnOnce(&mut Annotations, &Buffer) -> Result<R, DispatchError>,
     ) -> Result<R, DispatchError> {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-        let (ann, history) = self
-            .buffers
-            .ann_and_history_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let ann_before = ann.clone();
-        let result = f(ann, &buf)?;
-        history.record(0, Vec::new(), Vec::new(), &ann_before, EditKind::Other);
-        buf.version += 1;
-        buf.dirty = true;
-        Ok(result)
+        self.commit_edit(view_id, |buf, ann, history| {
+            let ann_before = ann.clone();
+            let result = f(ann, buf)?;
+            history.record(0, Vec::new(), Vec::new(), &ann_before, EditKind::Other);
+            // `Keep`: bytes are untouched, so a selected Feature/CutSite must
+            // survive (a rename must not drop the selection to a caret).
+            Ok((result, SelUpdate::Keep))
+        })
     }
 
     /// Undo the last edit on the view's buffer. Returns whether anything was
@@ -789,33 +791,22 @@ impl Workspace {
     }
 
     fn history_step(&mut self, view_id: ViewId, undo: bool) -> Result<bool, DispatchError> {
-        let bid = self
-            .views
-            .get(&view_id)
-            .ok_or(DispatchError::ViewNotFound(view_id))?
-            .buffer_id;
-        let buf_arc = self
-            .buffers
-            .get(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let mut buf = buf_arc.write().map_err(|_| DispatchError::PoisonedLock)?;
-        let (ann, history) = self
-            .buffers
-            .ann_and_history_mut(bid)
-            .ok_or(DispatchError::ViewNotFound(view_id))?;
-        let changed = if undo {
-            history.undo(&mut buf, ann)
-        } else {
-            history.redo(&mut buf, ann)
-        };
-        let len = buf.text.len();
-        drop(buf);
-        if changed {
-            // Forward edit/paste rehome the caret; undo/redo must too so a
-            // stale post-paste cursor cannot survive an empty restore.
-            self.rehome_views_for_buffer(bid, len);
-        }
-        Ok(changed)
+        self.commit_edit(view_id, |buf, ann, history| {
+            let changed = if undo {
+                history.undo(buf, ann)
+            } else {
+                history.redo(buf, ann)
+            };
+            // Forward edit/paste rehome the caret; undo/redo must too so a stale
+            // post-paste cursor cannot survive an empty restore. `Skip` on a no-op
+            // (empty stack) leaves version/dirty untouched — nothing changed.
+            let sel = if changed {
+                SelUpdate::Rehome
+            } else {
+                SelUpdate::Skip
+            };
+            Ok((changed, sel))
+        })
     }
 
     /// Reset every per-view render cache. Called by command arms
@@ -1026,6 +1017,139 @@ mod tests {
             .unwrap();
         ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATGCATGC"))
             .unwrap();
+    }
+
+    #[test]
+    fn rc_annotations_whole_rehomes_a_stale_feature_selection() {
+        // A Feature selection points at pre-mirror coordinates; a whole-molecule
+        // RC of the annotation layer must collapse it to a clamped Text caret.
+        // This is the fix that put `reverse_complement_annotations_whole` back on
+        // the shared rehome path (it previously skipped it, latent because RC is
+        // length-preserving). Tested at the Workspace layer because the command
+        // applier runs `edit` first, which would mask the collapse.
+        let mut ws = Workspace::default();
+        let bid =
+            ws.buffers
+                .new_scratch("x".into(), b"ATGCATGCAT".to_vec(), Topology::Circular);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+        ws.view_mut(vid).unwrap().selection = ViewSelection::Feature {
+            id: seqforge_core::FeatureId::default(),
+            range: Selection::range(2, 6),
+        };
+
+        ws.reverse_complement_annotations_whole(vid).unwrap();
+
+        let sel = &ws.view(vid).unwrap().selection;
+        assert!(
+            matches!(sel, ViewSelection::Text(_)),
+            "RC must collapse a stale Feature selection to Text, got {sel:?}"
+        );
+        let s = sel.text_range().unwrap();
+        assert!(s.anchor <= 10 && s.focus <= 10, "caret stays within 0..=len");
+    }
+
+    #[test]
+    fn edit_annotations_keeps_a_selected_feature() {
+        // The `Keep` half of the contract: an annotation-only edit (rename) leaves
+        // the sequence bytes untouched, so a selected Feature object must survive —
+        // `commit_edit` must NOT rehome/collapse it to a caret.
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .new_scratch("x".into(), b"ATGCATGC".to_vec(), Topology::Linear);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+        ws.view_mut(vid).unwrap().selection = ViewSelection::Feature {
+            id: seqforge_core::FeatureId::default(),
+            range: Selection::range(1, 5),
+        };
+
+        // A no-op annotation edit still records + bumps; the selection must persist.
+        ws.edit_annotations(vid, |_ann, _buf| Ok::<(), DispatchError>(()))
+            .unwrap();
+
+        assert!(
+            matches!(
+                ws.view(vid).unwrap().selection,
+                ViewSelection::Feature { .. }
+            ),
+            "annotation-only edit must preserve the Feature selection"
+        );
+    }
+
+    #[test]
+    fn non_active_view_is_freshened_after_edit_without_focus() {
+        // CLI-safety: a view targeted by id (never the GUI-"active" view, no focus
+        // event) still sees fresh cut sites after an edit, because freshening rides
+        // the read, not focus. Mirrors the headless `edit view B → read view B` flow.
+        use seqforge_core::{CutSite, Span};
+        struct OneSiteBio;
+        impl BioOps for OneSiteBio {
+            fn load(&self, _: &Path) -> Result<seqforge_core::Document, String> {
+                unreachable!()
+            }
+            fn find_matches(&self, _: &[u8], _: &[u8], _: u8, _: bool) -> Vec<seqforge_core::SearchHit> {
+                vec![]
+            }
+            fn find_cut_sites(&self, _: &[u8], enzymes: &[&str], _: bool) -> Vec<CutSite> {
+                if enzymes.is_empty() {
+                    vec![]
+                } else {
+                    vec![CutSite {
+                        enzyme: "EcoRI".into(),
+                        pattern: "GAATTC".into(),
+                        recognition: Span::new(2, 6),
+                        cut_pos: 3,
+                        bottom_cut_pos: 7,
+                    }]
+                }
+            }
+            fn resolve_enzyme_names(&self, _: &[u8], q: &str, _: bool) -> Vec<String> {
+                vec![q.to_string()]
+            }
+            fn primer_infos(&self, _: &[u8], _: &[&seqforge_core::Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
+                vec![]
+            }
+            fn methyl_states_for_sites(
+                &self,
+                sites: &[CutSite],
+                _: &[u8],
+                _: &seqforge_core::MethylContext,
+            ) -> Vec<seqforge_core::MethylState> {
+                vec![seqforge_core::MethylState::Cuttable; sites.len()]
+            }
+        }
+
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .new_scratch("x".into(), b"ATGCATGCATGC".to_vec(), Topology::Linear);
+        let v1 = ws.add_view(bid, ViewKind::TextView); // active
+        let v2 = ws.add_view(bid, ViewKind::TextView); // never focused
+        ws.focus_view(v1);
+        assert_eq!(ws.active_view, Some(v1));
+
+        // v2 has a prior scan installed (active enzymes + a site + fresh stamp).
+        ws.with_view_buffer(v2, |_, view, buf, _| {
+            view.active_enzymes = vec!["EcoRI".into()];
+            seqforge_core::rescan_if_stale(view, buf, &OneSiteBio);
+        })
+        .unwrap();
+        let scanned_version = ws.view(v2).unwrap().results_version;
+        assert!(scanned_version.is_some());
+
+        // Edit the shared buffer → version bumps → v2's overlay is now stale.
+        ws.edit(v1, EditKind::Insert, 0..0, b"TTT").unwrap();
+        let new_version = ws.buffers.get(bid).unwrap().read().unwrap().version;
+        assert!(ws.view(v2).unwrap().cut_sites_stale(new_version));
+
+        // Freshen v2 by id — no focus change, v1 still active — and it re-derives.
+        ws.with_view_buffer(v2, |_, view, buf, _| {
+            seqforge_core::rescan_if_stale(view, buf, &OneSiteBio);
+        })
+        .unwrap();
+        assert_eq!(ws.active_view, Some(v1), "freshening did not touch focus");
+        assert_eq!(ws.view(v2).unwrap().results_version, Some(new_version));
+        assert_eq!(ws.view(v2).unwrap().cut_sites.len(), 1);
     }
 
     #[test]

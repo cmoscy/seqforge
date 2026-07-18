@@ -21,7 +21,7 @@ pub mod transport;
 
 pub use commands::{
     BioOps, DispatchError, DocInfo, EnzymeOp, FileCommand, PrimerInfo, PrimerSiteInfo, PrimerState,
-    Selection, ViewerRequest, ViewerResponse, dispatch, dispatch_file,
+    ViewerRequest, ViewerResponse, dispatch, dispatch_file, rescan_if_stale,
 };
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Location, MethylContext, MethylState,
@@ -29,7 +29,8 @@ pub use document::{
 };
 pub use history::{EditKind, History, HistoryEntry};
 pub use model::{
-    Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, View, ViewId, ViewKind, ViewSelection,
+    Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, Selection, View, ViewId, ViewKind,
+    ViewSelection,
 };
 pub use span::{Pieces, Span};
 pub use topology::{reverse_complement_circular, rotate_origin};

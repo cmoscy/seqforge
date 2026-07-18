@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::span::Span;
 use crate::{
     Annotations, Buffer, CutSite, Document, FeatureId, MethylContext, MethylState, Primer,
-    PrimerId, SearchHit, Strand, View, ViewId, ViewSelection,
+    PrimerId, SearchHit, Selection, Strand, View, ViewId, ViewSelection,
 };
 
 fn default_methyl_dam() -> bool {
@@ -16,153 +16,6 @@ fn default_methyl_dam() -> bool {
 
 fn default_methyl_dcm() -> bool {
     true
-}
-
-// ── Selection model ───────────────────────────────────────────────────────────
-
-/// A selection or cursor position in the sequence.
-///
-/// When `anchor == focus` the selection is a **cursor** — rendered as a thin
-/// vertical line between bases. When they differ it is a **range**. The anchor
-/// is where the user first clicked; the focus tracks the current extent.
-///
-/// `wrap` makes the selection **circular-native**: with `wrap == true` the
-/// selected region is the arc from `anchor` **through the origin** to `focus`
-/// (the complement of the `(min, max)` interval), so shift-selecting from near
-/// the end through position 0 to the start is representable on a plasmid. On a
-/// linear molecule `wrap` stays `false`. The single wrap-aware projection is
-/// [`Selection::to_span`]; render/copy consume its [`Span::linear_pieces`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Selection {
-    /// Fixed end — where the interaction began.
-    pub anchor: usize,
-    /// Moving end — equals `anchor` for a cursor.
-    pub focus: usize,
-    /// Whether the region runs from `anchor` through the origin to `focus`.
-    /// `#[serde(default)]` keeps older serialized selections (no `wrap`) loadable
-    /// as the non-wrapping default.
-    #[serde(default)]
-    pub wrap: bool,
-}
-
-impl Selection {
-    pub fn cursor(pos: usize) -> Self {
-        Self {
-            anchor: pos,
-            focus: pos,
-            wrap: false,
-        }
-    }
-
-    pub fn range(start: usize, end: usize) -> Self {
-        Self {
-            anchor: start,
-            focus: end,
-            wrap: false,
-        }
-    }
-
-    pub fn is_cursor(self) -> bool {
-        self.anchor == self.focus && !self.wrap
-    }
-
-    /// Clamp anchor/focus into the valid caret range `0..=len`.
-    ///
-    /// Used after buffer-length changes (undo/redo, topology, revert) so a
-    /// stale caret past EOF cannot reach `apply_splice`. Empty buffers
-    /// (`len == 0`) always become `cursor(0)`. Wrap is dropped — after a
-    /// shrink the safe editable selection is a linear range or caret.
-    pub fn clamp_to_len(self, len: usize) -> Selection {
-        if len == 0 {
-            return Selection::cursor(0);
-        }
-        let anchor = self.anchor.min(len);
-        let focus = self.focus.min(len);
-        if anchor == focus {
-            Selection::cursor(anchor)
-        } else {
-            Selection {
-                anchor,
-                focus,
-                wrap: false,
-            }
-        }
-    }
-
-    /// Returns `(start, end)` in ascending order regardless of drag direction.
-    /// Bounds-only — for a wrapping selection this is the interval the region is
-    /// the **complement** of, not the region itself; use [`Selection::to_span`]
-    /// for the actual covered geometry.
-    pub fn ordered(self) -> (usize, usize) {
-        (self.anchor.min(self.focus), self.anchor.max(self.focus))
-    }
-
-    /// A selection covering `span` on a molecule of length `len` — the inverse of
-    /// [`Selection::to_span`]. Anchor at the span start, focus at its (mod-`len`)
-    /// end, `wrap` set iff the span crosses the origin. A whole-molecule span
-    /// (`len == len_total`) maps to a **full-circle** selection (`anchor == focus`
-    /// with `wrap`), not the empty cursor that `anchor == focus` alone would mean.
-    pub fn from_span(span: Span, len: usize) -> Selection {
-        if len > 0 && span.len == len {
-            return Selection {
-                anchor: span.start,
-                focus: span.start,
-                wrap: true,
-            };
-        }
-        Selection {
-            anchor: span.start,
-            focus: span.end(len),
-            wrap: span.wraps(len),
-        }
-    }
-
-    /// The covered region as a wrap-aware [`Span`] on a molecule of length `len`
-    /// — the single geometry projection (highlight / copy / minimap all consume
-    /// its [`Span::linear_pieces`]). Non-wrapping → the `[min, max)` arc;
-    /// wrapping → the origin-crossing arc `[max..len) ∪ [0..min)`, with the
-    /// `anchor == focus && wrap` degenerate meaning the whole molecule.
-    pub fn to_span(self, len: usize) -> Span {
-        let (lo, hi) = self.ordered();
-        if self.wrap {
-            if lo == hi {
-                Span::full(len)
-            } else {
-                Span::between(hi, lo, len)
-            }
-        } else {
-            Span::from_range(lo..hi)
-        }
-    }
-
-    /// Move the `focus` by a signed `delta` on a **circular** molecule of length
-    /// `len`: the focus steps mod `len` (never clamped), and `wrap` toggles each
-    /// time the step crosses the origin — so extending a selection past position
-    /// `0`/`len` grows it *through* the origin instead of stalling. Pure; the
-    /// anchor is untouched. Linear molecules keep the clamping arrow-nav path.
-    pub fn move_focus_circular(self, delta: isize, len: usize) -> Selection {
-        let (focus, wrap) = step_focus_circular(self.focus, self.wrap, delta, len);
-        Selection {
-            anchor: self.anchor,
-            focus,
-            wrap,
-        }
-    }
-}
-
-/// The pure focus/wrap transition backing [`Selection::move_focus_circular`],
-/// factored out for exhaustive truth-table tests. Returns `(new_focus,
-/// new_wrap)`. `new_wrap` flips exactly when the step leaves `[0, len)` — i.e.
-/// crosses the origin — which is independent of the anchor. Assumes
-/// `|delta| < len` (true for arrow/line steps on any real molecule).
-fn step_focus_circular(focus: usize, wrap: bool, delta: isize, len: usize) -> (usize, bool) {
-    if len == 0 {
-        return (0, false);
-    }
-    let raw = focus as isize + delta;
-    let crossed = raw < 0 || raw >= len as isize;
-    let new_focus = raw.rem_euclid(len as isize) as usize;
-    (new_focus, wrap ^ crossed)
 }
 
 // ── File commands ─────────────────────────────────────────────────────────────
@@ -913,6 +766,40 @@ fn difference_names(base: &[String], remove: &[String]) -> Vec<String> {
 /// (`GoTo`/`Find`/`Enzymes`) never mutate the sequence. Editor mutation does
 /// not widen this signature — it lives on the Phase 11 `workspace.edit` path
 /// (which owns the `BufferStore` history), not here.
+/// Re-derive `cut_sites` + `methyl_states` from the view's **current**
+/// `active_enzymes` + `methylation` against the live buffer bytes, and stamp
+/// `results_version`. The single scan implementation: the `Enzymes` command sets
+/// the params then calls this; [`rescan_if_stale`] calls it when the stamp lags.
+fn scan_cut_sites<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
+    let circular = buffer.is_circular();
+    let refs: Vec<&str> = view.active_enzymes.iter().map(String::as_str).collect();
+    let sites = bio.find_cut_sites(&buffer.text, &refs, circular);
+    let methyl_states = bio.methyl_states_for_sites(&sites, &buffer.text, &view.methylation);
+    view.cut_sites = sites;
+    view.methyl_states = methyl_states;
+    view.results_version = Some(buffer.version);
+}
+
+/// Freshen a view's derived results before a consumer reads them: recompute stale
+/// cut sites/methyl (their params live on the view), and clear stale search
+/// highlights (the query is not retained). No-op when everything is fresh.
+///
+/// This is the **read-side** freshness guarantee. `commit_edit` only bumps
+/// `buffer.version` (the signal); it never recomputes. So every consumer — the GUI
+/// paint path and any headless command that reads `cut_sites` (e.g. a future
+/// restriction digest) — calls this first, keyed to the view it is about to read.
+/// Correctness therefore never depends on GUI focus/active-view events, which CLI
+/// callers do not generate.
+pub fn rescan_if_stale<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
+    if view.cut_sites_stale(buffer.version) {
+        scan_cut_sites(view, buffer, bio);
+    }
+    if view.search_stale(buffer.version) {
+        view.search_hits.clear();
+        view.search_version = None;
+    }
+}
+
 pub fn dispatch<B: BioOps>(
     view: &mut View,
     buffer: &Buffer,
@@ -992,6 +879,7 @@ pub fn dispatch<B: BioOps>(
                 // clean state — consistent with `Open` / `Close`.
                 // Tier 2 #10.
                 view.search_hits.clear();
+                view.search_version = None;
                 view.selection = ViewSelection::None;
                 return Ok(ViewerResponse::SearchResults {
                     count: 0,
@@ -1007,6 +895,7 @@ pub fn dispatch<B: BioOps>(
                     ViewSelection::Text(Selection::from_span(first.span, buffer.text.len()));
             }
             view.search_hits = hits.clone();
+            view.search_version = Some(buffer.version);
             Ok(ViewerResponse::SearchResults { count, hits })
         }
 
@@ -1055,22 +944,17 @@ pub fn dispatch<B: BioOps>(
                 EnzymeOp::Add => union_names(&view.active_enzymes, &resolved),
                 EnzymeOp::Remove => difference_names(&view.active_enzymes, &resolved),
             };
-            let refs: Vec<&str> = new_set.iter().map(String::as_str).collect();
-            let sites = bio.find_cut_sites(&buffer.text, &refs, circular);
-            let count = sites.len();
+            // Install the params, then run the single scan implementation (which
+            // also stamps `results_version`). `rescan_if_stale` reuses `scan_cut_sites`
+            // so an edit-driven re-derive can never diverge from this command.
             view.active_enzymes = new_set;
-            view.cut_sites = sites.clone();
             view.methylation = MethylContext { dam, dcm, cpg };
-            let methyl_states =
-                bio.methyl_states_for_sites(&sites, &buffer.text, &view.methylation);
-            // Cache alongside cut_sites (same lifecycle) so render/inspector read
-            // it instead of re-deriving per frame.
-            view.methyl_states = methyl_states.clone();
+            scan_cut_sites(view, buffer, bio);
             Ok(ViewerResponse::CutSites {
-                count,
-                sites,
+                count: view.cut_sites.len(),
+                sites: view.cut_sites.clone(),
                 methylation: view.methylation,
-                methyl_states,
+                methyl_states: view.methyl_states.clone(),
             })
         }
     }
@@ -1086,139 +970,6 @@ pub fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod selection_tests {
-    use super::*;
-    use crate::span::Pieces;
-
-    // ── to_span: the wrap-aware region projection ────────────────────────────
-
-    #[test]
-    fn clamp_to_len_empty_and_past_eof() {
-        assert_eq!(Selection::cursor(105).clamp_to_len(0), Selection::cursor(0));
-        assert_eq!(Selection::range(3, 9).clamp_to_len(0), Selection::cursor(0));
-        assert_eq!(Selection::cursor(105).clamp_to_len(8), Selection::cursor(8));
-        assert_eq!(
-            Selection::range(3, 20).clamp_to_len(8),
-            Selection {
-                anchor: 3,
-                focus: 8,
-                wrap: false
-            }
-        );
-        // In-range caret is unchanged.
-        assert_eq!(Selection::cursor(4).clamp_to_len(8), Selection::cursor(4));
-    }
-
-    #[test]
-    fn to_span_non_wrapping_is_the_ordered_arc() {
-        // Direction-independent: a forward and a backward drag over 3..9 agree.
-        assert_eq!(Selection::range(3, 9).to_span(20), Span::from_range(3..9));
-        assert_eq!(Selection::range(9, 3).to_span(20), Span::from_range(3..9));
-        // A cursor is the empty span.
-        assert_eq!(Selection::cursor(5).to_span(20).len, 0);
-    }
-
-    #[test]
-    fn to_span_wrapping_is_the_origin_crossing_arc() {
-        // anchor 16, focus 4, wrap → covers [16..20) ∪ [0..4), NOT [4..16).
-        let s = Selection {
-            anchor: 16,
-            focus: 4,
-            wrap: true,
-        };
-        let span = s.to_span(20);
-        assert_eq!(span.linear_pieces(20), Pieces::Two(16..20, 0..4));
-        assert!(span.contains(18, 20));
-        assert!(span.contains(2, 20));
-        assert!(!span.contains(10, 20));
-    }
-
-    #[test]
-    fn from_span_round_trips_wrapping_and_full() {
-        // Wrapping arc (pUC19 ori shape): from_span → wrap selection → to_span
-        // recovers the same span (the two arms), NOT the whole molecule.
-        let ori = Span::new(16, 8); // [16..20) ∪ [0..4) on L=20
-        let sel = Selection::from_span(ori, 20);
-        assert!(sel.wrap);
-        assert_eq!(sel.to_span(20), ori);
-        assert_eq!(sel.to_span(20).linear_pieces(20), Pieces::Two(16..20, 0..4));
-        // A whole-molecule span is a full-circle selection, not an empty cursor.
-        let full = Selection::from_span(Span::full(20), 20);
-        assert!(full.wrap && !full.is_cursor());
-        assert_eq!(full.to_span(20), Span::full(20));
-    }
-
-    #[test]
-    fn to_span_wrapping_full_circle_when_anchor_meets_focus() {
-        let s = Selection {
-            anchor: 7,
-            focus: 7,
-            wrap: true,
-        };
-        assert_eq!(s.to_span(20), Span::full(20));
-        assert!(
-            !s.is_cursor(),
-            "anchor==focus with wrap is a full ring, not a cursor"
-        );
-    }
-
-    // ── move_focus_circular: focus steps mod L, wrap toggles at the origin ────
-
-    #[test]
-    fn step_focus_no_cross_keeps_wrap() {
-        // Interior step, rightward and leftward, never toggles wrap.
-        assert_eq!(step_focus_circular(100, false, 1, 2686), (101, false));
-        assert_eq!(step_focus_circular(100, false, -1, 2686), (99, false));
-        assert_eq!(step_focus_circular(100, true, 5, 2686), (105, true));
-    }
-
-    #[test]
-    fn step_focus_rightward_across_origin_toggles_wrap() {
-        // 2685 → +1 lands on the origin (0) and crosses: wrap flips.
-        assert_eq!(step_focus_circular(2685, false, 1, 2686), (0, true));
-        // Continuing past the origin toggles back.
-        assert_eq!(step_focus_circular(2685, true, 1, 2686), (0, false));
-    }
-
-    #[test]
-    fn step_focus_leftward_across_origin_toggles_wrap() {
-        // 0 → -1 wraps to 2685 and crosses the origin.
-        assert_eq!(step_focus_circular(0, false, -1, 2686), (2685, true));
-        assert_eq!(step_focus_circular(0, true, -1, 2686), (2685, false));
-    }
-
-    #[test]
-    fn step_focus_line_jump_across_origin() {
-        // A Down/Up line step (delta ≈ line width) that overshoots the origin.
-        assert_eq!(step_focus_circular(2680, false, 60, 2686), (54, true));
-        assert_eq!(step_focus_circular(30, false, -60, 2686), (2656, true));
-    }
-
-    #[test]
-    fn step_focus_degenerate_length() {
-        assert_eq!(step_focus_circular(0, false, 1, 0), (0, false));
-    }
-
-    #[test]
-    fn move_focus_circular_extends_selection_through_origin() {
-        // A real shift-select: anchor near the end, extend right past 0.
-        let sel = Selection::cursor(2685);
-        let sel = sel.move_focus_circular(1, 2686); // focus → 0, wrap on
-        assert!(sel.wrap);
-        // anchor 2685, focus 0, wrap → [2685..2686) ∪ nothing = one base at 2685.
-        assert_eq!(
-            sel.to_span(2686).linear_pieces(2686),
-            Pieces::One(2685..2686)
-        );
-        let sel = sel.move_focus_circular(3, 2686); // focus → 3
-        assert_eq!(
-            sel.to_span(2686).linear_pieces(2686),
-            Pieces::Two(2685..2686, 0..3)
-        );
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2074,6 +1825,113 @@ mod tests {
         if let ViewerResponse::SearchResults { hits, .. } = resp {
             assert_eq!(hits[0].span.start, 2);
         }
+    }
+
+    // ── Freshen-at-read: version-fingerprinted derived results ────────────────
+
+    /// Convenience: run the `Enzymes` scan (dam/dcm off so methyl is Cuttable).
+    fn scan(view: &mut View, buf: &Buffer, ann: &mut Annotations, bio: &FakeBio, query: &str) {
+        dispatch(
+            view,
+            buf,
+            ann,
+            bio,
+            ViewerRequest::Enzymes {
+                query: query.into(),
+                op: EnzymeOp::Set,
+                view: None,
+                dam: false,
+                dcm: false,
+                cpg: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_stamps_results_version_and_rescan_refreshes_after_edit() {
+        let (mut view, mut buf, mut ann) = fixture();
+        let bio = FakeBio::new().with_site(0);
+        scan(&mut view, &buf, &mut ann, &bio, "EcoRI");
+        assert_eq!(view.cut_sites.len(), 1);
+        assert_eq!(view.results_version, Some(buf.version));
+        assert!(!view.cut_sites_stale(buf.version), "fresh right after a scan");
+
+        // An edit bumps the buffer version; the overlay is now stale.
+        buf.version += 1;
+        assert!(view.cut_sites_stale(buf.version));
+
+        // Freshen-at-read re-derives against the bumped version and re-stamps.
+        // `rescan_if_stale` takes the view explicitly — no "active"/focus input —
+        // which is exactly why a CLI-targeted, non-focused view stays correct.
+        rescan_if_stale(&mut view, &buf, &bio);
+        assert_eq!(view.results_version, Some(buf.version));
+        assert!(!view.cut_sites_stale(buf.version));
+        assert_eq!(view.cut_sites.len(), 1);
+    }
+
+    #[test]
+    fn rescan_rescans_even_when_prior_scan_found_no_sites() {
+        // Staleness keys on `active_enzymes` (the config), not `cut_sites` (the
+        // output): an empty prior result is NOT proof of freshness — an edit can
+        // introduce a site where the last scan found none.
+        let (mut view, mut buf, mut ann) = fixture();
+        let empty = FakeBio::new(); // finds nothing
+        scan(&mut view, &buf, &mut ann, &empty, "EcoRI");
+        assert!(view.cut_sites.is_empty());
+        assert!(!view.active_enzymes.is_empty());
+
+        buf.version += 1; // edit
+        assert!(
+            view.cut_sites_stale(buf.version),
+            "empty prior result with active enzymes must read as stale"
+        );
+
+        let now_has_site = FakeBio::new().with_site(0);
+        rescan_if_stale(&mut view, &buf, &now_has_site);
+        assert_eq!(view.cut_sites.len(), 1, "rescan discovers the new site");
+        assert_eq!(view.results_version, Some(buf.version));
+    }
+
+    #[test]
+    fn rescan_clears_stale_search_hits_without_recomputing() {
+        let (mut view, mut buf, mut ann) = fixture();
+        let bio = FakeBio::new().with_hit(2, 6);
+        dispatch(
+            &mut view,
+            &buf,
+            &mut ann,
+            &bio,
+            ViewerRequest::Find {
+                pattern: "ATGC".into(),
+                mismatches: 0,
+                view: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(view.search_hits.len(), 1);
+        assert_eq!(view.search_version, Some(buf.version));
+
+        buf.version += 1; // edit invalidates the search
+        assert!(view.search_stale(buf.version));
+        rescan_if_stale(&mut view, &buf, &bio);
+        assert!(
+            view.search_hits.is_empty(),
+            "stale search is cleared (query not retained), not re-run"
+        );
+        assert_eq!(view.search_version, None);
+    }
+
+    #[test]
+    fn rescan_is_noop_with_no_active_enzymes_or_search() {
+        // A view that never scanned/searched must not acquire results on freshen.
+        let (mut view, mut buf, _ann) = fixture();
+        let bio = FakeBio::new().with_site(0);
+        buf.version += 5;
+        rescan_if_stale(&mut view, &buf, &bio);
+        assert!(view.cut_sites.is_empty());
+        assert!(view.search_hits.is_empty());
+        assert_eq!(view.results_version, None);
     }
 
     #[test]

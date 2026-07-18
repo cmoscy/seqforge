@@ -132,6 +132,11 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // closed.
                 let cfg = config.clone();
                 let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
+                    // Freshen-at-read: recompute stale cut sites/methyl (bytes may
+                    // have moved under them since the last scan) and drop stale
+                    // search highlights before painting. No-op when fresh; scans
+                    // only when the version stamp lags (≈ once per commit).
+                    seqforge_core::rescan_if_stale(view, buf, &crate::app::AppBio);
                     match view.kind {
                         seqforge_core::ViewKind::TextView => {
                             seq_view.show(

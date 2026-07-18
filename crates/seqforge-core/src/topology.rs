@@ -13,9 +13,8 @@
 //! flip (optionally preceded by [`rotate_origin`]). Only rotation and the
 //! annotation-mirror are genuinely new primitives.
 
-use crate::document::{Location, Strand};
+use crate::document::Strand;
 use crate::model::Annotations;
-use crate::span::Span;
 
 /// Rotate a **circular** molecule of length `L` so base `n` becomes position 0
 /// ("Set Origin"). Rotates the bytes (`text[n..] ++ text[..n]`) and re-homes
@@ -33,36 +32,15 @@ pub fn rotate_origin(text: &mut [u8], ann: &mut Annotations, n: usize) {
     }
     text.rotate_left(n);
     for f in &mut ann.features {
-        f.location = rotate_location(&f.location, n, l);
+        // Total transform (no leaf drops), so `map_spans` always yields `Some`.
+        f.location = f
+            .location
+            .map_spans(&|s| Some(s.rotated(n, l)))
+            .expect("rotate is total");
     }
     for p in &mut ann.primers {
         if let Some(b) = p.binding {
-            p.binding = Some(rotate_span(b, n, l));
-        }
-    }
-}
-
-/// Shift a span's start by `-n (mod L)`, length preserved. A feature spanning the
-/// new origin ends up with `start + len > L` — a wrapping `Span`, exactly right.
-fn rotate_span(span: Span, n: usize, l: usize) -> Span {
-    // `(start + l - n) % l` avoids usize underflow; equals `(start - n).rem_euclid(l)`.
-    Span::new((span.start + l - n) % l, span.len)
-}
-
-fn rotate_location(loc: &Location, n: usize, l: usize) -> Location {
-    match loc {
-        Location::Simple {
-            span,
-            before,
-            after,
-        } => Location::Simple {
-            span: rotate_span(*span, n, l),
-            before: *before,
-            after: *after,
-        },
-        Location::Complement(inner) => Location::Complement(Box::new(rotate_location(inner, n, l))),
-        Location::Join(parts) => {
-            Location::Join(parts.iter().map(|p| rotate_location(p, n, l)).collect())
+            p.binding = Some(b.rotated(n, l));
         }
     }
 }
@@ -75,45 +53,14 @@ fn rotate_location(loc: &Location, n: usize, l: usize) -> Location {
 /// `bio`), then calls this to keep the annotations consistent.
 pub fn reverse_complement_circular(ann: &mut Annotations, l: usize) {
     for f in &mut ann.features {
-        f.location = mirror_location(&f.location, l);
+        f.location = f.location.mirrored(l);
         f.strand = flip_strand(f.strand);
     }
     for p in &mut ann.primers {
         if let Some(b) = p.binding {
-            p.binding = Some(mirror_span(b, l));
+            p.binding = Some(b.mirrored(l));
         }
         p.strand = flip_strand(p.strand);
-    }
-}
-
-/// Mirror a span across `[0, l)`: the arc `start, start+1, … (mod l)` maps to the
-/// reverse-strand arc of the same length. Correct for wrapping spans too
-/// (`rem_euclid`, unlike the linear-only `transport::mirror_location`).
-fn mirror_span(span: Span, l: usize) -> Span {
-    if l == 0 {
-        return span;
-    }
-    let new_start = (l as isize - (span.start + span.len) as isize).rem_euclid(l as isize) as usize;
-    Span::new(new_start, span.len)
-}
-
-fn mirror_location(loc: &Location, l: usize) -> Location {
-    match loc {
-        Location::Simple {
-            span,
-            before,
-            after,
-        } => Location::Simple {
-            span: mirror_span(*span, l),
-            // 5'/3' fuzzy ends swap under mirroring.
-            before: *after,
-            after: *before,
-        },
-        Location::Complement(inner) => Location::Complement(Box::new(mirror_location(inner, l))),
-        // Segment order reverses along the reverse strand.
-        Location::Join(parts) => {
-            Location::Join(parts.iter().rev().map(|p| mirror_location(p, l)).collect())
-        }
     }
 }
 
@@ -128,7 +75,8 @@ fn flip_strand(s: Strand) -> Strand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Feature, FeatureId, Primer, PrimerId};
+    use crate::document::{Feature, FeatureId, Location, Primer, PrimerId};
+    use crate::span::Span;
     use std::collections::BTreeMap;
 
     fn feat(loc: Location, strand: Strand) -> Feature {

@@ -283,7 +283,7 @@ pub fn place(
     for f in &slice.features {
         let location = match orient {
             Orient::Identity => offset_location(&f.location, at as isize),
-            Orient::Rev => offset_location(&mirror_location(&f.location, l), at as isize),
+            Orient::Rev => offset_location(&f.location.mirrored(l), at as isize),
         };
         let strand = match orient {
             Orient::Identity => f.strand,
@@ -297,13 +297,10 @@ pub fn place(
     }
 
     for p in &slice.primers {
-        let binding = p.binding.as_ref().map(|b| {
-            let (bs, be) = (b.start, b.start + b.len);
-            match orient {
-                Orient::Identity => Span::new(bs + at, b.len),
-                // Mirror within the slice, then offset.
-                Orient::Rev => Span::from_range((l - be + at)..(l - bs + at)),
-            }
+        let binding = p.binding.as_ref().map(|b| match orient {
+            Orient::Identity => b.shift(at as isize),
+            // Mirror within the slice, then offset — same Span leaves as features.
+            Orient::Rev => b.mirrored(l).shift(at as isize),
         });
         let strand = match orient {
             Orient::Identity => p.strand,
@@ -390,48 +387,11 @@ fn combine_locations(a: &Location, b: &Location, len_total: usize) -> Location {
 // ── location transforms ───────────────────────────────────────────────────────
 
 /// Shift every leaf range by `delta` (may be negative), preserving structure and
-/// fuzzy flags.
+/// fuzzy flags. Total (no leaf drops), so `map_spans` always yields `Some`.
+/// (Reverse-complement placement uses [`Location::mirrored`].)
 fn offset_location(loc: &Location, delta: isize) -> Location {
-    match loc {
-        Location::Simple {
-            span,
-            before,
-            after,
-        } => Location::Simple {
-            span: span.shift(delta),
-            before: *before,
-            after: *after,
-        },
-        Location::Complement(inner) => {
-            Location::Complement(Box::new(offset_location(inner, delta)))
-        }
-        Location::Join(parts) => {
-            Location::Join(parts.iter().map(|p| offset_location(p, delta)).collect())
-        }
-    }
-}
-
-/// Mirror every leaf range within a window of length `l` (`[a, b)` → `[l-b, l-a)`),
-/// swapping fuzzy ends and reversing `Join` order — the coordinate half of a
-/// reverse-complement placement (strand flip is applied separately).
-fn mirror_location(loc: &Location, l: usize) -> Location {
-    match loc {
-        Location::Simple {
-            span,
-            before,
-            after,
-        } => Location::Simple {
-            // [a, b) → [l-b, l-a); with start+len form: new start = l-(start+len).
-            span: Span::new(l.saturating_sub(span.start + span.len), span.len),
-            // 5'/3' swap under mirroring.
-            before: *after,
-            after: *before,
-        },
-        Location::Complement(inner) => Location::Complement(Box::new(mirror_location(inner, l))),
-        Location::Join(parts) => {
-            Location::Join(parts.iter().rev().map(|p| mirror_location(p, l)).collect())
-        }
-    }
+    loc.map_spans(&|s| Some(s.shift(delta)))
+        .expect("offset is total")
 }
 
 fn flip_strand(s: Strand) -> Strand {

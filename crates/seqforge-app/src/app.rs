@@ -61,7 +61,10 @@ fn selection_qc(region: &[u8]) -> Option<(f64, Option<f64>)> {
 
 // ── AppBio ────────────────────────────────────────────────────────────────────
 
-struct AppBio;
+/// The GUI's `BioOps` implementation — a ZST forwarding to `seqforge_bio` free
+/// functions. `pub(crate)` so the paint path (`tabs.rs`) can construct one to
+/// freshen a view's derived results before reading them (`rescan_if_stale`).
+pub(crate) struct AppBio;
 
 impl BioOps for AppBio {
     fn load(&self, path: &std::path::Path) -> Result<Document, String> {
@@ -963,6 +966,20 @@ impl eframe::App for SeqForgeApp {
         // event log so this frame's status bar / panels see fresh data.
         if let Some(rx) = &self.state.event_rx {
             self.state.event_log.drain_from(rx);
+        }
+
+        // ── Freshen derived results for the active view ───────────────────────
+        // The previous frame's `apply()` may have bumped `buffer.version`, leaving
+        // cut sites / methyl / search stale. Recompute before any panel (Inspector,
+        // minimap) reads them this frame; the per-tab paint (`tabs.rs`) freshens
+        // the remaining visible views. No-op when already fresh.
+        if let Some(vid) = self.state.workspace.active_view {
+            let _ = self
+                .state
+                .workspace
+                .with_view_buffer(vid, |_, view, buf, _| {
+                    seqforge_core::rescan_if_stale(view, buf, &AppBio);
+                });
         }
 
         // ── Dirty title bar + quit/close intercept ────────────────────────────

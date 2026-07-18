@@ -103,7 +103,9 @@ fn shift_features(ann: &mut Annotations, start: usize, removed: usize, inserted:
 /// `None` if it collapses (fully inside the removed region, or a straddle whose
 /// body is entirely cut) — the caller drops it.
 ///
-/// This is the coordinate math the transport layer also reuses.
+/// This is the leaf op behind [`shift_location`] (via `Location::map_spans`); the
+/// same left/right/straddle classification is shared by [`shift_primers`] (which
+/// detaches instead of dropping).
 pub(crate) fn shift_range(
     r: &Range<usize>,
     start: usize,
@@ -136,43 +138,21 @@ pub(crate) fn shift_range(
     (new_start < new_end).then_some(new_start..new_end)
 }
 
-/// Apply the splice-shift policy recursively over a [`Location`]. Returns the
-/// shifted location, or `None` if every segment collapses.
+/// Apply the splice-shift policy over a [`Location`] via `Location::map_spans`
+/// (the shared Simple/Complement/Join recursion); the leaf is [`shift_range`],
+/// which drops a segment that collapses. Returns `None` if every segment drops.
+///
+/// P1: no `Simple` wraps yet, so a leaf span is treated as the plain linear range
+/// `Span::range` for the splice-clamp policy.
 fn shift_location(
     loc: &Location,
     start: usize,
     removed: usize,
     inserted: usize,
 ) -> Option<Location> {
-    match loc {
-        Location::Simple {
-            span,
-            before,
-            after,
-        } => {
-            // P1: no Simple wraps yet, so the span is a plain range for the
-            // splice-clamp policy; re-wrap the result into a Span.
-            let range = span.start..span.start + span.len;
-            shift_range(&range, start, removed, inserted).map(|r| Location::Simple {
-                span: Span::from_range(r),
-                before: *before,
-                after: *after,
-            })
-        }
-        Location::Complement(inner) => shift_location(inner, start, removed, inserted)
-            .map(|l| Location::Complement(Box::new(l))),
-        Location::Join(parts) => {
-            let mut survivors: Vec<Location> = parts
-                .iter()
-                .filter_map(|p| shift_location(p, start, removed, inserted))
-                .collect();
-            match survivors.len() {
-                0 => None,
-                1 => Some(survivors.pop().unwrap()),
-                _ => Some(Location::Join(survivors)),
-            }
-        }
-    }
+    loc.map_spans(&|span| {
+        shift_range(&span.range(), start, removed, inserted).map(Span::from_range)
+    })
 }
 
 /// Apply the **primer**-specific shift policy for a splice (ROADMAP decision 14;

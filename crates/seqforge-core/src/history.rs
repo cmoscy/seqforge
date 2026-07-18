@@ -259,8 +259,8 @@ impl History {
             entry.topology_before = Some(buf.topology);
             buf.topology = tb;
         }
-        buf.version += 1;
-        buf.dirty = true;
+        // `version`/`dirty` are bumped by the caller's commit epilogue
+        // (`Workspace::commit_edit`), the single source of truth for both.
         self.future.push(entry);
         // Coalescing must not bridge across an undo.
         self.last_edit_kind = None;
@@ -285,8 +285,7 @@ impl History {
             entry.topology_before = Some(buf.topology);
             buf.topology = tb;
         }
-        buf.version += 1;
-        buf.dirty = true;
+        // `version`/`dirty` bumped by the caller's commit epilogue (see `undo`).
         self.past.push_back(entry);
         self.last_edit_kind = None;
         self.last_edit_at = None;

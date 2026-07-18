@@ -179,6 +179,37 @@ impl Span {
             len: self.len,
         }
     }
+
+    /// The **linear** half-open range `start..start+len` — the non-wrap form used
+    /// by the splice-shift policy and by span→range display sites. Distinct from
+    /// [`Span::bounds`] / [`Span::end`] (both wrap-aware); use this only where the
+    /// span is known linear (the P1 no-wrapping-`Simple` invariant).
+    pub fn range(&self) -> Range<usize> {
+        self.start..self.start + self.len
+    }
+
+    /// Rotate the span for a "set origin at `n`" on a circular molecule of length
+    /// `l`: `start` moves to `(start - n) mod l`, length preserved. A span that
+    /// contained base `n` becomes an origin-wrapping span. The leaf op behind
+    /// [`crate::Location::map_spans`]-based origin rotation.
+    pub fn rotated(&self, n: usize, l: usize) -> Span {
+        // `(start + l - n) % l` avoids usize underflow; == `(start - n).rem_euclid(l)`.
+        Span::new((self.start + l - n) % l, self.len)
+    }
+
+    /// Mirror the span across `[0, l)` for a reverse-complement: the arc
+    /// `start.. (mod l)` maps to the reverse-strand arc of the same length,
+    /// `new_start = (l - (start+len)) mod l`. `rem_euclid` keeps a wrapping span
+    /// correct (the linear `l - (start+len)` is the same when the span does not
+    /// wrap). The leaf op behind [`crate::Location::mirrored`].
+    pub fn mirrored(&self, l: usize) -> Span {
+        if l == 0 {
+            return *self;
+        }
+        let new_start =
+            (l as isize - (self.start + self.len) as isize).rem_euclid(l as isize) as usize;
+        Span::new(new_start, self.len)
+    }
 }
 
 #[cfg(test)]

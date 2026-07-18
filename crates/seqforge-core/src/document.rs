@@ -333,6 +333,63 @@ impl Location {
         }
     }
 
+    /// Structure-preserving map of every leaf [`Span`], keeping fuzzy ends and
+    /// segment order. `f` returns `None` to drop a segment; a `Join` where some
+    /// segments drop collapses (to a single leaf, or `Join` of the survivors), and
+    /// a location whose **every** leaf drops returns `None` (the caller drops the
+    /// feature). This is the single Simple/Complement/Join recursion behind the
+    /// splice-shift / rotate / offset transforms — the leaf op is the only thing
+    /// that varies. (Reverse-complement is [`Location::mirrored`], not this: it
+    /// swaps fuzzy ends and reverses `Join` order, which a per-leaf map cannot.)
+    pub fn map_spans(&self, f: &impl Fn(Span) -> Option<Span>) -> Option<Location> {
+        match self {
+            Location::Simple {
+                span,
+                before,
+                after,
+            } => f(*span).map(|span| Location::Simple {
+                span,
+                before: *before,
+                after: *after,
+            }),
+            Location::Complement(inner) => {
+                inner.map_spans(f).map(|l| Location::Complement(Box::new(l)))
+            }
+            Location::Join(parts) => {
+                let mut survivors: Vec<Location> =
+                    parts.iter().filter_map(|p| p.map_spans(f)).collect();
+                match survivors.len() {
+                    0 => None,
+                    1 => Some(survivors.pop().unwrap()),
+                    _ => Some(Location::Join(survivors)),
+                }
+            }
+        }
+    }
+
+    /// Mirror every leaf across `[0, l)` for a reverse-complement: each leaf span
+    /// is [`Span::mirrored`], fuzzy ends (`before`/`after`, i.e. 5'/3') swap, and
+    /// `Join` segment order reverses (segments run the other way on the reverse
+    /// strand). The coordinate half of an RC; the strand flip is applied by the
+    /// caller. One home for what were two divergent `mirror_location` copies.
+    pub fn mirrored(&self, l: usize) -> Location {
+        match self {
+            Location::Simple {
+                span,
+                before,
+                after,
+            } => Location::Simple {
+                span: span.mirrored(l),
+                before: *after,
+                after: *before,
+            },
+            Location::Complement(inner) => Location::Complement(Box::new(inner.mirrored(l))),
+            Location::Join(parts) => {
+                Location::Join(parts.iter().rev().map(|p| p.mirrored(l)).collect())
+            }
+        }
+    }
+
     /// True if any leaf is fuzzy (`<`/`>`) — a torn edge to render.
     pub fn is_fuzzy(&self) -> bool {
         match self {
@@ -456,6 +513,90 @@ impl Document {
 #[cfg(test)]
 mod location_tests {
     use super::*;
+
+    // ── map_spans: the one Simple/Complement/Join transform recursion ─────────
+
+    #[test]
+    fn map_spans_identity_round_trips() {
+        let loc = Location::Join(vec![
+            Location::Complement(Box::new(Location::simple(3..9))),
+            Location::simple(20..25),
+        ]);
+        assert_eq!(loc.map_spans(&|s| Some(s)), Some(loc.clone()));
+    }
+
+    #[test]
+    fn map_spans_shift_matches_manual_offset() {
+        // Order-preserving per-leaf shift by +5 (an offset/place-style transform).
+        let loc = Location::Join(vec![Location::simple(2..6), Location::simple(10..14)]);
+        let shifted = loc.map_spans(&|s| Some(s.shift(5))).unwrap();
+        let expected = Location::Join(vec![Location::simple(7..11), Location::simple(15..19)]);
+        assert_eq!(shifted, expected);
+    }
+
+    #[test]
+    fn map_spans_join_partial_drop_collapses_to_single() {
+        // Leaf returns None for the first segment → Join shrinks to the survivor
+        // (a one-element Join is unwrapped to the bare Location).
+        let loc = Location::Join(vec![Location::simple(2..6), Location::simple(10..14)]);
+        let out = loc
+            .map_spans(&|s| (s.start >= 10).then_some(s))
+            .expect("one segment survives");
+        assert_eq!(out, Location::simple(10..14));
+    }
+
+    #[test]
+    fn map_spans_all_leaves_drop_returns_none() {
+        let loc = Location::Join(vec![Location::simple(2..6), Location::simple(10..14)]);
+        assert_eq!(loc.map_spans(&|_| None), None);
+        // A bare Simple that drops is None too.
+        assert_eq!(Location::simple(2..6).map_spans(&|_| None), None);
+    }
+
+    #[test]
+    fn map_spans_preserves_complement_nesting() {
+        let loc = Location::Complement(Box::new(Location::simple(4..8)));
+        let out = loc.map_spans(&|s| Some(s.shift(2))).unwrap();
+        assert_eq!(
+            out,
+            Location::Complement(Box::new(Location::simple(6..10)))
+        );
+    }
+
+    // ── mirrored: leaf mirror + fuzzy-end swap + Join reversal ─────────────────
+
+    #[test]
+    fn mirrored_reverses_join_order_and_mirrors_each_leaf() {
+        // On L=20: [2..6) → [14..18), [10..14) → [6..10); segment order reverses.
+        let loc = Location::Join(vec![Location::simple(2..6), Location::simple(10..14)]);
+        let m = loc.mirrored(20);
+        let expected = Location::Join(vec![Location::simple(6..10), Location::simple(14..18)]);
+        assert_eq!(m, expected);
+    }
+
+    #[test]
+    fn mirrored_swaps_fuzzy_ends() {
+        let loc = Location::Simple {
+            span: Span::new(3, 4),
+            before: true,
+            after: false,
+        };
+        match loc.mirrored(20) {
+            Location::Simple { before, after, .. } => {
+                assert!(!before && after, "5'/3' fuzzy ends swap under mirroring");
+            }
+            _ => panic!("shape preserved"),
+        }
+    }
+
+    #[test]
+    fn mirrored_is_its_own_inverse() {
+        let loc = Location::Join(vec![
+            Location::Complement(Box::new(Location::simple(3..9))),
+            Location::simple(12..16),
+        ]);
+        assert_eq!(loc.mirrored(20).mirrored(20), loc);
+    }
 
     #[test]
     fn bounds_of_simple_is_the_range() {
