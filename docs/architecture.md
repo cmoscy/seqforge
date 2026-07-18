@@ -217,6 +217,37 @@ See `docs/focus-refactor.md` §2 for the full lifecycle. In short:
   enqueued *during* application (chaining) are processed next frame —
   predictable ordering, no infinite-loop risk.
 
+## Edit-path foundation (post-`v0.2`, commit `5ae707b`)
+
+Three cross-cutting invariants hardened after the topology work, under
+`command::apply`. No user-facing behavior change; recorded here because
+they span modules.
+
+- **`Workspace::commit_edit` — the single buffer-write lowering.** Every
+  byte / annotation / topology write funnels through one private method
+  that owns the write-lock lifecycle and a uniform epilogue: **idempotent**
+  `version` bump (captured before the body, forced to `+1` — `apply_splice`
+  self-bumps, so one commit = one tick), `dirty`, and a declared
+  `SelUpdate` selection intent (`Cursor`/`Rehome`/`Keep`/`Skip`).
+  `core::history` undo/redo no longer bump `version` — `commit_edit` is the
+  sole source. This sits *below* `command::apply` (the command choke point):
+  appliers call `commit_edit`.
+- **Derived scan results are version-stamped, freshened at read.** Refines
+  the [derived-data rule](#derived-sequence-data-computed-never-stored-on-core):
+  `cut_sites` / `methyl_states` / `search_hits` on `core::View` carry a
+  `results_version` / `search_version` stamp. `commands::rescan_if_stale`
+  recomputes stale cut sites (params live on the view) and clears stale
+  search **before any consumer reads** — keyed to the *view being read*, not
+  to GUI focus/active events, so a headless/CLI digest that reads cut sites
+  is correct by construction. `commit_edit` only emits the version signal.
+- **`Location::map_spans` — the single coordinate-transform recursion.**
+  Shift / rotate / offset are one-line adapters over it; `Location::mirrored`
+  is the one exception (swaps fuzzy ends + reverses `Join` order). Leaf ops
+  (`rotated`/`mirrored`/`range`) live on [`Span`](#span-the-canonical-region-type);
+  `Selection` moved from the `commands.rs` dispatch module to `model.rs`.
+  This is the substrate a future first-class `Change`/`mapPos` edit object
+  would plug into.
+
 ## Workspace / Layout / Persistence boundary (Stage 2.5e)
 
 State is split by **lifetime**, not by struct:
