@@ -290,7 +290,14 @@ impl Workspace {
             .buffer_id;
         self.buffers
             .reload(bid, path, bio)
-            .map_err(DispatchError::BioError)
+            .map_err(DispatchError::BioError)?;
+        let len = self
+            .buffers
+            .get(bid)
+            .and_then(|b| b.read().ok().map(|b| b.len()))
+            .unwrap_or(0);
+        self.rehome_views_for_buffer(bid, len);
+        Ok(())
     }
 
     /// Resolve the active view's buffer handle.
@@ -460,6 +467,26 @@ impl Workspace {
         self.with_buffer_mut(id, f)
     }
 
+    /// After a buffer-length change, clamp every text-bearing selection on
+    /// views of `bid` into `0..=len` (empty → `cursor(0)`). Feature / CutSite
+    /// object selections reduce to clamped `Text`, matching the caret edit
+    /// leaves behind. Primer / None are left alone.
+    fn rehome_views_for_buffer(&mut self, bid: BufferId, len: usize) {
+        for view in self.views.values_mut() {
+            if view.buffer_id != bid {
+                continue;
+            }
+            match view.selection {
+                ViewSelection::Text(s)
+                | ViewSelection::Feature { range: s, .. }
+                | ViewSelection::CutSite { range: s, .. } => {
+                    view.selection = ViewSelection::Text(s.clamp_to_len(len));
+                }
+                ViewSelection::Primer(_) | ViewSelection::None => {}
+            }
+        }
+    }
+
     /// The single edit entry point: record a reverse delta into the buffer's
     /// history, then apply the splice. Every editor mutation (Phase 12's
     /// `command/edit.rs`, from GUI / terminal / agent) routes through here so
@@ -500,11 +527,13 @@ impl Workspace {
         history.record(range.start, old_bytes, new_bytes.to_vec(), ann, kind);
         mutations::apply_splice(&mut buf, ann, range.clone(), new_bytes);
         let cursor = range.start + new_bytes.len();
+        let len = buf.text.len();
         drop(buf);
 
         if let Some(view) = self.views.get_mut(&view_id) {
             view.selection = ViewSelection::Text(Selection::cursor(cursor));
         }
+        self.rehome_views_for_buffer(bid, len);
         Ok(())
     }
 
@@ -559,6 +588,7 @@ impl Workspace {
         if let Some(view) = self.views.get_mut(&view_id) {
             view.selection = ViewSelection::Text(Selection::cursor(cursor));
         }
+        self.rehome_views_for_buffer(bid, len_total);
         Ok(())
     }
 
@@ -604,6 +634,9 @@ impl Workspace {
         buf.version += 1;
         buf.dirty = true;
         *ann = new_ann;
+        let len = buf.text.len();
+        drop(buf);
+        self.rehome_views_for_buffer(bid, len);
         Ok(())
     }
 
@@ -770,11 +803,19 @@ impl Workspace {
             .buffers
             .ann_and_history_mut(bid)
             .ok_or(DispatchError::ViewNotFound(view_id))?;
-        Ok(if undo {
+        let changed = if undo {
             history.undo(&mut buf, ann)
         } else {
             history.redo(&mut buf, ann)
-        })
+        };
+        let len = buf.text.len();
+        drop(buf);
+        if changed {
+            // Forward edit/paste rehome the caret; undo/redo must too so a
+            // stale post-paste cursor cannot survive an empty restore.
+            self.rehome_views_for_buffer(bid, len);
+        }
+        Ok(changed)
     }
 
     /// Reset every per-view render cache. Called by command arms
@@ -932,8 +973,12 @@ mod tests {
         .unwrap();
 
         assert!(ws.undo(vid).unwrap());
-        ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATGC"))
-            .unwrap();
+        ws.with_active_buffer(|view, buf, _| {
+            assert_eq!(buf.text, b"ATGC");
+            // Undo rehomes the caret into 0..=len (was at 4 after insert).
+            assert_eq!(view.selection.text_range(), Some(Selection::cursor(4)));
+        })
+        .unwrap();
 
         assert!(ws.redo(vid).unwrap());
         ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATTTGC"))
@@ -941,6 +986,46 @@ mod tests {
 
         // nothing left to redo
         assert!(!ws.redo(vid).unwrap());
+    }
+
+    #[test]
+    fn undo_paste_into_empty_rehomes_caret_to_zero() {
+        // The crash path: paste N bp into empty → cursor(N) → undo → len 0 must
+        // leave cursor(0), not a stale caret past EOF.
+        let mut ws = Workspace::default();
+        let bid = ws
+            .buffers
+            .new_scratch("scratch".into(), Vec::new(), Topology::Linear);
+        let vid = ws.add_view(bid, ViewKind::TextView);
+        let slice = SeqSlice {
+            bytes: b"ATGCATGC".to_vec(),
+            features: Vec::new(),
+            primers: Vec::new(),
+        };
+        ws.paste_slice(vid, 0, &slice, Orient::Identity, true)
+            .unwrap();
+        ws.with_active_buffer(|view, buf, _| {
+            assert_eq!(buf.text, b"ATGCATGC");
+            assert_eq!(view.selection.text_range(), Some(Selection::cursor(8)));
+        })
+        .unwrap();
+
+        assert!(ws.undo(vid).unwrap());
+        ws.with_active_buffer(|view, buf, _| {
+            assert_eq!(buf.text, b"");
+            assert_eq!(
+                view.selection.text_range(),
+                Some(Selection::cursor(0)),
+                "undo into empty must rehome the caret"
+            );
+        })
+        .unwrap();
+
+        // A second paste at the rehomed caret must succeed (no OutOfRange).
+        ws.paste_slice(vid, 0, &slice, Orient::Identity, true)
+            .unwrap();
+        ws.with_active_buffer(|_, buf, _| assert_eq!(buf.text, b"ATGCATGC"))
+            .unwrap();
     }
 
     #[test]

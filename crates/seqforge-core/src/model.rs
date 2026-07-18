@@ -553,7 +553,10 @@ impl View {
             id,
             buffer_id,
             kind,
-            selection: ViewSelection::None,
+            // Fresh views open with a live caret so typing / paste work
+            // immediately (including empty buffers). Restored file state
+            // may overwrite this; `clear_selection` still clears to None.
+            selection: ViewSelection::Text(Selection::cursor(0)),
             scroll_pos: None,
             scroll_to: None,
             search_hits: Vec::new(),
@@ -677,6 +680,17 @@ mod tests {
         assert!(v.active_enzymes.is_empty());
         assert!(v.search_hits.is_empty());
         assert!(v.cut_sites.is_empty());
+    }
+
+    #[test]
+    fn view_new_defaults_to_caret_at_zero() {
+        let v = View::new(ViewId(1), BufferId(1), ViewKind::TextView);
+        assert_eq!(
+            v.selection.text_range(),
+            Some(Selection::cursor(0)),
+            "fresh views must have a live caret so typing/paste work immediately"
+        );
+        assert!(!v.selection.is_none());
     }
 
     #[test]

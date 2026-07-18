@@ -3,8 +3,8 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, Style};
 use seqforge_core::{
-    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, ViewId, ViewSelection,
-    ViewerRequest, ViewerResponse,
+    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, Selection, ViewId,
+    ViewSelection, ViewerRequest, ViewerResponse,
 };
 
 use std::sync::Arc;
@@ -276,9 +276,10 @@ fn restore_session(state: &mut AppState, session: PersistedSession, bio: &dyn Bi
             Ok(vid) => {
                 if let Some(fs) = state.pending_file_state.remove(path) {
                     if let Some(view) = state.workspace.view_mut(vid) {
-                        view.selection = fs
-                            .selection
-                            .map_or(ViewSelection::None, ViewSelection::Text);
+                        view.selection = fs.selection.map_or(
+                            ViewSelection::Text(Selection::cursor(0)),
+                            ViewSelection::Text,
+                        );
                         view.scroll_pos = fs.scroll_pos;
                     }
                 }

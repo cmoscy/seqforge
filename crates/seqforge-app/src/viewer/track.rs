@@ -1151,6 +1151,11 @@ pub(crate) fn screen_to_seq(
     if col >= line_width {
         return None;
     }
+    // Empty buffer: any in-block column maps to the sole insert point.
+    // Non-empty keeps `None` past EOF so refocus clicks don't invent a caret.
+    if seq_len == 0 {
+        return Some(0);
+    }
     let p = block_idx * line_width + col;
     if p > seq_len { None } else { Some(p) }
 }
@@ -1245,6 +1250,60 @@ mod tests {
         };
         let (layouts, _) = build_block_layouts(&ann, &[], 20, &style, &show_all, 0.0, None);
         assert_eq!(layouts[0].feat_rows.len(), 2, "source shown when un-hidden");
+    }
+
+    #[test]
+    fn empty_buffer_still_gets_one_block_and_clickable_caret() {
+        // Contract shared with the viewer (`n_blocks = div_ceil.max(1)`): an
+        // empty sequence paints one addressable block so cursor(0) is visible
+        // and screen→seq resolves insert-at-0.
+        let style = test_style();
+        let ann = Annotations::default();
+        let vis = crate::viewer::FeatureVisibility::default();
+        let (layouts, offsets) = build_block_layouts(&ann, &[], 0, &style, &vis, 0.0, None);
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(offsets.len(), 2); // start + end of the single block
+        assert!(layouts[0].height > 0.0);
+
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(400.0, 100.0));
+        let left_margin = 20.0;
+        // Click at the SOL caret column.
+        let pos = Pos2::new(left_margin + 1.0, 5.0);
+        assert_eq!(
+            screen_to_seq(pos, rect, style.char_width, style.line_width, 0, &offsets, left_margin),
+            Some(0)
+        );
+        // Empty-only policy: any in-block column maps to insert-at-0.
+        let past = Pos2::new(left_margin + style.char_width * 2.0, 5.0);
+        assert_eq!(
+            screen_to_seq(
+                past,
+                rect,
+                style.char_width,
+                style.line_width,
+                0,
+                &offsets,
+                left_margin
+            ),
+            Some(0)
+        );
+        // Non-empty: a column past the last base still returns None (refocus
+        // must not invent an EOF caret).
+        let (_layouts_ne, offsets_ne) =
+            build_block_layouts(&ann, &[], 4, &style, &vis, 0.0, None);
+        let past_eof = Pos2::new(left_margin + style.char_width * 10.0, 5.0);
+        assert_eq!(
+            screen_to_seq(
+                past_eof,
+                rect,
+                style.char_width,
+                style.line_width,
+                4,
+                &offsets_ne,
+                left_margin
+            ),
+            None
+        );
     }
 
     /// Co-location invariant: a track's `hit_rects` rect is the *same* geometry

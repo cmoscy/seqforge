@@ -892,7 +892,9 @@ pub(super) fn apply_save_as(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seqforge_core::{BioOps, Feature, Primer, SeqSlice, Topology, ViewKind, ViewSelection};
+    use seqforge_core::{
+        BioOps, Feature, Primer, Selection, SeqSlice, Topology, ViewKind, ViewSelection,
+    };
 
     /// A bytes-only clipboard slice (no carried annotations) for paste tests.
     fn clip(bytes: &[u8]) -> SeqSlice {
@@ -951,6 +953,14 @@ mod tests {
         assert_eq!(text(&mut s), b"", "new buffer starts empty");
         assert_eq!(feature_count(&mut s), 0);
         assert!(is_circular(&mut s), "New --circular");
+        {
+            let v = s.workspace.active_view().unwrap();
+            assert_eq!(
+                v.selection.text_range(),
+                Some(Selection::cursor(0)),
+                "New opens with a live caret at 0 so ⌘V can arm"
+            );
+        }
 
         // Paste the fragment; its carried feature re-homes via `place`.
         apply_paste(&mut s, None, 0).unwrap();

@@ -16,7 +16,9 @@
 //! the current state without a base snapshot.
 //!
 //! Bounded by a **per-buffer byte budget** (deltas are variable-size, so a
-//! count cap is a false guard); eviction is silent and oldest-first.
+//! count cap is a false guard); eviction is silent and oldest-first. Budget
+//! usage is **recomputed** from entry `size_bytes()` — not a running counter —
+//! because undo/redo swap annotation snapshots and can change an entry's size.
 
 use std::collections::VecDeque;
 
@@ -54,6 +56,7 @@ pub struct HistoryEntry {
     /// Bytes that were inserted — re-applied on redo.
     pub new_bytes: Vec<u8>,
     /// Annotations as they were before this edit (restored on undo).
+    /// After undo, this field holds the post-edit snapshot (stashed for redo).
     pub annotations: Annotations,
     /// Buffer topology as it was before this edit, when the edit changed it
     /// (Linearize / Circularize). `None` for edits that leave topology alone —
@@ -107,8 +110,6 @@ fn annotations_size(ann: &Annotations) -> usize {
 pub struct History {
     past: VecDeque<HistoryEntry>,
     future: Vec<HistoryEntry>,
-    /// Running total of `past` + `future` entry sizes.
-    bytes: usize,
     budget: usize,
     last_edit_kind: Option<EditKind>,
     last_edit_at: Option<std::time::Instant>,
@@ -125,7 +126,6 @@ impl History {
         Self {
             past: VecDeque::new(),
             future: Vec::new(),
-            bytes: 0,
             budget,
             last_edit_kind: None,
             last_edit_at: None,
@@ -148,6 +148,16 @@ impl History {
         self.past.is_empty()
     }
 
+    /// Sum of `size_bytes()` over `past` and `future`. Recomputed on demand so
+    /// undo/redo annotation swaps cannot desync a running counter.
+    fn total_bytes(&self) -> usize {
+        self.past
+            .iter()
+            .chain(self.future.iter())
+            .map(HistoryEntry::size_bytes)
+            .sum()
+    }
+
     /// Record an edit as a splice delta. `old_bytes` is the slice removed at
     /// `start`; `new_bytes` is what was inserted there; `ann_before` is the
     /// annotation state prior to the edit. Clears the redo stack.
@@ -163,12 +173,9 @@ impl History {
         ann_before: &Annotations,
         kind: EditKind,
     ) -> bool {
-        // Any new edit invalidates the redo stack.
-        if !self.future.is_empty() {
-            for e in self.future.drain(..) {
-                self.bytes -= e.size_bytes();
-            }
-        }
+        // Any new edit invalidates the redo stack. Drop entries outright —
+        // sizes are recomputed in `enforce_bounds`, not subtracted here.
+        self.future.clear();
 
         let now = std::time::Instant::now();
         let pushed = if self.can_coalesce(start, &old_bytes, kind, now) {
@@ -176,20 +183,17 @@ impl History {
             // an insert removes nothing) and `ann_before` (the pre-run state)
             // stay as-is.
             if let Some(last) = self.past.back_mut() {
-                self.bytes += new_bytes.len();
                 last.new_bytes.extend_from_slice(&new_bytes);
             }
             false
         } else {
-            let entry = HistoryEntry {
+            self.past.push_back(HistoryEntry {
                 start,
                 old_bytes,
                 new_bytes,
                 annotations: ann_before.clone(),
                 topology_before: None,
-            };
-            self.bytes += entry.size_bytes();
-            self.past.push_back(entry);
+            });
             true
         };
 
@@ -290,12 +294,14 @@ impl History {
     }
 
     /// Enforce the byte budget and entry-count backstop by dropping oldest
-    /// `past` entries (silent, FIFO). Keeps at least one undo step.
+    /// `past` entries (silent, FIFO). Keeps at least one undo step. Budget
+    /// usage is recomputed from current entry sizes each check.
     fn enforce_bounds(&mut self) {
-        while self.past.len() > MAX_ENTRIES || (self.bytes > self.budget && self.past.len() > 1) {
-            match self.past.pop_front() {
-                Some(old) => self.bytes -= old.size_bytes(),
-                None => break,
+        while self.past.len() > MAX_ENTRIES
+            || (self.total_bytes() > self.budget && self.past.len() > 1)
+        {
+            if self.past.pop_front().is_none() {
+                break;
             }
         }
     }
@@ -441,5 +447,36 @@ mod tests {
         );
         // The most recent edit is still undoable.
         assert!(h.can_undo());
+    }
+
+    #[test]
+    fn undo_ann_swap_then_new_edit_does_not_underflow_budget() {
+        // Mirrors paste→undo→type: record with small ann_before, then grow live
+        // annotations (as place would), undo (swaps larger anns into the future
+        // entry), then record a fresh edit that clears redo. Must not panic on
+        // a desynced running byte counter.
+        let mut h = History::default();
+        let mut b = buf(b"");
+        let mut a = Annotations::default();
+        let pasted = b"ATGCATGC";
+        h.record(0, Vec::new(), pasted.to_vec(), &a, EditKind::Other);
+        b.text.extend_from_slice(pasted);
+        // Post-record annotation growth (carried features from place).
+        a.features.push(feat(0, 8, "carried"));
+        assert!(h.undo(&mut b, &mut a));
+        assert_eq!(b.text, b"");
+        assert!(a.features.is_empty(), "undo restores pre-paste annotations");
+        assert!(h.can_redo());
+
+        // New edit after undo clears future — previously underflowed `bytes`.
+        edit(&mut h, &mut b, &mut a, 0, 0, b"GG", EditKind::Insert);
+        assert_eq!(b.text, b"GG");
+        assert!(!h.can_redo());
+        assert!(h.can_undo());
+        assert_eq!(
+            h.total_bytes(),
+            h.past.iter().map(HistoryEntry::size_bytes).sum::<usize>(),
+            "budget total matches entry sizes after redo clear"
+        );
     }
 }

@@ -214,7 +214,9 @@ pub enum EditKind { Insert, Delete, Other }
 tens of bytes; a fragment paste is kilobytes), a count cap is a false guard — the thing
 that overflows is *total bytes*. Each `History` self-bounds on a **per-buffer byte
 budget (default ~16 MB, configurable)**, with a ~2000-entry backstop purely for
-data-structure hygiene. **No global/cross-buffer cap** — total across buffers is
+data-structure hygiene. Budget usage is **recomputed from current entry sizes** (not a
+running counter): undo/redo swap the annotation half of an entry, so a cached total
+would desync. **No global/cross-buffer cap** — total across buffers is
 user-controlled (you chose to open them), and a global LRU would add cross-buffer
 coordination for a risk the user already owns. At ~16 MB of deltas, normal editing has
 effectively unlimited depth.

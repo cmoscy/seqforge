@@ -166,28 +166,37 @@ impl Preview {
         // the preview can never diverge from what commit produces.
         let mut buf = buffer.clone();
         let mut ann = annotations.clone();
+        let seq_len = buffer.text.len();
         let (added, deleted) = match pending {
             PendingEdit::Insert { pos, staged } => {
+                // Clamp so a stale caret (e.g. post-undo before rehome) cannot
+                // trip apply_splice's debug_assert in the preview path.
+                let pos = (*pos).min(seq_len);
                 let bytes = staged.as_bytes();
-                apply_splice(&mut buf, &mut ann, *pos..*pos, bytes);
-                (Some((*pos, *pos + bytes.len())), None)
+                apply_splice(&mut buf, &mut ann, pos..pos, bytes);
+                (Some((pos, pos + bytes.len())), None)
             }
             PendingEdit::Replace { start, end, staged } => {
+                let start = (*start).min(seq_len);
+                let end = (*end).min(seq_len).max(start);
                 let bytes = staged.as_bytes();
-                apply_splice(&mut buf, &mut ann, *start..*end, bytes);
-                (Some((*start, *start + bytes.len())), None)
+                apply_splice(&mut buf, &mut ann, start..end, bytes);
+                (Some((start, start + bytes.len())), None)
             }
             // Delete / Cut keep the committed bytes (no virtual buffer): the
             // range is rendered struck-through in place so the user verifies
             // what's leaving. Commit removes it (Cut also copies it first).
             PendingEdit::Delete { start, end } | PendingEdit::Cut { start, end } => {
-                (None, Some((*start, *end)))
+                let start = (*start).min(seq_len);
+                let end = (*end).min(seq_len).max(start);
+                (None, Some((start, end)))
             }
             // Paste materializes like an Insert of the clipboard bytes.
             PendingEdit::Paste { pos } => {
+                let pos = (*pos).min(seq_len);
                 let bytes = clipboard.unwrap_or_default();
-                apply_splice(&mut buf, &mut ann, *pos..*pos, bytes);
-                (Some((*pos, *pos + bytes.len())), None)
+                apply_splice(&mut buf, &mut ann, pos..pos, bytes);
+                (Some((pos, pos + bytes.len())), None)
             }
         };
         Preview {
@@ -801,13 +810,8 @@ impl SequenceView {
         let methyl_states: &[MethylState] = if staging { &[] } else { &view.methyl_states };
         let seq_len = seq.len();
 
-        if seq_len == 0 {
-            ui.centered_and_justified(|ui| {
-                ui.label("Empty sequence.");
-            });
-            self.preview = preview;
-            return;
-        }
+        // Empty buffers still paint one block so the caret at 0 is visible and
+        // clickable — same contract as `build_block_layouts` (`.max(1)`).
 
         // ── Resolve runtime sizing from config ───────────────────────
         let font_size = cfg.settings.font.sequence_size;
@@ -844,7 +848,9 @@ impl SequenceView {
         // Fit the line width to the available pane width.
         let avail = (ui.available_width() - left_margin - right_margin).max(char_width);
         let line_width = ((avail / char_width) as usize).max(10);
-        let n_blocks = seq_len.div_ceil(line_width);
+        // `.max(1)` keeps an empty buffer addressable (caret + click) and matches
+        // `build_block_layouts` so `n_blocks` and `block_layouts.len()` agree.
+        let n_blocks = seq_len.div_ceil(line_width).max(1);
         self.last_line_width = line_width;
 
         // ── Translation lanes (memoized on version + display) ────────────
@@ -1220,9 +1226,13 @@ impl SequenceView {
                             );
                         } else if let Some(seq_pos) = ptr_seq {
                             push_select(cmds, ViewSelection::Text(Selection::cursor(seq_pos)));
-                        } else {
-                            push_select(cmds, ViewSelection::None);
+                        } else if seq_len == 0 {
+                            // Empty / new buffer: never clear to None from the
+                            // canvas — always leave a live caret at 0.
+                            push_select(cmds, ViewSelection::Text(Selection::cursor(0)));
                         }
+                        // Non-empty, no seq hit: leave selection alone (refocus
+                        // only). Past-EOF / margin clicks must not wipe the caret.
                     }
                 }
             }
@@ -1362,13 +1372,14 @@ impl SequenceView {
                 let on_hit = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_search).is_some());
                 let on_site = ptr.is_some_and(|p| find_hit(&hits, p, Hit::as_cut_site).is_some());
                 if !on_annot && !on_hit && !on_site {
-                    self.drag_start = ptr_seq;
-                    push_select(
-                        cmds,
-                        ptr_seq.map_or(ViewSelection::None, |p| {
-                            ViewSelection::Text(Selection::cursor(p))
-                        }),
-                    );
+                    if seq_len == 0 {
+                        self.drag_start = Some(0);
+                        push_select(cmds, ViewSelection::Text(Selection::cursor(0)));
+                    } else if let Some(p) = ptr_seq {
+                        self.drag_start = Some(p);
+                        push_select(cmds, ViewSelection::Text(Selection::cursor(p)));
+                    }
+                    // Non-empty, no seq hit: don't clear selection on drag start.
                 }
             }
             if response.dragged() {
@@ -1721,6 +1732,44 @@ mod tests {
             PendingEdit::Paste { pos: 4 }.to_request(ViewId(1)),
             Some(ViewerRequest::Paste { pos: 4, .. })
         ));
+    }
+
+    #[test]
+    fn paste_on_empty_preview_then_escape_drops_cleanly() {
+        // Escape clears `pending` and `refresh_preview` drops the memo — the
+        // committed buffer stays empty. This is the cancel half of the
+        // New → caret → ⌘V → Escape flow (no panic on the empty path).
+        let b = buf(b"");
+        let ann = Annotations::default();
+        let clip = b"ATGC";
+        let pe = PendingEdit::Paste { pos: 0 };
+        let p = Preview::build(&b, &ann, &pe, Some(clip));
+        assert_eq!(p.text, b"ATGC");
+        assert_eq!(p.added, Some((0, 4)));
+
+        let mut view = SequenceView {
+            pending: Some(pe),
+            ..Default::default()
+        };
+        view.refresh_preview(&b, &ann, Some(clip));
+        assert!(view.preview.is_some());
+        // Escape
+        view.pending = None;
+        view.refresh_preview(&b, &ann, Some(clip));
+        assert!(view.preview.is_none());
+        assert_eq!(b.text, b"");
+    }
+
+    #[test]
+    fn paste_preview_clamps_stale_caret_on_empty_buffer() {
+        // Defense: a leftover post-paste caret (pos 105 on len 0) must not
+        // panic in Preview::build — clamp to 0 and materialize the clip.
+        let b = buf(b"");
+        let ann = Annotations::default();
+        let clip = b"GG";
+        let p = Preview::build(&b, &ann, &PendingEdit::Paste { pos: 105 }, Some(clip));
+        assert_eq!(p.text, b"GG");
+        assert_eq!(p.added, Some((0, 2)));
     }
 
     #[test]

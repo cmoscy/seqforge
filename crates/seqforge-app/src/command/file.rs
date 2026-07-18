@@ -67,7 +67,7 @@ pub(super) fn apply_open_file<B: BioOps>(
     if let Some(fs) = state.pending_file_state.remove(&path) {
         if let Some(view) = state.workspace.view_mut(view_id) {
             view.selection = fs.selection.map_or(
-                seqforge_core::ViewSelection::None,
+                seqforge_core::ViewSelection::Text(seqforge_core::Selection::cursor(0)),
                 seqforge_core::ViewSelection::Text,
             );
             view.scroll_pos = fs.scroll_pos;

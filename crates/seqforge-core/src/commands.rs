@@ -66,6 +66,29 @@ impl Selection {
         self.anchor == self.focus && !self.wrap
     }
 
+    /// Clamp anchor/focus into the valid caret range `0..=len`.
+    ///
+    /// Used after buffer-length changes (undo/redo, topology, revert) so a
+    /// stale caret past EOF cannot reach `apply_splice`. Empty buffers
+    /// (`len == 0`) always become `cursor(0)`. Wrap is dropped — after a
+    /// shrink the safe editable selection is a linear range or caret.
+    pub fn clamp_to_len(self, len: usize) -> Selection {
+        if len == 0 {
+            return Selection::cursor(0);
+        }
+        let anchor = self.anchor.min(len);
+        let focus = self.focus.min(len);
+        if anchor == focus {
+            Selection::cursor(anchor)
+        } else {
+            Selection {
+                anchor,
+                focus,
+                wrap: false,
+            }
+        }
+    }
+
     /// Returns `(start, end)` in ascending order regardless of drag direction.
     /// Bounds-only — for a wrapping selection this is the interval the region is
     /// the **complement** of, not the region itself; use [`Selection::to_span`]
@@ -1070,6 +1093,23 @@ mod selection_tests {
     use crate::span::Pieces;
 
     // ── to_span: the wrap-aware region projection ────────────────────────────
+
+    #[test]
+    fn clamp_to_len_empty_and_past_eof() {
+        assert_eq!(Selection::cursor(105).clamp_to_len(0), Selection::cursor(0));
+        assert_eq!(Selection::range(3, 9).clamp_to_len(0), Selection::cursor(0));
+        assert_eq!(Selection::cursor(105).clamp_to_len(8), Selection::cursor(8));
+        assert_eq!(
+            Selection::range(3, 20).clamp_to_len(8),
+            Selection {
+                anchor: 3,
+                focus: 8,
+                wrap: false
+            }
+        );
+        // In-range caret is unchanged.
+        assert_eq!(Selection::cursor(4).clamp_to_len(8), Selection::cursor(4));
+    }
 
     #[test]
     fn to_span_non_wrapping_is_the_ordered_arc() {
