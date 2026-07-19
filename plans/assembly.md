@@ -96,10 +96,29 @@ type Product = Fragment;      // ← CLOSURE: a product IS a fragment → hierar
 
 Why this is the interface and not just *an* interface: overhang compatibility,
 fidelity lookup, and topology detection all read the `End`s; homology join reads
-terminal `bytes`; naming/history read `provenance`; fragment *selection* (below)
-reads `End.cut_by` + `provenance`. Four unrelated concerns bottom out in the same
+terminal `bytes`; naming/history read `lineage`; fragment *selection* (below)
+reads `End.cut_by` + `lineage`. Four unrelated concerns bottom out in the same
 tuple. `cut_by` on the end exists **only** for selection/orientation naming —
 compatibility and fidelity still read only `kind`+`seq`.
+
+### Fragments are virtual — only products materialize
+
+A `Fragment` is an **in-memory value** (the transport `AnnotatedSlice` + `End`s),
+computed on demand from a source + prepare op. Intermediate fragments are **never
+written to a buffer or file**: the Fragments view and the recipe's fragment picker
+render them as **gel-lane / list projections over their live source(s)**,
+addressed by the selector grammar — not as tabs. `Workspace::new_buffer_annotated`
+is called for exactly two things: a **product** (the artifact you keep →
+`Buffer → Tab::View`), and an **opt-in "open fragment as buffer"** export for the
+occasional case where someone wants a single excised piece as its own document.
+
+This is load-bearing: materializing every digest fragment (or every member of a
+combinatorial library) would flood the workspace with tabs, contradict
+recipe-as-provenance (intermediates never need saving — decisions 21/24), and hand
+an agent buffer-lifecycle bookkeeping instead of symbolic refs. The clean seam
+already exists — `transport::extract` yields a `SeqSlice`/`Fragment` **value**;
+`new_buffer_annotated` is the *separate* promote-to-buffer step, called only for
+products and opt-in exports.
 
 ### The pipeline: a method is *just the join function*
 
@@ -127,6 +146,32 @@ prepare (per-bin operator)  →  select (fragment/orientation)  →  expand (all
 So **adding a method = writing one `join` function.** Everything else is reused —
 this is the modularity payoff and the plugin-op story (extensibility.md: ops are
 pure functions; here the pure function is the join).
+
+### Bins: the n-bucket scaffold — roles are UX, the join is role-blind
+
+A recipe is **n bins**. A bin = **≥1 source** (an open buffer *or* a file at rest,
+referenced — not opened) + a **prepare op with its own enzyme(s)** (`Digest(set)` /
+`Pcr` / `Homology` / `AsIs`) + an optional **selector**. The conventional shape is
+one **backbone/vector** bin + **insert(1..n)** bins, each digestible with a
+*different* enzyme (MoClo levels do exactly this; a destination vector's digest
+yields backbone + dropout, and the vector bin's selector picks the backbone).
+
+But **"vector" and "insert" are ergonomic role labels, not join logic.** Bins live
+entirely in **prepare + select**; the `join` verb receives a flat `Vec<Fragment>`
+and is **role-blind** — it finds valid assemblies from end compatibility alone and
+**derives** topology. A "vector" is merely the bin whose fragment closes the
+circle; **circularity is derived, never declared** (topology *intent* filters the
+result set, it never forces the biology). Keeping bins out of the join is what
+preserves the one-pure-verb engine (decision 1) while the GUI still shows familiar
+vector/insert lanes.
+
+**A bin is a pool of candidate fragments**, so the combinatorial axis is built in:
+one fragment per bin → **one product** (an easy-to-configure individual reaction);
+k options in a bin → the assembler takes **one per bin** → a **k₁·…·kₙ product
+library** (the MoClo / j5 combinatorial case), each scored by fidelity. Same bins,
+same UI — a single cloning reaction and a batch library differ *only* by how many
+candidates a bin holds (decision 7). **Linear ligation is not a separate engine**:
+it is the `ligate` join with **no vector bin** and **topology intent `Linear`**.
 
 ### Topology is derived, filtered by intent
 
@@ -201,9 +246,17 @@ A bin points at its source; that reference resolves differently for *live* use v
   **(2) a saved path** (only if the buffer *was* saved); **(3) an inlined
   `Sequence`** (by-content, portable but larger, loses the live link).
 
+- **A *source* input pins content, not just a location.** A `path`/glob source
+  records the file's **content hash** (+ optional version) alongside its path, and
+  an open-buffer source pins the **buffer version** (already stamped). So a replayed
+  recipe either resolves to the *same* input bytes or reports a mismatch — it never
+  silently assembles a drifted input. (This is the source-side counterpart of the
+  provenance step above, which covers *produced* fragments.)
+
 So: interactive assembly uses direct by-handle refs (no save); a durable recipe
 defaults to storing the **generating provenance step**, so intermediates still never
-need saving — you save-first only if you specifically want the path form.
+need saving — you save-first only if you specifically want the path form; and every
+primary source is content-pinned so replay is deterministic.
 
 ### Individual vs batch is emergent, not a mode
 
@@ -336,8 +389,11 @@ one join (A1), then the two axes that generalize it — correctness (A2) and sca
 (A3) — then a second join to prove modularity (A4).**
 
 - **(prereq) Restriction Tier 2** — lock the `Fragment`/`End` interface (incl.
-  `cut_by`, `topology`, closure `Product = Fragment`) + multi-enzyme `digest` + the
-  **Fragments view *as the workspace*** (not a result pane). Independent; start now.
+  `cut_by`, `topology`, `lineage`, closure `Product = Fragment`) + multi-enzyme
+  `digest` returning **virtual `Fragment` values** (`extract` → `SeqSlice`, **not**
+  buffers) + the **Fragments view *as the workspace*** — a read-only gel-lane/list
+  **projection** over one source (which the A1 recipe picker reuses at multi-source
+  scale), not a result pane and not per-fragment tabs. Independent; start now.
 - **(parallel) PCR** — Primers Phase 3; produces `Fragment`s (tails = ends). Feeds
   the workspace; neither blocks nor is blocked by this track.
 - **A1 — Pipeline skeleton + per-bin operator + `Ligate` join (individual path).**
@@ -429,3 +485,13 @@ flowchart LR
    `assemble` · `fidelity`) with `--dry-run`/`--emit-recipe` for agents.
 9. **Gibson overlap is hand-rolled seed-and-extend, crate-local — not `rust-bio`;**
    engine crates stay pure/zero-dep/extractable (decisions 1/2/18).
+10. **Sources are buffers *or* files (referenced, not opened, content-pinned);
+    fragments are virtual values — only products (and an opt-in single-fragment
+    export) materialize to `Buffer`s.** A recipe is *n* bins (≥1 source + a prepare
+    op with its own enzyme(s) + optional selector); the conventional shape is one
+    vector/backbone bin + insert(1..n) bins. **Bins live in prepare/select only —
+    the `join` is role-blind** (flat `Vec<Fragment>`, end-driven, topology derived);
+    "vector"/"insert" are UX roles and circularity is never declared. A bin is a
+    pool of candidates, so an individual reaction (one/bin) and a combinatorial
+    library (k/bin → kⁿ) are the same workflow at different cardinalities; linear
+    ligation = `ligate` + no vector bin + `Linear` intent.
