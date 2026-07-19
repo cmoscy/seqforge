@@ -493,7 +493,7 @@ strand, len, tm, gc, state, mismatches }`** — the *same* shape the Phase 1.4 C
   strand = `complement(x..y)`). A `Detached` primer (`binding = None`) has no
   `primer_bind` record — it round-trips via the note alone (an unattached oligo).
 - **Full oligo + tail** ↔ a single JSON-valued `/seqforge_primer` qualifier note,
-  **mirroring the existing `/seqforge_provenance` pattern**. Schema: full oligo
+  **mirroring the existing `/seqforge_lineage` pattern**. Schema: full oligo
   5'→3' (+ tail boundary once bulges land). On load, `primer_bind` → `binding`,
   the note → `sequence`; a stale/non-annealing import still round-trips (binding
   preserved, state derived).
@@ -755,18 +755,19 @@ existing outputs*, not new biology.
       applier (`command/file.rs::apply_pcr`) inherits the template's annotations —
       `transport::extract(amplicon, TruncatePartials)` (straddling features
       clamped + fuzzy-marked; straddling primers dropped) + `place(Δ=tail_f_len,
-      Identity, merge=false)` — adds a whole-product `Provenance` feature, and
+      Identity, merge=false)`, and
       materializes a new **linear** `Buffer` via `Workspace::new_buffer_annotated`
       that opens as `Tab::View`. **Circular templates give around-the-horn /
       whole-plasmid amplification for free** (`Span::between` wraps; Q5/KLD
       site-directed mutagenesis). Op reports (not blocks): mispriming (>1 site,
       toast warnings); errors on detached ("attach or rescan first", decision 16),
-      orientation, no-product. The whole-product label feature is **opt-in**
-      (`product_feature` / `--product-feature`, default off) — inherited amplicon
-      features already carry their own extract-stamped lineage, so this only adds
-      the top-level label. `ViewerRequest::Pcr { fwd, rev, name?, product_feature,
-      view? }` → CLI/agent `seqforge pcr --fwd <id> --rev <id> [--product-feature]`
-      for free (flattened, socket).
+      orientation, no-product. **No whole-product marker feature** — inherited
+      amplicon features already carry their own extract-stamped `Lineage`, and
+      product-level provenance is the recipe's job (the composed lineage map), not
+      a hand-rolled whole-span feature (see `docs/architecture.md` "Lineage"; the
+      earlier opt-in `product_feature` flag was removed in the lineage
+      consolidation). `ViewerRequest::Pcr { fwd, rev, name?, view? }` → CLI/agent
+      `seqforge pcr --fwd <id> --rev <id>` for free (flattened, socket).
 - [x] 3.1b **`PrimerPair` selection (extends decision 17).** A bounded, ordered
       variant `ViewSelection::PrimerPair { fwd, rev, range }` — **not** a general
       multi-select (that stays deferred to the cloning cart). **Cmd-click** (macOS

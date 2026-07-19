@@ -138,11 +138,56 @@ Projections off a `Span` (each named for the loss it accepts):
 
 | Site | Why it stays a `Range` |
 |------|------------------------|
-| `Provenance.source_range` | opaque lineage key, compared by equality — not geometry |
+| `Lineage.source_range` | real *source* geometry — a region in the origin document, compared as an interval to reunite split features (see "Lineage"); it is not remapped by edits to *this* buffer |
 | `mutations::shift_range` / `PosMap` | the linear splice-policy engine — `Span`'s complement, operates post-projection |
 | `Delete`/`Replace`/`ReverseComplement`/`Cut`/`Copy` command `start,end` | transient parameters to a linear splice, not a stored region identity (cross-origin copy is recovered as a `Span` in `extract_region`) |
 | render block / viewport hints | screen geometry — a visible window is inherently linear |
 | `Pieces`, `Location::pieces()` / `bounds()` outputs | these *are* the projections; `Range` is their correct output |
+
+## Lineage (provenance): one primitive, many projections
+
+"Where did this content come from?" is answered by **one** primitive — a
+**coordinate-lineage map**: an ordered set of segments
+`local_span → (source_id, source_span, op)`. This is the same structure as git
+`blame` or a compiler source map, and it is the **dual** of the forward
+`Location::map_spans` transform: `map_spans` projects source→current coordinates;
+lineage records current→source. They share the `Span` interval algebra.
+
+Everything that wants a provenance answer is a **projection or composition** of
+that map — never its own independent field:
+
+- **Per-feature provenance / the transport merge key** — `Feature.lineage:
+  Option<Lineage>` (`document.rs`). `transport::extract` stamps it; `place(merge=true)`
+  reunites a feature split across a boundary when two halves share a **source
+  identity** (`Lineage::same_source` — same `source_doc` + `source_range`). The
+  `op` label is metadata, deliberately **not** part of the key, so it can never
+  silently block a reunion. This is the one segment realised today.
+- **Segment / base "blame"** (A1) — the same map at base granularity.
+- **`Fragment` ends** (A1) — `End.cut_by` is the boundary segment's `op`
+  (`LineageOp::Digest`), not a second copy of enzyme identity.
+- **The recipe** (decision 21) — the *composition* of these maps: the ordered
+  `LineageOp` log across operations. "The recipe is the provenance" becomes
+  literal, and a recipe can never drift from what produced the bytes because it
+  is a *view* of the map, not a parallel record.
+
+The merge key is **geometry, not the op label**: `same_source` compares
+`source_doc` + `source_range` only, so `op` never affects whether two halves
+reunite. Two rules keep the model from re-fracturing:
+
+1. **`op` is a typed, closed vocabulary** (`LineageOp`), never a free-form
+   string, so the op label cannot drift for its consumers (recipe, display).
+   Extend the enum when a new producer lands; don't invent a parallel labelling
+   scheme, and don't add a free-form escape hatch.
+2. **Derived / synthetic features carry no lineage** (`lineage: None`):
+   translation, render tracks, mutations, topology, history. "Came from a source
+   document" is a fact about *transported* content only; do not backfill `None`
+   sites — anything wanting an origin answer queries the map instead of growing a
+   field.
+
+The buffer-level map itself (moving lineage off individual features onto
+`Annotations`, plus its GenBank carrier) lands with the assembly track (A1),
+which reuses the typed `LineageOp` + JSON payload as its serialization unit; the
+storage *anchor* moves, the format does not. See `plans/assembly.md`.
 
 ## Edit operations: primitive (`core`) vs composed (command layer)
 

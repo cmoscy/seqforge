@@ -626,9 +626,6 @@ impl InspectorState {
             Some(super::SelectedNoun::Primer(id)) => Some(*id),
             _ => None,
         };
-        // Pane-local: whether Run PCR labels the product (opt-in, off by default).
-        // A local so it stays disjoint from the `editing` field borrow below.
-        let mut pcr_label = self.pcr_label;
         let editing = &mut self.editing_primer;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -662,22 +659,17 @@ impl InspectorState {
                         ui.strong("PCR pair");
                         ui.weak(format!("{} → {}", name_of(fwd), name_of(rev)));
                     });
-                    ui.horizontal(|ui| {
-                        if ui.button("Run PCR").clicked() {
-                            pending.push((
-                                AppCommand::Viewer(ViewerRequest::Pcr {
-                                    fwd,
-                                    rev,
-                                    name: None,
-                                    product_feature: pcr_label,
-                                    view: None,
-                                }),
-                                None,
-                            ));
-                        }
-                        ui.checkbox(&mut pcr_label, "Label product")
-                            .on_hover_text("Add a whole-product feature labelling the amplicon");
-                    });
+                    if ui.button("Run PCR").clicked() {
+                        pending.push((
+                            AppCommand::Viewer(ViewerRequest::Pcr {
+                                fwd,
+                                rev,
+                                name: None,
+                                view: None,
+                            }),
+                            None,
+                        ));
+                    }
                 });
                 ui.separator();
             }
@@ -726,7 +718,6 @@ impl InspectorState {
                 }
             }
         });
-        self.pcr_label = pcr_label;
     }
 
     /// Begin a create-from-selection primer draft: binding = the current range

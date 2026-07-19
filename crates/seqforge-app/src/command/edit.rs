@@ -444,7 +444,7 @@ pub(super) fn apply_add_feature(
             label,
             strand: parse_strand(&strand),
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         });
         Ok((id, buf.text.len()))
     })?;
@@ -1499,7 +1499,7 @@ mod tests {
             String,
             Strand,
             std::collections::BTreeMap<String, Option<String>>,
-            Option<seqforge_core::Provenance>,
+            Option<seqforge_core::Lineage>,
         );
         fn proj_feats(fs: &[Feature], len: usize) -> Vec<FeatProj> {
             fs.iter()
@@ -1510,7 +1510,7 @@ mod tests {
                         f.label.clone(),
                         f.strand,
                         f.qualifiers.clone(),
-                        f.provenance.clone(),
+                        f.lineage.clone(),
                     )
                 })
                 .collect()
@@ -1852,8 +1852,7 @@ mod tests {
         add_feat(&mut s, 22, 28, "straddle"); // crosses re=26 → truncated + fuzzy
         add_feat(&mut s, 0, 3, "outside"); // fully outside → dropped
 
-        // product_feature = true → the whole-product label feature is added.
-        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, true).unwrap();
+        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None).unwrap();
 
         // The active view is now the product; its bytes are the amplicon.
         assert_eq!(text(&mut s), T[4..26].to_vec());
@@ -1902,10 +1901,10 @@ mod tests {
             !labels.iter().any(|l| l == "outside"),
             "outside feature dropped"
         );
-        // Whole-product provenance feature present.
+        // No whole-product marker feature — only inherited annotations carry.
         assert!(
-            labels.iter().any(|l| l.starts_with("PCR product")),
-            "product carries a provenance feature: {labels:?}"
+            !labels.iter().any(|l| l.starts_with("PCR product")),
+            "no whole-product marker feature: {labels:?}"
         );
         // Only the two in-amplicon primers carry; the straddler primer is dropped.
         assert_eq!(primer_count, 2, "fwd + rev carried, straddler dropped");
@@ -1924,7 +1923,7 @@ mod tests {
         // Forward primer created floating (no binding) → PCR refuses.
         let fwd = add_primer(&mut s, Some("F"), &fwd_seq, None, None, "+");
         let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
-        let err = crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, false).unwrap_err();
+        let err = crate::command::file::apply_pcr(&mut s, None, fwd, rev, None).unwrap_err();
         assert!(
             matches!(err, DispatchError::InvalidInput(ref m) if m.contains("attach or rescan")),
             "detached primer errors with an attach/rescan hint: {err:?}"
@@ -1932,9 +1931,11 @@ mod tests {
     }
 
     #[test]
-    fn pcr_product_feature_is_opt_in() {
-        // Off by default: the product carries the inherited annotations but *no*
-        // whole-product label feature.
+    fn pcr_carries_inherited_features_without_marker() {
+        // The product carries the inherited annotations (each with its own
+        // extract-stamped lineage) but *no* hand-rolled whole-product marker
+        // feature — product-level provenance is the recipe's job (the composed
+        // Lineage map), not a whole-span feature. See docs/architecture.md.
         const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
         let mut s = state_with(T);
         let fwd_seq = std::str::from_utf8(&T[4..10]).unwrap().to_string();
@@ -1943,7 +1944,7 @@ mod tests {
         let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
         add_feat(&mut s, 12, 16, "interior");
 
-        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None, false).unwrap();
+        crate::command::file::apply_pcr(&mut s, None, fwd, rev, None).unwrap();
 
         let labels: Vec<String> = s
             .workspace
@@ -1955,7 +1956,7 @@ mod tests {
         );
         assert!(
             !labels.iter().any(|l| l.starts_with("PCR product")),
-            "no product label feature when opted out: {labels:?}"
+            "no whole-product marker feature: {labels:?}"
         );
     }
 

@@ -792,9 +792,8 @@ pub fn apply<B: BioOps>(
                 fwd,
                 rev,
                 name,
-                product_feature,
                 view,
-            } => file::apply_pcr(state, view, fwd, rev, name, product_feature),
+            } => file::apply_pcr(state, view, fwd, rev, name),
             ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.

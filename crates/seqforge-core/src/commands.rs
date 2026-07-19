@@ -482,12 +482,6 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// Add a whole-product `misc_feature` labelling the amplicon (carries the
-        /// reaction provenance). Off by default — inherited amplicon features keep
-        /// their own lineage regardless; this only adds the top-level label.
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        product_feature: bool,
         /// The **template** view (defaults to the active view).
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1448,7 +1442,7 @@ mod tests {
             label: "gene".into(),
             strand: crate::Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         }]);
         let minted = ann.iter().next().unwrap().id;
         let resp = dispatch(

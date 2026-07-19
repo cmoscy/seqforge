@@ -1216,7 +1216,7 @@ mod tests {
             label: "f".to_string(),
             strand: Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         }
     }
 

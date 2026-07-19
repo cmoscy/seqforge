@@ -4,7 +4,7 @@
 
 use seqforge_bio::{load, save};
 use seqforge_core::{
-    Annotations, Buffer, Document, Feature, Location, Primer, Provenance, Strand, Topology,
+    Annotations, Buffer, Document, Feature, Lineage, LineageOp, Location, Primer, Strand, Topology,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,7 +55,7 @@ fn assert_features_eq(a: &[Feature], b: &[Feature]) {
         assert_eq!(x.strand, y.strand, "strand");
         assert_eq!(x.label, y.label, "label");
         assert_eq!(x.qualifiers, y.qualifiers, "qualifiers");
-        assert_eq!(x.provenance, y.provenance, "provenance");
+        assert_eq!(x.lineage, y.lineage, "lineage");
     }
 }
 
@@ -77,7 +77,7 @@ fn assert_features_eq_reflow_tolerant(a: &[Feature], b: &[Feature]) {
         assert_eq!(x.raw_kind, y.raw_kind, "raw_kind");
         assert_eq!(x.strand, y.strand, "strand");
         assert_eq!(x.label, y.label, "label");
-        assert_eq!(x.provenance, y.provenance, "provenance");
+        assert_eq!(x.lineage, y.lineage, "lineage");
         let keys_a: Vec<&String> = x.qualifiers.keys().collect();
         let keys_b: Vec<&String> = y.qualifiers.keys().collect();
         assert_eq!(keys_a, keys_b, "qualifier keys");
@@ -216,10 +216,10 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
         label: "myCDS".to_string(),
         strand: Strand::Reverse,
         qualifiers,
-        provenance: Some(Provenance {
+        lineage: Some(Lineage {
             source_doc: "pUC19".to_string(),
             source_range: 100..130,
-            operation: "GoldenGate(BsaI)".to_string(),
+            op: LineageOp::Extract,
         }),
     };
 
@@ -237,10 +237,7 @@ fn roundtrip_preserves_provenance_and_flag_qualifiers() {
 
     assert_features_eq(&ann.iter().cloned().collect::<Vec<_>>(), &doc2.features);
     let reloaded = &doc2.features[0];
-    assert_eq!(
-        reloaded.provenance.as_ref().unwrap().operation,
-        "GoldenGate(BsaI)"
-    );
+    assert_eq!(reloaded.lineage.as_ref().unwrap().op, LineageOp::Extract);
     assert_eq!(reloaded.qualifiers.get("pseudo"), Some(&None));
     assert_eq!(reloaded.strand, Strand::Reverse);
 }
@@ -261,7 +258,7 @@ fn roundtrip_location(tag: &str, location: Location, strand: Strand) -> Feature 
             q.insert("label".to_string(), Some("geneA".to_string()));
             q
         },
-        provenance: None,
+        lineage: None,
     };
     let buf = Buffer::new(
         "loc_test".to_string(),

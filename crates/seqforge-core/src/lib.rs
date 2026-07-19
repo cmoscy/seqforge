@@ -24,8 +24,8 @@ pub use commands::{
     ViewerRequest, ViewerResponse, dispatch, dispatch_file, rescan_if_stale,
 };
 pub use document::{
-    CutSite, Document, Feature, FeatureId, FeatureKind, Location, MethylContext, MethylState,
-    Primer, PrimerId, Provenance, SearchHit, Strand, Topology,
+    CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,
+    MethylContext, MethylState, Primer, PrimerId, SearchHit, Strand, Topology,
 };
 pub use history::{EditKind, History, HistoryEntry};
 pub use model::{

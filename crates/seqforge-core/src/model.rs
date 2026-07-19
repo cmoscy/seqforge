@@ -1061,7 +1061,7 @@ mod tests {
             label: label.into(),
             strand: crate::Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         }
     }
 

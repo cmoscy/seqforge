@@ -324,7 +324,7 @@ mod tests {
             label: label.into(),
             strand: Strand::Forward,
             qualifiers: BTreeMap::new(),
-            provenance: None,
+            lineage: None,
         }
     }
 

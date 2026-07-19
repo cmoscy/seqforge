@@ -404,6 +404,8 @@ pub struct Provenance {
 
 Round-trip via `/seqforge_provenance="<json>"` qualifier (stored as `Option<String>` under that key in the qualifiers map). Cheap single optional field, editor-adjacent (lineage survives a round-trip), and it forward-supports cloning later without committing to any cloning shape now.
 
+> **Superseded (ROADMAP decision 24):** `Provenance` was later renamed **`Lineage`** (field `Feature.lineage`), `operation: String` became a typed closed **`LineageOp`** enum, and the qualifier key became `/seqforge_lineage`. It is now understood as one segment of the coordinate-lineage map — see `docs/architecture.md` "Lineage".
+
 > **Cloning types (`Fragment`, `Overhang`, `WorkflowCommand`) are NOT declared in
 > Phase 10.** Earlier drafts forward-declared them here "to prevent Buffer-only
 > assumptions." With cloning deferred until the editor works, the *recorded design

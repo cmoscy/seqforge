@@ -171,14 +171,42 @@ impl std::str::FromStr for PrimerId {
     }
 }
 
-/// Lineage of a feature across edits / cloning operations. Round-trips
-/// through GenBank as a single JSON-valued `/seqforge_provenance` qualifier
-/// so it survives save/reload without committing to any cloning shape now.
+/// One segment of coordinate lineage: which source region this content came
+/// from, and how. The single-segment form of the buffer-level lineage map —
+/// the **dual** of [`Location::map_spans`] (that projects source→current; this
+/// records current→source). See `docs/architecture.md` "Lineage".
+///
+/// Round-trips through GenBank as one JSON-valued `/seqforge_lineage`
+/// qualifier so it survives save/reload without committing to any cloning shape
+/// now. `source_range` is **real source geometry** — compared as an interval to
+/// reunite a feature split across a boundary (see [`Lineage::same_source`]) —
+/// not an opaque key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Provenance {
+pub struct Lineage {
     pub source_doc: String,
     pub source_range: Range<usize>,
-    pub operation: String,
+    pub op: LineageOp,
+}
+
+impl Lineage {
+    /// Two segments share a **source identity** when they name the same source
+    /// region — the merge key that reunites a feature split across a boundary.
+    /// `op` is carried metadata, deliberately **not** part of identity (the
+    /// merge is keyed on geometry, not the op label).
+    pub fn same_source(&self, other: &Lineage) -> bool {
+        self.source_doc == other.source_doc && self.source_range == other.source_range
+    }
+}
+
+/// The operation that produced a [`Lineage`] segment — a typed, closed
+/// vocabulary (never a free-form string) so the op label cannot drift. The
+/// assembly track (A1) extends it (PCR sites, digest enzymes) as those
+/// producers land. Serializes as its snake_case name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageOp {
+    /// Sliced out of a source document by transport `extract`.
+    Extract,
 }
 
 /// GenBank-native feature geometry — a core-owned mirror of
@@ -416,7 +444,7 @@ pub struct Feature {
     pub strand: Strand,
     /// `None` value encodes a flag-style qualifier (`/pseudo`, `/partial`).
     pub qualifiers: BTreeMap<String, Option<String>>,
-    pub provenance: Option<Provenance>,
+    pub lineage: Option<Lineage>,
 }
 
 impl Feature {
@@ -674,7 +702,7 @@ mod location_tests {
             label: "ori".into(),
             strand: Strand::Forward,
             qualifiers: BTreeMap::new(),
-            provenance: None,
+            lineage: None,
         };
         // Origin-spanning feature → its wrapping span (not 0..len).
         let ori = feat(Location::from_span(Span::new(2314, 589)));

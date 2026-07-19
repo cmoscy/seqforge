@@ -137,12 +137,8 @@ pub(super) fn apply_pcr(
     fwd: seqforge_core::PrimerId,
     rev: seqforge_core::PrimerId,
     name: Option<String>,
-    product_feature: bool,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    use seqforge_core::{
-        Annotations, Feature, FeatureId, Location, Orient, PartialPolicy, Provenance, Span, Strand,
-        transport,
-    };
+    use seqforge_core::{Annotations, Orient, PartialPolicy, transport};
 
     let vid = edit::resolve_target(state, view)?;
 
@@ -189,25 +185,10 @@ pub(super) fn apply_pcr(
             prod.bytes.len(),
         );
 
-        // Optional whole-product label feature (opt-in; reuses the
-        // `/seqforge_provenance` round-trip, records the template + the two
-        // primers). Off by default — the inherited amplicon features already carry
-        // their own extract-stamped lineage, so this is purely the top-level label.
-        if product_feature {
-            prod_ann.add(Feature {
-                id: FeatureId(0),
-                location: Location::from_span(Span::new(0, prod.bytes.len())),
-                raw_kind: "misc_feature".to_string(),
-                label: format!("PCR product ({} + {})", fwd_p.name, rev_p.name),
-                strand: Strand::Forward,
-                qualifiers: Default::default(),
-                provenance: Some(Provenance {
-                    source_doc: buf.name.clone(),
-                    source_range: prod.amplicon.bounds(buf.text.len()),
-                    operation: format!("pcr(fwd={fwd}, rev={rev})"),
-                }),
-            });
-        }
+        // No whole-product marker feature: the inherited amplicon features
+        // already carry their own extract-stamped lineage, and product-level
+        // provenance is the recipe's job (the composed Lineage map), not a
+        // hand-rolled whole-span feature. See docs/architecture.md "Lineage".
 
         let name = name
             .clone()

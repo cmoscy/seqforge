@@ -816,7 +816,7 @@ mod tests {
                     label: "gene".into(),
                     strand: Strand::Forward,
                     qualifiers: Default::default(),
-                    provenance: None,
+                    lineage: None,
                 })
             })
             .unwrap();
@@ -861,7 +861,7 @@ mod tests {
                     label: "lacZ".into(),
                     strand: Strand::Reverse,
                     qualifiers: Default::default(),
-                    provenance: None,
+                    lineage: None,
                 })
             })
             .unwrap();

@@ -85,8 +85,10 @@ struct Fragment {
     left:  End,               // 5'-side join interface
     right: End,               // 3'-side join interface
     topology: FragTopology,   // Linear | Circular  (circular = whole plasmid, no free ends)
-    provenance: Provenance,   // source enzyme-set / pcr pair / file → naming + history
+    lineage: Lineage,         // the fragment's slice of the composed lineage map → naming + history
 }
+// `cut_by` is the boundary segment's op (`LineageOp::Digest`), read off `lineage` —
+// not a second copy of enzyme identity. See docs/architecture.md "Lineage".
 enum End { Blunt, Overhang { kind: FivePrime | ThreePrime, seq: OverhangSeq, cut_by: EnzymeRef } }
 
 type Product = Fragment;      // ← CLOSURE: a product IS a fragment → hierarchical assembly falls out

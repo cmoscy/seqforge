@@ -14,7 +14,9 @@
 use std::ops::Range;
 
 use crate::span::Span;
-use crate::{Annotations, Feature, FeatureId, Location, Primer, Provenance, Strand, Topology};
+use crate::{
+    Annotations, Feature, FeatureId, Lineage, LineageOp, Location, Primer, Strand, Topology,
+};
 
 /// The carrier: an annotated subsequence in **local** (0-based, slice-relative)
 /// coordinates. The blunt/linear degenerate case of the assembly track's
@@ -128,11 +130,11 @@ pub fn extract(
         if let Some(mut nf) = localize_feature(f, &map, policy) {
             // Stamp lineage (the merge key) unless the feature already carries
             // one — an existing provenance propagates so multi-hop lineage holds.
-            if nf.provenance.is_none() {
-                nf.provenance = Some(Provenance {
+            if nf.lineage.is_none() {
+                nf.lineage = Some(Lineage {
                     source_doc: source_doc.to_string(),
                     source_range: f.bounds(total),
-                    operation: "extract".to_string(),
+                    op: LineageOp::Extract,
                 });
             }
             features.push(nf);
@@ -321,12 +323,14 @@ pub fn place(
 
 // ── merge (provenance-gated) ──────────────────────────────────────────────────
 
-/// Coalesce features that share **lineage** (equal `Some(Provenance)`) *and* are
-/// adjacent/joinable — the reconstruction of a feature split across a boundary.
+/// Coalesce features that share a **source identity** ([`Lineage::same_source`])
+/// *and* are adjacent/joinable — the reconstruction of a feature split across a
+/// boundary. The `op` label is not part of identity, so a differing op cannot
+/// silently block a reunion.
 ///
-/// - contiguous same-lineage → one crisp `Simple`;
-/// - gapped same-lineage → one `Join` (SnapGene "segments");
-/// - different lineage (or any `None`) → left separate, **even if names match**
+/// - contiguous same-source → one crisp `Simple`;
+/// - gapped same-source → one `Join` (SnapGene "segments");
+/// - different source (or any `None`) → left separate, **even if names match**
 ///   (name-only merge is a footgun). Idempotent.
 fn merge_features(ann: &mut Annotations, len_total: usize) {
     while let Some((keep, drop)) = find_merge_pair(&ann.features) {
@@ -345,12 +349,13 @@ fn merge_features(ann: &mut Annotations, len_total: usize) {
 /// `keep_idx < drop_idx` so the earlier feature survives the coalesce.
 fn find_merge_pair(features: &[Feature]) -> Option<(usize, usize)> {
     for (i, fi) in features.iter().enumerate() {
-        let Some(pi) = &fi.provenance else {
+        let Some(pi) = &fi.lineage else {
             continue;
         };
         for (offset, fj) in features[i + 1..].iter().enumerate() {
-            // Same lineage — always joinable (contiguous → Simple, gapped → Join).
-            if fj.provenance.as_ref() == Some(pi) {
+            // Same source identity — always joinable (contiguous → Simple,
+            // gapped → Join). `op` is metadata, not part of the key.
+            if fj.lineage.as_ref().is_some_and(|pj| pj.same_source(pi)) {
                 return Some((i, i + 1 + offset));
             }
         }
@@ -417,7 +422,7 @@ mod tests {
             label: "f".into(),
             strand,
             qualifiers: BTreeMap::new(),
-            provenance: None,
+            lineage: None,
         }
     }
 
@@ -452,8 +457,8 @@ mod tests {
         assert_eq!(s.features.len(), 1);
         assert_eq!(s.features[0].bounds(s.len()), 1..6);
         assert_eq!(s.bytes.len(), 8);
-        // Provenance stamped with the original span (the merge lineage key).
-        let prov = s.features[0].provenance.as_ref().unwrap();
+        // Lineage stamped with the original span (the merge source identity).
+        let prov = s.features[0].lineage.as_ref().unwrap();
         assert_eq!(prov.source_range, 5..10);
     }
 
@@ -600,10 +605,10 @@ mod tests {
     // ── merge (provenance-gated) ─────────────────────────────────────────────
 
     fn with_prov(mut f: Feature, src_range: Range<usize>) -> Feature {
-        f.provenance = Some(Provenance {
+        f.lineage = Some(Lineage {
             source_doc: "src".into(),
             source_range: src_range,
-            operation: "extract".into(),
+            op: LineageOp::Extract,
         });
         f
     }

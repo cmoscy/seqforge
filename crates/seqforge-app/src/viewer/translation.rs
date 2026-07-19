@@ -361,7 +361,7 @@ mod tests {
             label: "region".to_string(),
             strand: Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         });
         // show_cds is off; a misc_feature only translates when individually toggled.
         let mut d = TranslationDisplay::default();
@@ -418,7 +418,7 @@ mod tests {
             label: "c".to_string(),
             strand: Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         };
         // Two overlapping CDS features (0..12 and 6..18 share columns 6..12).
         // No band packing now — each owns its glyphs, drawn under its own bar.
@@ -448,7 +448,7 @@ mod tests {
             label: "c".to_string(),
             strand: Strand::Forward,
             qualifiers: Default::default(),
-            provenance: None,
+            lineage: None,
         };
         let mut ann = seqforge_core::Annotations::new(vec![]);
         let linear = ann.add(cds(Location::simple(0..12)));

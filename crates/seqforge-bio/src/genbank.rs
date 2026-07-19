@@ -1,7 +1,7 @@
 use gb_io::reader::SeqReader;
 use gb_io::seq::{After, Before, Feature as GbFeature, Location, Seq, Topology as GbTopology};
 use seqforge_core::{
-    Annotations, Buffer, Document, Feature, Location as CoreLocation, Primer, Provenance,
+    Annotations, Buffer, Document, Feature, Lineage, Location as CoreLocation, Primer,
     Span as CoreSpan, Strand, Topology,
 };
 use serde::{Deserialize, Serialize};
@@ -13,15 +13,15 @@ use std::path::Path;
 
 use crate::BioError;
 
-/// Qualifier key used to round-trip [`Provenance`] as JSON.
-const PROVENANCE_KEY: &str = "seqforge_provenance";
+/// Qualifier key used to round-trip a feature's [`Lineage`] as JSON.
+const LINEAGE_KEY: &str = "seqforge_lineage";
 
 /// GenBank feature kind that carries an oligo binding. Diverted to `Primer`
 /// (never a `Feature`) on load; emitted from `primers` only on write.
 const PRIMER_BIND_KIND: &str = "primer_bind";
 
 /// Qualifier key used to round-trip the **full oligo** (5'→3', tail included) as
-/// JSON, mirroring the `/seqforge_provenance` pattern. A `primer_bind` location
+/// JSON, mirroring the `/seqforge_lineage` pattern. A `primer_bind` location
 /// records only the annealed footprint; a 5' tail has no template position, so
 /// the authored sequence is preserved here. Absent on a foreign import, where
 /// the oligo is reconstructed best-effort from the template at the binding.
@@ -94,19 +94,19 @@ fn map_feature(f: &GbFeature, len: usize, circular: bool) -> Option<Feature> {
         .unwrap_or_else(|| raw_kind.clone());
 
     // Preserve every qualifier, including flag-style (`None`-valued) ones.
-    // Pull the provenance qualifier out into the typed field so it doesn't
+    // Pull the lineage qualifier out into the typed field so it doesn't
     // get written back twice.
     let mut qualifiers: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let mut provenance = None;
+    let mut lineage = None;
     for (k, v) in &f.qualifiers {
-        if k == PROVENANCE_KEY {
+        if k == LINEAGE_KEY {
             // GenBank wraps long qualifier values across lines and gb-io's
-            // reader keeps the continuation newlines verbatim. Our provenance
+            // reader keeps the continuation newlines verbatim. Our lineage
             // JSON is compact (no real newlines), so stripping them rejoins
             // the original value before parsing.
-            provenance = v.as_ref().and_then(|s| {
+            lineage = v.as_ref().and_then(|s| {
                 let joined: String = s.split(['\n', '\r']).collect();
-                serde_json::from_str::<Provenance>(&joined).ok()
+                serde_json::from_str::<Lineage>(&joined).ok()
             });
         } else {
             qualifiers.insert(k.to_string(), v.clone());
@@ -121,7 +121,7 @@ fn map_feature(f: &GbFeature, len: usize, circular: bool) -> Option<Feature> {
         label,
         strand,
         qualifiers,
-        provenance,
+        lineage,
     })
 }
 
@@ -373,9 +373,9 @@ fn feature_to_gb(f: &Feature, len: usize) -> GbFeature {
         .map(|(k, v)| (Cow::Owned(k.clone()), v.clone()))
         .collect();
 
-    if let Some(prov) = &f.provenance {
-        if let Ok(json) = serde_json::to_string(prov) {
-            qualifiers.push((Cow::Borrowed(PROVENANCE_KEY), Some(json)));
+    if let Some(lineage) = &f.lineage {
+        if let Ok(json) = serde_json::to_string(lineage) {
+            qualifiers.push((Cow::Borrowed(LINEAGE_KEY), Some(json)));
         }
     }
 

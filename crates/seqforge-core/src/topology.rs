@@ -87,7 +87,7 @@ mod tests {
             label: "f".into(),
             strand,
             qualifiers: BTreeMap::new(),
-            provenance: None,
+            lineage: None,
         }
     }
 

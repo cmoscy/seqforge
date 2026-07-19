@@ -95,7 +95,8 @@ Stacking keeps `hull(len)` (honest bounds-only). Minimap also gains the
 Option<Span>` (anneal across origin — phase last); `SearchHit`. **Partial:**
 `CutSite.recognition` → Span, but keep `cut_pos`/`bottom_cut_pos` as bare `usize`
 (points, not regions); `CutSiteKey` stays `usize`. **Do NOT** (over-abstraction):
-`Provenance.source_range` (opaque lineage key), cut points, translation frames,
+`Lineage.source_range` (real *source* geometry — a region in the origin
+document, not a region on *this* molecule), cut points, translation frames,
 `visible_range` viewport hint.
 
 ## Phasing (each ships green: fmt + clippy -D warnings + test --workspace)

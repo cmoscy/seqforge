@@ -237,7 +237,7 @@ mod tests {
             label: "f".into(),
             strand: Strand::Forward,
             qualifiers: BTreeMap::new(),
-            provenance: None,
+            lineage: None,
         }
     }
 

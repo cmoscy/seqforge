@@ -133,9 +133,10 @@ path is exercised first at ligation, alongside the RC feature path.
 - **Id re-minting is mandatory** (decision 12): placed features get **fresh**
   `FeatureId`s via `Annotations::add` — two buffers can't share id identity, and
   pasting twice must create distinct features. `place` owns this.
-- **Merge is provenance-keyed, not name-keyed.** Two pieces coalesce **iff they
-  share lineage** (same source feature via `Provenance{source_doc, source_range}`,
-  `document.rs:174`) **and** are adjacent/joinable in the product:
+- **Merge is source-identity-keyed, not name-keyed.** Two pieces coalesce **iff
+  they share a source identity** (`Lineage::same_source` — same `source_doc` +
+  `source_range`, `document.rs`; the `op` label is metadata, not part of the key)
+  **and** are adjacent/joinable in the product:
   - contiguous + same-lineage → collapse to one `Simple` (seamless);
   - gapped same-lineage (insert between halves, or a circular origin span) → one
     feature with a `Join` location (SnapGene "segments"; pydna's origin-span join);
@@ -144,10 +145,11 @@ path is exercised first at ligation, alongside the RC feature path.
     only gets away with "add to the largest overlapping feature" because it tracks
     identity through the op). An optional *conservative* name fallback may exist but
     is off by default. `merge = false` disables merging entirely (strict mode).
-- **Provenance stamping** falls out: `extract` can stamp each carried feature (and
-  the slice) with `Provenance{source_doc, source_range, operation}` — the existing
-  round-trippable field — which is SnapGene's history-tree / pydna's lineage, and
-  answers PCR's product-provenance uniformly.
+- **Lineage stamping** falls out: `extract` stamps each carried feature (and the
+  slice) with `Lineage{source_doc, source_range, op: LineageOp}` — the existing
+  round-trippable field, one segment of the coordinate-lineage map — which is
+  SnapGene's history-tree / pydna's lineage, and answers PCR's product-provenance
+  uniformly. See `docs/architecture.md` "Lineage".
 
 ## Consumers (the DRY payoff)
 

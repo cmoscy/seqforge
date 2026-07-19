@@ -124,9 +124,6 @@ pub struct InspectorState {
     enzyme_expanded: HashSet<String>,
     /// One-shot: grab keyboard focus for the enzyme query next frame (set by ⌘E).
     focus_enzyme_query: bool,
-    /// Primers tab: whether Run PCR labels the product with a whole-product
-    /// feature (opt-in; `Default` = false). Pane-local; rides the posted `Pcr`.
-    pcr_label: bool,
     /// The active view's primer map-overlay display (mirrored for the header
     /// toggles; source of truth stays on the `SequenceView`).
     primer_display: PrimerDisplay,
