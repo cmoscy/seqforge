@@ -1,0 +1,13 @@
+[package]
+name = "seqforge-fidelity"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Overhang ligation fidelity matrices (Potapov/Pryor) for SeqForge. Pure, zero-dep; not yet published."
+license = "MIT"
+
+[dependencies]
+
+[[bin]]
+name = "codegen"
+path = "src/bin/codegen.rs"

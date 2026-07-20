@@ -13,7 +13,9 @@
 
 use std::ops::Range;
 
-use crate::span::Span;
+use serde::{Deserialize, Serialize};
+
+use crate::span::{Pieces, Span};
 use crate::{
     Annotations, Feature, FeatureId, Lineage, LineageOp, Location, Primer, Strand, Topology,
 };
@@ -72,7 +74,8 @@ pub enum PartialPolicy {
 }
 
 /// Orientation a slice is placed in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Orient {
     /// Same orientation (copy/paste, PCR).
     #[default]
@@ -101,15 +104,6 @@ pub fn extract(
     source_doc: &str,
 ) -> SeqSlice {
     let total = text.len();
-    let wrap = span.wraps(total);
-    // `PosMap` keeps the `start > end` convention internally; derive it from the
-    // span (a wrapping span's tail end is `span.end(total) < start`).
-    let start = span.start;
-    let end = if wrap {
-        span.end(total)
-    } else {
-        span.start + span.len
-    };
 
     // Slice bytes — concatenate the span's 1-or-2 linear runs (`linear_pieces`).
     let mut bytes: Vec<u8> = Vec::with_capacity(span.len);
@@ -118,12 +112,7 @@ pub fn extract(
     }
     let slice_len = bytes.len();
 
-    let map = PosMap {
-        start,
-        end,
-        total,
-        wrap,
-    };
+    let map = PosMap::from_span(span, total);
 
     let mut features = Vec::new();
     for f in ann.iter() {
@@ -133,7 +122,7 @@ pub fn extract(
             if nf.lineage.is_none() {
                 nf.lineage = Some(Lineage {
                     source_doc: source_doc.to_string(),
-                    source_range: f.bounds(total),
+                    source_range: lineage_source_range(f, total),
                     op: LineageOp::Extract,
                 });
             }
@@ -156,14 +145,51 @@ pub fn extract(
 }
 
 /// Coordinate mapper from source-template positions to slice-local positions.
+///
+/// The extract window is one linear run `[start, end)` or, when `wrap`, the two
+/// runs `[start, total)` · `[0, end)` concatenated into a contiguous slice (same
+/// order as [`Span::linear_pieces`]).
 struct PosMap {
     start: usize,
     end: usize,
     total: usize,
     wrap: bool,
+    /// Slice length (= extract span length).
+    slice_len: usize,
 }
 
 impl PosMap {
+    fn from_span(span: Span, total: usize) -> Self {
+        let wrap = span.wraps(total);
+        let start = span.start;
+        let end = if wrap {
+            span.end(total)
+        } else {
+            span.start + span.len
+        };
+        PosMap {
+            start,
+            end,
+            total,
+            wrap,
+            slice_len: span.len,
+        }
+    }
+
+    /// The 1-or-2 linear source runs the extract window covers (5′→3′ order).
+    fn extract_runs(&self) -> Pieces {
+        if self.slice_len == 0 || self.total == 0 {
+            return Pieces::None;
+        }
+        if !self.wrap {
+            Pieces::One(self.start..self.end)
+        } else if self.end == 0 {
+            Pieces::One(self.start..self.total)
+        } else {
+            Pieces::Two(self.start..self.total, 0..self.end)
+        }
+    }
+
     /// Map an inclusive-capable template position into slice coords. Boundary
     /// positions (`== end`/`== total`) map so a half-open range's `end` resolves.
     fn pos(&self, p: usize) -> Option<usize> {
@@ -179,8 +205,11 @@ impl PosMap {
     }
 
     /// True if `[a, b)` lies wholly inside the extracted window, contiguously
-    /// (no crossing the wrap gap).
+    /// in **slice** order (a linear piece that does not jump the wrap gap).
     fn contains(&self, a: usize, b: usize) -> bool {
+        if a >= b {
+            return a == b && self.pos(a).is_some();
+        }
         match (self.pos(a), self.pos(b)) {
             (Some(la), Some(lb)) => lb >= la && lb - la == b - a,
             _ => false,
@@ -188,52 +217,205 @@ impl PosMap {
     }
 
     /// Does `[a, b)` overlap the extracted window at all? (Non-wrap only — used
-    /// for the truncate straddle decision.)
+    /// for primer detach; feature truncate uses [`Self::extract_runs`].)
     fn overlaps_linear(&self, a: usize, b: usize) -> bool {
         !self.wrap && a < self.end && b > self.start
     }
 }
 
+/// Provenance identity for merge: wrap-aware geometry, not lossy [`Location::bounds`].
+///
+/// - `Simple` (incl. origin-wrap): `span.start .. span.start + span.len` (end may
+///   exceed molecule length — same encoding digest uses for wrapping arcs).
+/// - `Join` / multi-segment: first piece start .. start + Σ piece lengths.
+fn lineage_source_range(f: &Feature, total: usize) -> Range<usize> {
+    if let Some(span) = f.location.as_span() {
+        return span.start..span.start + span.len;
+    }
+    let pieces = f.location.pieces(total);
+    let start = pieces.first().map(|r| r.start).unwrap_or(0);
+    let len: usize = pieces.iter().map(|r| r.end.saturating_sub(r.start)).sum();
+    start..start + len
+}
+
 /// Re-home one feature into slice coords per `policy`, or `None` if it doesn't
-/// survive. Containment is decided on the feature's **span** (the doc's
-/// trisection); a contained feature keeps its full segmentation.
+/// survive. Uses **piece-wise / wrap-aware** geometry — never lossy `bounds()`.
 fn localize_feature(f: &Feature, map: &PosMap, policy: PartialPolicy) -> Option<Feature> {
-    let span = f.bounds(map.total);
-    if map.contains(span.start, span.end) {
-        // Every leaf lies inside — shift each into slice coords.
-        let base = map.pos(span.start)?; // == span.start - start (contiguous)
-        let delta = base as isize - span.start as isize;
-        let location = offset_location(&f.location, delta);
-        return Some(Feature {
-            location,
-            ..f.clone()
+    let location = localize_location(&f.location, map, policy)?;
+    Some(Feature {
+        location,
+        ..f.clone()
+    })
+}
+
+fn localize_location(loc: &Location, map: &PosMap, policy: PartialPolicy) -> Option<Location> {
+    match loc {
+        Location::Complement(inner) => {
+            let inner_loc = localize_location(inner, map, policy)?;
+            Some(Location::Complement(Box::new(inner_loc)))
+        }
+        Location::Simple {
+            span,
+            before,
+            after,
+        } => localize_simple(*span, *before, *after, map, policy),
+        Location::Join(parts) => {
+            let mut kept = Vec::new();
+            for p in parts {
+                match localize_location(p, map, policy) {
+                    Some(Location::Join(sub)) => kept.extend(sub),
+                    Some(other) => kept.push(other),
+                    None => {
+                        if policy == PartialPolicy::DropPartials {
+                            return None;
+                        }
+                    }
+                }
+            }
+            if kept.is_empty() {
+                None
+            } else {
+                Some(collapse_abutting_simples(kept))
+            }
+        }
+    }
+}
+
+/// Map a (possibly wrapping) simple region into the extract slice.
+fn localize_simple(
+    span: Span,
+    before: bool,
+    after: bool,
+    map: &PosMap,
+    policy: PartialPolicy,
+) -> Option<Location> {
+    let pieces: Vec<Range<usize>> = span.linear_pieces(map.total).iter().collect();
+    if pieces.is_empty() {
+        return None;
+    }
+
+    // Wholly inside the window: every linear piece maps contiguously, and the
+    // arc unwraps to one Simple on the (linear) slice.
+    if pieces.iter().all(|r| map.contains(r.start, r.end)) {
+        let local_start = map.pos(span.start)?;
+        // Sanity: the unwrapped arc must fit the slice.
+        if local_start + span.len > map.slice_len {
+            return None;
+        }
+        return Some(Location::Simple {
+            span: Span::new(local_start, span.len),
+            before,
+            after,
         });
     }
 
-    // Straddle or outside.
     match policy {
         PartialPolicy::DropPartials => None,
         PartialPolicy::TruncatePartials => {
-            // Truncation across a wrap gap is ambiguous — only the linear case.
-            if !map.overlaps_linear(span.start, span.end) {
-                return None;
+            let mut segs: Vec<(Range<usize>, bool, bool)> = Vec::new();
+            for piece in pieces {
+                segs.extend(truncate_piece(&piece, map));
             }
-            let a = span.start.max(map.start);
-            let b = span.end.min(map.end);
-            if a >= b {
-                return None;
+            coalesce_truncated_segs(segs)
+        }
+    }
+}
+
+/// Intersect one linear feature piece with each extract run; map survivors to
+/// slice coords with fuzzy markers on clamped edges.
+fn truncate_piece(piece: &Range<usize>, map: &PosMap) -> Vec<(Range<usize>, bool, bool)> {
+    let mut out = Vec::new();
+    for run in map.extract_runs().iter() {
+        let a = piece.start.max(run.start);
+        let b = piece.end.min(run.end);
+        if a >= b {
+            continue;
+        }
+        let (Some(la), Some(lb)) = (map.pos(a), map.pos(b)) else {
+            continue;
+        };
+        if lb < la {
+            continue;
+        }
+        let before = a > piece.start;
+        let after = b < piece.end;
+        out.push((la..lb, before, after));
+    }
+    out
+}
+
+fn coalesce_truncated_segs(mut segs: Vec<(Range<usize>, bool, bool)>) -> Option<Location> {
+    if segs.is_empty() {
+        return None;
+    }
+    segs.sort_by_key(|(r, _, _)| (r.start, r.end));
+    // Merge abutting/overlapping slice ranges.
+    let mut merged: Vec<(Range<usize>, bool, bool)> = Vec::new();
+    for (r, before, after) in segs {
+        if let Some((last, lb, la)) = merged.last_mut() {
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+                *lb = *lb || before;
+                *la = *la || after;
+                continue;
             }
-            let before = span.start < map.start; // 5' cut → `<`
-            let after = span.end > map.end; // 3' cut → `>`
-            Some(Feature {
-                location: Location::Simple {
-                    span: Span::from_range((a - map.start)..(b - map.start)),
+        }
+        merged.push((r, before, after));
+    }
+    if merged.len() == 1 {
+        let (r, before, after) = merged.pop().unwrap();
+        Some(Location::Simple {
+            span: Span::from_range(r),
+            before,
+            after,
+        })
+    } else {
+        Some(Location::Join(
+            merged
+                .into_iter()
+                .map(|(r, before, after)| Location::Simple {
+                    span: Span::from_range(r),
                     before,
                     after,
-                },
-                ..f.clone()
-            })
+                })
+                .collect(),
+        ))
+    }
+}
+
+/// Collapse a list of localized parts: one part → itself; abutting crisp Simples
+/// → one Simple (unwrap of an origin-join into a linear fragment); else Join.
+fn collapse_abutting_simples(parts: Vec<Location>) -> Location {
+    if parts.len() == 1 {
+        return parts.into_iter().next().unwrap();
+    }
+    // Only collapse when every part is a crisp Simple and they form one run.
+    let mut segs: Vec<Range<usize>> = Vec::new();
+    for p in &parts {
+        match p {
+            Location::Simple {
+                span,
+                before: false,
+                after: false,
+            } => segs.push(span.range()),
+            _ => return Location::Join(parts),
         }
+    }
+    segs.sort_by_key(|r| (r.start, r.end));
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for r in segs {
+        if let Some(last) = merged.last_mut() {
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        merged.push(r);
+    }
+    if merged.len() == 1 {
+        Location::simple(merged[0].clone())
+    } else {
+        Location::Join(parts)
     }
 }
 
@@ -503,6 +685,93 @@ mod tests {
         assert_eq!(s.bytes.len(), 8);
         assert_eq!(s.features.len(), 1);
         assert_eq!(s.features[0].bounds(s.len()), 1..3);
+    }
+
+    #[test]
+    fn extract_wrapping_feature_inside_wrapping_window_survives() {
+        // L=20; extract [16..4) (len 8). Wrapping feature start=17 len=5 covers
+        // [17..20)+[0..2) — wholly inside the window → unwraps to local [1..6).
+        let mut f = feat(0, 0, Strand::Forward);
+        f.location = Location::Simple {
+            span: Span::new(17, 5),
+            before: false,
+            after: false,
+        };
+        f.label = "ori".into();
+        let a = ann(vec![f], vec![]);
+        let s = extract(
+            TEXT20,
+            &a,
+            Span::new(16, 8),
+            PartialPolicy::DropPartials,
+            "src",
+        );
+        assert_eq!(
+            s.features.len(),
+            1,
+            "wrapping feature must survive wrap extract"
+        );
+        assert_eq!(s.features[0].bounds(s.len()), 1..6);
+        assert!(matches!(s.features[0].location, Location::Simple { .. }));
+        let prov = s.features[0].lineage.as_ref().unwrap();
+        assert_eq!(
+            prov.source_range,
+            17..22,
+            "lineage must use wrap-aware span, not lossy 0..L"
+        );
+        assert_ne!(prov.source_range, 0..20);
+    }
+
+    #[test]
+    fn extract_two_wrapping_features_get_distinct_lineage() {
+        let mut a_feat = feat(0, 0, Strand::Forward);
+        a_feat.location = Location::Simple {
+            span: Span::new(17, 5),
+            before: false,
+            after: false,
+        };
+        a_feat.label = "oriA".into();
+        let mut b_feat = feat(0, 0, Strand::Forward);
+        b_feat.location = Location::Simple {
+            span: Span::new(18, 4),
+            before: false,
+            after: false,
+        };
+        b_feat.label = "oriB".into();
+        let a = ann(vec![a_feat, b_feat], vec![]);
+        let s = extract(
+            TEXT20,
+            &a,
+            Span::new(16, 8),
+            PartialPolicy::DropPartials,
+            "src",
+        );
+        assert_eq!(s.features.len(), 2);
+        let r0 = s.features[0].lineage.as_ref().unwrap().source_range.clone();
+        let r1 = s.features[1].lineage.as_ref().unwrap().source_range.clone();
+        assert_ne!(
+            r0, r1,
+            "distinct wrapping features must not share 0..L identity"
+        );
+        assert_ne!(r0, 0..20);
+        assert_ne!(r1, 0..20);
+    }
+
+    #[test]
+    fn extract_truncate_on_wrapping_window_clamps_straddler() {
+        // Extract [16..4); feature [14..18) straddles the left cut at 16.
+        // Surviving [16..18) → local [0..2), before=true.
+        let a = ann(vec![feat(14, 18, Strand::Forward)], vec![]);
+        let s = extract(
+            TEXT20,
+            &a,
+            Span::new(16, 8),
+            PartialPolicy::TruncatePartials,
+            "src",
+        );
+        assert_eq!(s.features.len(), 1);
+        assert_eq!(s.features[0].bounds(s.len()), 0..2);
+        assert_eq!(s.features[0].location.fuzzy_ends(), (true, false));
     }
 
     // ── extract: primer transfer ─────────────────────────────────────────────

@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::span::Span;
 use crate::{
     Annotations, Buffer, CutSite, Document, FeatureId, MethylContext, MethylState, Primer,
-    PrimerId, SearchHit, Selection, Strand, View, ViewId, ViewSelection,
+    PrimerId, SearchHit, Selection, Strand, Topology, View, ViewId, ViewSelection,
 };
 
 fn default_methyl_dam() -> bool {
@@ -487,6 +487,27 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Digest the active buffer with one or more enzymes (Restriction Tier 2).
+    /// Opens a read-only **Fragments** view over the source — a projection of
+    /// the *virtual* fragment set (nothing is materialized to a buffer). The
+    /// molecule's methylation context (the view's authored Dam/Dcm/CpG state)
+    /// filters methylation-blocked cut sites. `query` uses the same enzyme
+    /// grammar as `enzymes` (names, `golden gate`, `type IIs`, …).
+    ///
+    /// `#[command(skip)]`: the CLI `digest` subcommand is the **local** file
+    /// command (`seqforge digest <file> --enzymes …`, prints fragments); this
+    /// in-session variant is reached via the GUI and the JSON-RPC socket (serde),
+    /// so it must not also claim the CLI `digest` name.
+    #[command(skip)]
+    Digest {
+        /// Enzyme query (names and/or preset keywords), e.g. `EcoRI BamHI`.
+        #[arg(default_value = "")]
+        query: String,
+        /// The **source** view to digest (defaults to the active view).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<ViewId>,
+    },
     /// Save the active buffer to its source path.
     Save {
         /// Overwrite even if the file changed on disk since it was loaded
@@ -552,6 +573,7 @@ impl ViewerRequest {
             ViewerRequest::AddPrimerSite { view, .. } => *view,
             ViewerRequest::RemovePrimer { view, .. } => *view,
             ViewerRequest::Pcr { view, .. } => *view,
+            ViewerRequest::Digest { view, .. } => *view,
             ViewerRequest::Save { view, .. } => *view,
             ViewerRequest::SaveAs { view, .. } => *view,
             ViewerRequest::Undo { view, .. } => *view,
@@ -616,6 +638,42 @@ pub enum ViewerResponse {
     /// `ListPrimers` — every primer on the buffer (definition order) with its
     /// derived attachment state + QC.
     Primers { primers: Vec<PrimerInfo> },
+    /// `Digest` — the virtual fragment set over the source, plus any methylation
+    /// warnings. A projection (nothing materialized); the Fragments view and
+    /// CLI/agent read the same shape.
+    Fragments {
+        fragments: Vec<FragmentInfo>,
+        warnings: Vec<String>,
+    },
+}
+
+/// One end of a fragment, projected for display / CLI. `kind` is `"blunt"` /
+/// `"5'"` / `"3'"`; `cut_by` is the enzyme that made the boundary (`None` = a
+/// free molecule terminus), read off the fragment's lineage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndInfo {
+    pub kind: String,
+    /// The single-stranded overhang, 5′→3′ (empty when blunt).
+    pub seq: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_by: Option<String>,
+}
+
+/// A digest fragment summary — a by-value projection (mirrors [`FeatureInfo`] /
+/// [`PrimerInfo`]) so the Fragments view and CLI/agent share one shape and
+/// cannot drift. Fragments are virtual, so there is no persistent id; the
+/// `index` is positional within the digest result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FragmentInfo {
+    pub index: usize,
+    /// Top-strand length in bp.
+    pub length: usize,
+    pub topology: Topology,
+    pub left: EndInfo,
+    pub right: EndInfo,
+    /// Source footprint as a [`Span`] (circular-native — wraps the origin
+    /// natively). Display layers convert to 1-based.
+    pub source_span: Span,
 }
 
 /// A feature summary for `ListFeatures` — a by-value projection so CLI/agent
@@ -866,6 +924,7 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::AddPrimerSite { .. }
         | ViewerRequest::RemovePrimer { .. }
         | ViewerRequest::Pcr { .. }
+        | ViewerRequest::Digest { .. }
         | ViewerRequest::Save { .. }
         | ViewerRequest::SaveAs { .. }
         | ViewerRequest::Undo { .. }

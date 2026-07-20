@@ -252,7 +252,9 @@ pub(super) fn ensure_welcome_invariant(state: &mut AppState) {
             if let Some(tabs) = node.tabs() {
                 for tab in tabs {
                     match tab {
-                        Tab::View(_) => view_count += 1,
+                        // A Recipe tab is content too, so it suppresses Welcome
+                        // just like a View (else a lone recipe re-adds Welcome).
+                        Tab::View(_) | Tab::Recipe(_) => view_count += 1,
                         Tab::Welcome => welcome_count += 1,
                     }
                 }
@@ -299,6 +301,33 @@ pub(super) fn dock_activate_view(state: &mut AppState, view_id: ViewId) {
         // `SwitchTab` back, reverting a programmatic `focus`.
         state.dock_state.set_focused_node_and_surface((si, ni));
         state.dock_state.set_active_tab((si, ni, ti));
+    }
+}
+
+/// Place a new `Tab::Recipe(id)` into the center dock (mirrors `place_view_tab`;
+/// chains into the active view's leaf so it respects native splits).
+pub(super) fn place_recipe_tab(state: &mut AppState, id: seqforge_core::RecipeId) {
+    if let Some(active_vid) = state.workspace.active_view {
+        if let Some((si, ni, _)) = state.dock_state.find_tab(&Tab::View(active_vid)) {
+            state.dock_state[si][ni].append_tab(Tab::Recipe(id));
+            return;
+        }
+    }
+    state.dock_state.push_to_focused_leaf(Tab::Recipe(id));
+}
+
+/// Activate a recipe tab in the dock.
+pub(super) fn dock_activate_recipe(state: &mut AppState, id: seqforge_core::RecipeId) {
+    if let Some((si, ni, ti)) = state.dock_state.find_tab(&Tab::Recipe(id)) {
+        state.dock_state.set_focused_node_and_surface((si, ni));
+        state.dock_state.set_active_tab((si, ni, ti));
+    }
+}
+
+/// Remove a recipe tab from the dock (its document is dropped by the caller).
+pub(super) fn remove_recipe_tab(state: &mut AppState, id: seqforge_core::RecipeId) {
+    if let Some(loc) = state.dock_state.find_tab(&Tab::Recipe(id)) {
+        let _ = state.dock_state.remove_tab(loc);
     }
 }
 

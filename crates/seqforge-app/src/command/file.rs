@@ -230,6 +230,96 @@ pub(super) fn apply_pcr(
     Ok(Some(ViewerResponse::Edited { len, changed: true }))
 }
 
+/// Digest the source view's buffer and open a read-only Fragments view over it.
+/// Fragments are **virtual** — no buffer is materialized here (decision 25); the
+/// view stores the enzyme query and recomputes the list on demand.
+pub(super) fn apply_digest(
+    state: &mut AppState,
+    view: Option<ViewId>,
+    query: String,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    use seqforge_core::ViewKind;
+
+    let vid = edit::resolve_target(state, view)?;
+
+    // Read-only over the source: resolve enzymes + compute the projection.
+    let (source_buffer, canonical, infos, warnings) =
+        state.workspace.with_buffer(vid, |v, buf, ann| {
+            let methyl = v.methylation;
+            let (infos, warnings, canonical) = crate::fragments::compute(buf, ann, &query, &methyl);
+            (v.buffer_id, canonical, infos, warnings)
+        })?;
+
+    // Open a Fragments view onto the SOURCE buffer (not a new buffer).
+    let view_id = state.workspace.add_view(source_buffer, ViewKind::Fragments);
+    if let Some(v) = state.workspace.view_mut(view_id) {
+        v.fragments_query = Some(canonical);
+    }
+    layout::place_view_tab(state, view_id);
+    layout::ensure_welcome_invariant(state);
+    layout::dock_activate_view(state, view_id);
+    state.focus.set_scope(FocusScope::View(view_id));
+
+    for w in &warnings {
+        state.toasts.warning(format!("Digest: {w}"));
+    }
+
+    Ok(Some(ViewerResponse::Fragments {
+        fragments: infos,
+        warnings,
+    }))
+}
+
+/// Materialize one digest fragment as its own buffer — the opt-in single-fragment
+/// export (decision 25; the only per-fragment `new_buffer_annotated`). Recomputes
+/// the digest on the source, picks `index`, and promotes its slice.
+pub(super) fn apply_export_fragment(
+    state: &mut AppState,
+    source_view: ViewId,
+    index: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    use seqforge_core::Annotations;
+
+    struct Built {
+        name: String,
+        bytes: Vec<u8>,
+        ann: Annotations,
+        topology: Topology,
+    }
+
+    let built = state.workspace.with_buffer(source_view, |v, buf, ann| {
+        let query = v.fragments_query.clone().unwrap_or_default();
+        let methyl = v.methylation;
+        let circular = buf.is_circular();
+        let parsed = seqforge_bio::parse_enzyme_query(&query);
+        let names = seqforge_bio::resolve_query_names(&parsed, &buf.text, circular);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (frags, _) =
+            seqforge_bio::digest_fragments(&buf.text, ann, &refs, circular, &buf.name, &methyl);
+        let frag = frags
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| DispatchError::InvalidInput(format!("no fragment #{index}")))?;
+        Ok::<Built, DispatchError>(Built {
+            name: format!("{} fragment {}", buf.name, index + 1),
+            topology: frag.topology,
+            bytes: frag.slice.bytes,
+            ann: Annotations::from_parts(frag.slice.features, frag.slice.primers),
+        })
+    })??;
+
+    let view_id =
+        state
+            .workspace
+            .new_buffer_annotated(built.name, built.bytes, built.topology, built.ann);
+    layout::place_view_tab(state, view_id);
+    layout::ensure_welcome_invariant(state);
+    layout::dock_activate_view(state, view_id);
+    state.focus.set_scope(FocusScope::View(view_id));
+
+    Ok(Some(ViewerResponse::Ok))
+}
+
 pub(super) fn apply_close_doc(
     state: &mut AppState,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
@@ -345,6 +435,79 @@ pub(super) fn save_buffer(
     })?;
     match result {
         Ok(()) => {
+            state.toasts.success(format!("Saved {}", path.display()));
+            Ok(())
+        }
+        Err(e) => {
+            state.toasts.error(format!("Save failed: {e}"));
+            Err(DispatchError::BioError(e.to_string()))
+        }
+    }
+}
+
+/// Save a buffer by id (used when recipe export must flush dirty sources that
+/// may not be the active view). Finds any view onto the buffer for conflict UI;
+/// if none exist, writes without the conflict modal path.
+pub(super) fn save_buffer_id(
+    state: &mut AppState,
+    bid: seqforge_core::BufferId,
+    force: bool,
+) -> Result<(), DispatchError> {
+    let path = state
+        .workspace
+        .buffers
+        .get(bid)
+        .and_then(|arc| arc.read().ok().and_then(|b| b.source_path.clone()))
+        .ok_or_else(|| DispatchError::InvalidInput(format!("buffer {bid} has no path to save")))?;
+
+    if let Some(vid) = state
+        .workspace
+        .views
+        .values()
+        .find(|v| v.buffer_id == bid)
+        .map(|v| v.id)
+    {
+        return save_buffer(state, vid, &path, force);
+    }
+
+    // No open view — still persist bytes (recipe source can outlive a closed tab
+    // only if the buffer remains; normally there is a view).
+    if !force {
+        let loaded = state
+            .workspace
+            .buffers
+            .get(bid)
+            .and_then(|arc| arc.read().ok().map(|b| b.loaded_hash))
+            .flatten();
+        if let Some(loaded) = loaded {
+            if let Some(disk) = crate::workspace::hash_file_bytes(&path) {
+                if disk != loaded {
+                    state.toasts.warning(format!(
+                        "\"{}\" changed on disk — open the sequence and Save to resolve",
+                        path.display()
+                    ));
+                    return Err(DispatchError::SaveConflict(path.display().to_string()));
+                }
+            }
+        }
+    }
+
+    let arc = state
+        .workspace
+        .buffers
+        .get(bid)
+        .ok_or_else(|| DispatchError::InvalidInput(format!("buffer {bid} gone")))?;
+    let mut buf = arc.write().map_err(|_| DispatchError::PoisonedLock)?;
+    let ann = state
+        .workspace
+        .buffers
+        .annotations(bid)
+        .cloned()
+        .unwrap_or_default();
+    match seqforge_bio::save(&buf, &ann, &path) {
+        Ok(()) => {
+            buf.dirty = false;
+            buf.loaded_hash = crate::workspace::hash_file_bytes(&path);
             state.toasts.success(format!("Saved {}", path.display()));
             Ok(())
         }

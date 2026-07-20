@@ -6,6 +6,7 @@ members = [
     "crates/seqforge-cli",
     "crates/seqforge-restriction",
     "crates/seqforge-thermo",
+    "crates/seqforge-fidelity",
 ]
 resolver = "2"
 

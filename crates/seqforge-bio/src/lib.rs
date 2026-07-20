@@ -1,5 +1,7 @@
 // seqforge-bio: thin wrappers over gb-io + bio + seqforge-restriction; ported workflows
 
+mod assembly;
+mod digest;
 mod dna;
 mod enzyme_query;
 mod fasta;
@@ -8,7 +10,21 @@ mod primer;
 mod search;
 mod translate;
 
+pub use assembly::discover::{EnzymeSites, cut_boundaries};
+pub use assembly::join::{
+    HarvestedOverhang, JoinProbe, JunctionReport, harvest_junction_overhangs, probe_join,
+};
+pub use assembly::{
+    AssemblyResult, ComboPart, ComboSummary, FileResolver, NamedProduct, RecipeJoinProbe,
+    ResolvedSource, SourceResolver, enumerate_combos, expand_glob, first_combo_fidelity_matrix,
+    preview_bin, preview_digest_candidates, probe_recipe, run, run_indices,
+};
+pub use digest::digest_fragments;
 pub use dna::{complement, reverse_complement};
+pub use seqforge_fidelity::{
+    Dataset as FidelityDataset, SubsetMatrix as FidelitySubsetMatrix, dataset_for_enzyme,
+    junction_fidelity,
+};
 // Thermodynamics live in the pure, zero-dep `seqforge-thermo` crate (vendored
 // seqfold). `bio → thermo` is the only cross-crate edge the primer/thermo work
 // adds; `core` never depends on thermo (Tm/GC are derived, never stored). The

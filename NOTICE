@@ -34,6 +34,22 @@ seqfold (https://github.com/Lattice-Automation/seqfold) v0.10.1.
 Copyright (c) 2019 Lattice Automation. Licensed under the MIT License.
 See `crates/seqforge-thermo/LICENSE` for the full license text.
 
+Ligation-fidelity matrices (seqforge-fidelity)
+----------------------------------------------
+
+Overhang ligation-frequency counts in
+`crates/seqforge-fidelity/src/fidelity_generated.rs` are unaltered published
+supplementary data redistributed under Creative Commons
+Attribution-NoDerivatives 4.0 International (CC BY-ND 4.0), packaged via
+Edinburgh Genome Foundry tatapov_data
+(https://github.com/Edinburgh-Genome-Foundry/tatapov_data).
+
+Sources include Potapov et al., ACS Synth. Biol. 7(11):2665–2674 (2018)
+(doi: 10.1021/acssynbio.8b00333) and Pryor et al., PLoS ONE 15(9):e0238592
+(2020) (doi: 10.1371/journal.pone.0238592). Scoring code is original SeqForge
+(MIT). See `crates/seqforge-fidelity/ATTRIBUTION.md` for full citations and
+license notes.
+
 Rust crate dependencies
 -----------------------
 

@@ -7,6 +7,7 @@ edition = "2024"
 seqforge-core = { path = "../seqforge-core" }
 seqforge-restriction = { path = "../seqforge-restriction" }
 seqforge-thermo = { path = "../seqforge-thermo" }
+seqforge-fidelity = { path = "../seqforge-fidelity" }
 thiserror = { workspace = true }
 gb-io = { workspace = true }
 bio = { workspace = true }

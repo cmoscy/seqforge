@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use egui::Key;
 use egui_file_dialog::FileDialog;
-use seqforge_core::{CutSite, FeatureId, Strand, ViewId};
+use seqforge_core::{CutSite, FeatureId, RecipeId, Strand, ViewId};
 
 use crate::command::AppCommand;
 
@@ -267,6 +267,14 @@ pub enum Overlay {
     ConfirmRevert {
         view_id: ViewId,
     },
+    /// Recipe export blocked because path-backed sources have unsaved edits.
+    /// Offers Cancel / Proceed with unsaved / Save sequences first.
+    DirtyRecipeSaveConfirm {
+        recipe: RecipeId,
+        path: PathBuf,
+        dirty_names: Vec<String>,
+        dirty_buffers: Vec<seqforge_core::BufferId>,
+    },
 }
 
 impl Overlay {
@@ -280,6 +288,7 @@ impl Overlay {
     pub const TAG_DIRTY_CLOSE: &'static str = "DirtyCloseConfirm";
     pub const TAG_SAVE_CONFLICT: &'static str = "SaveConflict";
     pub const TAG_CONFIRM_REVERT: &'static str = "ConfirmRevert";
+    pub const TAG_DIRTY_RECIPE_SAVE: &'static str = "DirtyRecipeSaveConfirm";
     /// Generic "any overlay" marker — pushed onto the KeyContext stack
     /// whenever [`OverlayStack`] is non-empty. The keymap's Escape
     /// binding matches on this so one binding dismisses every kind.
@@ -297,6 +306,7 @@ impl Overlay {
             Overlay::DirtyCloseConfirm { .. } => Self::TAG_DIRTY_CLOSE,
             Overlay::SaveConflict { .. } => Self::TAG_SAVE_CONFLICT,
             Overlay::ConfirmRevert { .. } => Self::TAG_CONFIRM_REVERT,
+            Overlay::DirtyRecipeSaveConfirm { .. } => Self::TAG_DIRTY_RECIPE_SAVE,
         }
     }
 }
@@ -427,6 +437,26 @@ impl OverlayStack {
     pub fn confirm_revert(&self) -> Option<ViewId> {
         self.overlays.iter().find_map(|o| match o {
             Overlay::ConfirmRevert { view_id } => Some(*view_id),
+            _ => None,
+        })
+    }
+
+    /// Dirty path-backed sources blocking a recipe export, if any.
+    pub fn dirty_recipe_save_confirm(
+        &self,
+    ) -> Option<(RecipeId, PathBuf, Vec<String>, Vec<seqforge_core::BufferId>)> {
+        self.overlays.iter().find_map(|o| match o {
+            Overlay::DirtyRecipeSaveConfirm {
+                recipe,
+                path,
+                dirty_names,
+                dirty_buffers,
+            } => Some((
+                *recipe,
+                path.clone(),
+                dirty_names.clone(),
+                dirty_buffers.clone(),
+            )),
             _ => None,
         })
     }

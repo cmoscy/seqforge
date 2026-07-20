@@ -32,6 +32,7 @@ use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
 
+pub(crate) mod assembly;
 mod edit;
 pub(crate) mod file;
 mod layout;
@@ -234,6 +235,73 @@ pub enum AppCommand {
     OpenSaveAs {
         view: Option<ViewId>,
     },
+    /// Materialize one digest fragment as its own buffer — the **opt-in
+    /// single-fragment export** seam (ROADMAP decision 25; the only per-fragment
+    /// `new_buffer_annotated` call). `source_view` is the Fragments view; `index`
+    /// is the fragment's position in the digest result.
+    ExportFragment {
+        source_view: ViewId,
+        index: usize,
+    },
+
+    // ── Assembly workbench (A1) ──────────────────────────────────────
+    /// Open a new empty assembly-recipe workbench tab (2 bins).
+    NewRecipe,
+    /// Close a recipe tab and drop its document.
+    CloseRecipe {
+        id: seqforge_core::RecipeId,
+    },
+    /// Author a recipe in place (one command, enum payload — the single mutation
+    /// path without a per-field command explosion).
+    EditRecipe {
+        id: seqforge_core::RecipeId,
+        op: assembly::RecipeOp,
+    },
+    /// Run a recipe → materialize its product(s) as buffers.
+    RunRecipe {
+        id: seqforge_core::RecipeId,
+    },
+    /// Serialize a recipe to a `.json` path.
+    /// When `force` is false, dirty path-backed sources open a confirm modal.
+    SaveRecipe {
+        id: seqforge_core::RecipeId,
+        path: PathBuf,
+        force: bool,
+    },
+    /// Persist dirty recipe sources to disk, then export the recipe (`force`).
+    SaveRecipeSavingBuffersFirst {
+        id: seqforge_core::RecipeId,
+        path: PathBuf,
+        dirty_buffers: Vec<seqforge_core::BufferId>,
+    },
+    /// Replace this tab's recipe from a `.json` path (interchange / agent stage).
+    LoadRecipe {
+        id: seqforge_core::RecipeId,
+        path: PathBuf,
+    },
+    /// Open a file dialog to add a file-at-rest source to a bin.
+    PromptAddSourceFile {
+        recipe: seqforge_core::RecipeId,
+        bin: usize,
+    },
+    /// Open a save dialog for a recipe.
+    PromptSaveRecipe {
+        id: seqforge_core::RecipeId,
+    },
+    /// Open a pick dialog to load a recipe.json into this assembly tab.
+    PromptLoadRecipe {
+        id: seqforge_core::RecipeId,
+    },
+    /// Session-only combo checkbox set for Run subset (not part of recipe IR).
+    SetRecipeComboSelection {
+        id: seqforge_core::RecipeId,
+        selected: std::collections::HashSet<usize>,
+    },
+    /// Session-only fidelity dataset for combo preview (not part of recipe IR).
+    SetRecipeFidelity {
+        id: seqforge_core::RecipeId,
+        dataset: Option<seqforge_bio::FidelityDataset>,
+    },
 
     // ── Config ───────────────────────────────────────────────────────
     /// Re-read settings / theme / keybindings from disk.
@@ -340,6 +408,19 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             state.workspace.active_view().is_some()
         }
         SaveDocument { .. } | OpenSaveAs { .. } => state.workspace.active_view().is_some(),
+        ExportFragment { .. } => true,
+        NewRecipe
+        | CloseRecipe { .. }
+        | EditRecipe { .. }
+        | RunRecipe { .. }
+        | SaveRecipe { .. }
+        | SaveRecipeSavingBuffersFirst { .. }
+        | LoadRecipe { .. }
+        | PromptAddSourceFile { .. }
+        | PromptSaveRecipe { .. }
+        | PromptLoadRecipe { .. }
+        | SetRecipeComboSelection { .. }
+        | SetRecipeFidelity { .. } => true,
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | ToggleFiles
         | ToggleMinimap | InstallCli | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile
@@ -655,6 +736,31 @@ pub fn apply<B: BioOps>(
 
         // ── Editor save side-effects ────────────────────────────────
         SaveDocument { view, path } => file::apply_save_document(state, view, path),
+        ExportFragment { source_view, index } => {
+            file::apply_export_fragment(state, source_view, index)
+        }
+
+        // ── Assembly workbench ──
+        NewRecipe => assembly::apply_new_recipe(state),
+        CloseRecipe { id } => assembly::apply_close_recipe(state, id),
+        EditRecipe { id, op } => assembly::apply_edit_recipe(state, id, op),
+        RunRecipe { id } => assembly::apply_run_recipe(state, id),
+        SaveRecipe { id, path, force } => assembly::apply_save_recipe(state, id, path, force),
+        SaveRecipeSavingBuffersFirst {
+            id,
+            path,
+            dirty_buffers,
+        } => assembly::apply_save_recipe_saving_buffers_first(state, id, path, dirty_buffers),
+        LoadRecipe { id, path } => assembly::apply_load_recipe(state, id, path),
+        PromptAddSourceFile { recipe, bin } => {
+            assembly::apply_prompt_add_source_file(state, recipe, bin)
+        }
+        PromptSaveRecipe { id } => assembly::apply_prompt_save_recipe(state, id),
+        PromptLoadRecipe { id } => assembly::apply_prompt_load_recipe(state, id),
+        SetRecipeComboSelection { id, selected } => {
+            assembly::apply_set_combo_selection(state, id, selected)
+        }
+        SetRecipeFidelity { id, dataset } => assembly::apply_set_fidelity(state, id, dataset),
         OpenSaveAs { view } => file::apply_open_save_as(state, view),
 
         // ── Config ──────────────────────────────────────────────────
@@ -794,6 +900,7 @@ pub fn apply<B: BioOps>(
                 name,
                 view,
             } => file::apply_pcr(state, view, fwd, rev, name),
+            ViewerRequest::Digest { query, view } => file::apply_digest(state, view, query),
             ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
             ViewerRequest::SaveAs { path, view } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.

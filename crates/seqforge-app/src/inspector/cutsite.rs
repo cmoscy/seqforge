@@ -146,6 +146,24 @@ impl InspectorState {
                     None,
                 ));
             }
+            if ui
+                .add_enabled(
+                    !self.active_enzymes.is_empty(),
+                    egui::Button::new(format!("{} Digest", egui_phosphor::regular::SCISSORS)),
+                )
+                .on_hover_text(
+                    "Open a Fragments view — the digest of this molecule with the shown enzymes",
+                )
+                .clicked()
+            {
+                pending.push((
+                    AppCommand::Viewer(seqforge_core::ViewerRequest::Digest {
+                        query: self.active_enzymes.join(" "),
+                        view: None,
+                    }),
+                    None,
+                ));
+            }
         });
         if submit_show {
             pending.push((

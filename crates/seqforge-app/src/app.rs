@@ -184,6 +184,18 @@ pub struct AppState {
     /// pick. Discriminates the save-mode dialog from an open-mode one in the
     /// shared file-dialog pick handler. Cleared on pick or cancel.
     pub(crate) pending_save_as: Option<ViewId>,
+    /// Set when a file dialog was opened for an assembly-workbench flow (add a
+    /// file source to a bin, save/load a recipe). Routes the dialog's pick in the
+    /// shared handler; cleared on pick or cancel.
+    pub(crate) pending_recipe_dialog: Option<crate::command::assembly::RecipeDialog>,
+    /// Per-recipe combo checkbox selection for the workbench Run subset.
+    /// Absent = default (all join-compatible combos). Cleared on recipe edit/load.
+    pub(crate) recipe_combo_selection:
+        std::collections::HashMap<seqforge_core::RecipeId, std::collections::HashSet<usize>>,
+    /// Per-recipe informational fidelity dataset (session only — not recipe IR).
+    /// `None` / absent = Off.
+    pub(crate) recipe_fidelity:
+        std::collections::HashMap<seqforge_core::RecipeId, Option<seqforge_bio::FidelityDataset>>,
     /// Set by `AppCommand::Quit`; the update loop reads it and routes an app
     /// quit through the same dirty-buffer intercept as an OS window close.
     pub(crate) quit_requested: bool,
@@ -239,6 +251,9 @@ impl Default for AppState {
             config: Arc::new(Config::default()),
             clipboard: None,
             pending_save_as: None,
+            pending_recipe_dialog: None,
+            recipe_combo_selection: std::collections::HashMap::new(),
+            recipe_fidelity: std::collections::HashMap::new(),
             quit_requested: false,
             last_title: None,
             allow_close: false,
@@ -790,6 +805,71 @@ impl SeqForgeApp {
                 enqueue(&mut self.state, AppCommand::DismissOverlay);
             }
         }
+
+        // ── Dirty recipe export confirm ──
+        if let Some((recipe, path, dirty_names, dirty_buffers)) =
+            self.state.overlays.dirty_recipe_save_confirm()
+        {
+            enum RecipeDirtyChoice {
+                Cancel,
+                Proceed,
+                SaveFirst,
+            }
+            let mut choice: Option<RecipeDirtyChoice> = None;
+            let mut open = true;
+            egui::Window::new("Unsaved sequence changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(
+                        "These sequence files have unsaved edits. The recipe will point at \
+                         their paths; a content pin records the current buffer bytes.",
+                    );
+                    ui.add_space(6.0);
+                    for name in &dirty_names {
+                        ui.label(format!("• {name}"));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save sequences first").clicked() {
+                            choice = Some(RecipeDirtyChoice::SaveFirst);
+                        }
+                        if ui.button("Proceed with unsaved").clicked() {
+                            choice = Some(RecipeDirtyChoice::Proceed);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            choice = Some(RecipeDirtyChoice::Cancel);
+                        }
+                    });
+                });
+            if !open {
+                choice = choice.or(Some(RecipeDirtyChoice::Cancel));
+            }
+            if let Some(choice) = choice {
+                enqueue(&mut self.state, AppCommand::DismissOverlay);
+                match choice {
+                    RecipeDirtyChoice::Cancel => {}
+                    RecipeDirtyChoice::Proceed => enqueue(
+                        &mut self.state,
+                        AppCommand::SaveRecipe {
+                            id: recipe,
+                            path,
+                            force: true,
+                        },
+                    ),
+                    RecipeDirtyChoice::SaveFirst => enqueue(
+                        &mut self.state,
+                        AppCommand::SaveRecipeSavingBuffersFirst {
+                            id: recipe,
+                            path,
+                            dirty_buffers,
+                        },
+                    ),
+                }
+            }
+        }
     }
 
     /// Resolve the dirty-close/quit modal. `Save` writes then re-issues the
@@ -1015,36 +1095,77 @@ impl eframe::App for SeqForgeApp {
         // state machine each frame. On pick or cancel we enqueue the
         // appropriate AppCommand and let `apply()` pop the overlay.
         let mut dialog_followup: Option<AppCommand> = None;
+        // An AddSource flow uses a *multi*-select dialog (bulk sources, decision 26).
+        let recipe_add_multi = matches!(
+            self.state.pending_recipe_dialog,
+            Some(crate::command::assembly::RecipeDialog::AddSource { .. })
+        );
         if let Some(dialog) = self.state.overlays.file_dialog_mut() {
             dialog.update(ctx);
-            if let Some(picked) = dialog.picked() {
+            if recipe_add_multi {
+                use crate::command::assembly::{RecipeDialog, RecipeOp};
+                if let Some(paths) = dialog.picked_multiple() {
+                    let sources: Vec<seqforge_core::SourceRef> = paths
+                        .iter()
+                        .map(|p| seqforge_core::SourceRef::Path(p.to_path_buf()))
+                        .collect();
+                    if let Some(RecipeDialog::AddSource { recipe, bin }) =
+                        self.state.pending_recipe_dialog.take()
+                    {
+                        dialog_followup = Some(AppCommand::EditRecipe {
+                            id: recipe,
+                            op: RecipeOp::AddSources { bin, sources },
+                        });
+                    }
+                } else if matches!(
+                    dialog.state(),
+                    egui_file_dialog::DialogState::Closed
+                        | egui_file_dialog::DialogState::Cancelled
+                ) {
+                    self.state.pending_recipe_dialog = None;
+                    dialog_followup = Some(AppCommand::DismissOverlay);
+                }
+            } else if let Some(picked) = dialog.picked() {
                 let path = picked.to_owned();
-                // A Save-As dialog (pending_save_as set) routes to SaveDocument;
-                // an ordinary open dialog routes to OpenFile.
-                dialog_followup = Some(match self.state.pending_save_as.take() {
-                    Some(view) => AppCommand::SaveDocument {
+                // Priority: an assembly-workbench flow, then a Save-As, else an
+                // ordinary open → OpenFile.
+                dialog_followup = Some(if let Some(rd) = self.state.pending_recipe_dialog.take() {
+                    use crate::command::assembly::RecipeDialog;
+                    match rd {
+                        RecipeDialog::AddSource { .. } => {
+                            // Handled by the multi-select branch above.
+                            unreachable!("AddSource uses pick_multiple")
+                        }
+                        RecipeDialog::SaveRecipe(recipe) => AppCommand::SaveRecipe {
+                            id: recipe,
+                            path,
+                            force: false,
+                        },
+                        RecipeDialog::LoadRecipe(recipe) => {
+                            AppCommand::LoadRecipe { id: recipe, path }
+                        }
+                    }
+                } else if let Some(view) = self.state.pending_save_as.take() {
+                    AppCommand::SaveDocument {
                         view: Some(view),
                         path,
-                    },
-                    None => AppCommand::OpenFile(path),
+                    }
+                } else {
+                    AppCommand::OpenFile(path)
                 });
             } else if matches!(
                 dialog.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
             ) {
                 self.state.pending_save_as = None;
+                self.state.pending_recipe_dialog = None;
                 dialog_followup = Some(AppCommand::DismissOverlay);
             }
         }
         if let Some(cmd) = dialog_followup {
-            // OpenFile/SaveDocument were accepted from the dialog — pop the
-            // FileDialog now and discard the saved focus snapshot (OpenFile
-            // moves focus to the new view; for a save we just return to the
-            // active pane). DismissOverlay pops the dialog itself via apply.
-            if matches!(
-                cmd,
-                AppCommand::OpenFile(_) | AppCommand::SaveDocument { .. }
-            ) {
+            // An accepted pick — pop the FileDialog now and discard the saved
+            // focus snapshot. DismissOverlay pops the dialog itself via apply.
+            if !matches!(cmd, AppCommand::DismissOverlay) {
                 self.state
                     .overlays
                     .pop_kind(crate::overlay::Overlay::TAG_FILE_DIALOG);
@@ -1098,6 +1219,11 @@ impl eframe::App for SeqForgeApp {
                     });
                     if ui.button("Open…  ⌘O").clicked() {
                         menu_cmds.push(AppCommand::PromptOpenFile);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("New Assembly…").clicked() {
+                        menu_cmds.push(AppCommand::NewRecipe);
                         ui.close_menu();
                     }
                     let can_close = command::is_enabled(&AppCommand::CloseDoc, &self.state);
@@ -1659,6 +1785,8 @@ impl eframe::App for SeqForgeApp {
             show_terminal,
             show_files,
             show_minimap,
+            recipe_combo_selection,
+            recipe_fidelity,
             ..
         } = &mut self.state;
 
@@ -1794,6 +1922,8 @@ impl eframe::App for SeqForgeApp {
                             focus,
                             clipboard: clipboard.as_ref().map(|s| s.bytes()),
                             config: config.clone(),
+                            recipe_combo_selection,
+                            recipe_fidelity,
                         },
                     );
             });
@@ -1805,15 +1935,27 @@ impl eframe::App for SeqForgeApp {
         // same frame (→ `ViewNotFound`). Programmatic focus (cycle / CLI `focus`)
         // drives egui's focus via `set_focused_node_and_surface`, so this read
         // agrees with it. Guarded on `contains_key` for resilience to any drift.
-        if let Some((_rect, Tab::View(vid))) = self.state.dock_state.find_active_focused() {
-            let vid = *vid;
-            if self.state.workspace.active_view != Some(vid)
-                && self.state.workspace.views.contains_key(&vid)
-            {
-                self.state.workspace.focus_view(vid);
-                self.state.focus.set_scope(FocusScope::View(vid));
-                self.state.events.emit(AppEvent::TabSwitched { view: vid });
+        match self.state.dock_state.find_active_focused() {
+            Some((_rect, Tab::View(vid))) => {
+                let vid = *vid;
+                if self.state.workspace.active_view != Some(vid)
+                    && self.state.workspace.views.contains_key(&vid)
+                {
+                    self.state.workspace.focus_view(vid);
+                    self.state.focus.set_scope(FocusScope::View(vid));
+                    self.state.events.emit(AppEvent::TabSwitched { view: vid });
+                }
             }
+            Some((_rect, Tab::Recipe(id))) => {
+                // A focused recipe owns keyboard focus; `active_view` stays put
+                // (a recipe isn't a view), but the focus scope must follow so the
+                // Inspector / status bar don't act on a stale view.
+                let id = *id;
+                if self.state.focus.scope != FocusScope::Recipe(id) {
+                    self.state.focus.set_scope(FocusScope::Recipe(id));
+                }
+            }
+            _ => {}
         }
 
         // ── Drain socket requests (Unix only) ─────────────────────────────────

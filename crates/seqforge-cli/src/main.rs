@@ -29,13 +29,59 @@ enum Cmd {
     // ── File commands (always run locally; no GUI required) ───────────────────
     /// Print info about a sequence file
     Info { input: PathBuf },
-    /// Digest a sequence file with restriction enzymes (post-MVP)
+    /// Digest a sequence file with restriction enzymes → prints the fragment set.
     Digest {
         input: PathBuf,
+        /// Enzyme names or presets (comma- or space-separated; repeatable),
+        /// e.g. `--enzymes EcoRI,BamHI` or `--enzymes "golden gate"`.
         #[arg(short, long)]
         enzymes: Vec<String>,
-        #[arg(short, long)]
-        output: PathBuf,
+        /// Treat the molecule as circular (overrides the file's topology).
+        #[arg(long)]
+        circular: bool,
+    },
+    /// Assemble a product from bins (Assembly A1) → prints the product(s).
+    ///
+    /// Pass a single `recipe.json`, or inline bin tokens
+    /// `SOURCE[@5′..3′]` (e.g. `pUC19.gb@EcoRI..PstI`, `parts/*.gb@BsaI..BsaI`).
+    /// The `E1..E2` walk is 5′→3′ of the excised fragment; swap sides of `..`
+    /// for the complementary walk. Join uses that prepared orientation (no
+    /// silent flips); both orientations → multiple sources or complementary bins.
+    Assemble {
+        /// Path/glob, optional `@5′..3′` (`EcoRI..PstI`, `BsaI..BsaI`,
+        /// `pcr:fwd..rev`, `as-is`), or a single `recipe.json`.
+        #[arg(value_name = "TOKEN")]
+        inputs: Vec<String>,
+        /// Join method: `ligate` | `golden-gate`.
+        #[arg(long, default_value = "ligate")]
+        method: String,
+        /// Intended topology: `circular` | `linear` | `any`.
+        #[arg(long, default_value = "circular")]
+        topology: String,
+        /// Default digest enzymes when a bin has no `@5′..3′`
+        /// (one enzyme → `E..E`; two → `E1..E2`).
+        #[arg(long)]
+        enzymes: Option<String>,
+        /// Combination mode: `all-to-all` (Cartesian product across bins; default)
+        /// or `zip` (positional 1:1 pairing; bins must share fragment count).
+        #[arg(long, default_value = "all-to-all")]
+        expand: String,
+        /// Also write the resolved recipe as JSON to this path.
+        #[arg(long)]
+        emit_recipe: Option<PathBuf>,
+        /// Report bins + combo count + join end-compatibility without products.
+        #[arg(long)]
+        dry_run: bool,
+        /// Score each combo with a fidelity dataset (dry-run overlay only;
+        /// never written into recipe.json). Ids: t4_25c_18h (default), t4_25c_01h,
+        /// t4_37c_18h, t4_37c_01h, bsai, bsmbi, esp3i, bbsi, sapi.
+        #[arg(long)]
+        fidelity_dataset: Option<String>,
+        /// Include the NEB-style RC-expanded subset ligation-frequency matrix
+        /// for the first compatible combo (else the first combo) on dry-run JSON.
+        /// Requires `--fidelity-dataset`.
+        #[arg(long)]
+        fidelity_matrix: bool,
     },
     /// Annotate a sequence file (post-MVP)
     Annotate {
@@ -128,7 +174,33 @@ fn main() -> anyhow::Result<()> {
             stop_to_stop,
             forward_only,
         } => seqforge_cli::run_orfs(&input, min_aa, stop_to_stop, forward_only),
-        Cmd::Digest { .. } | Cmd::Annotate { .. } => {
+        Cmd::Digest {
+            input,
+            enzymes,
+            circular,
+        } => seqforge_cli::run_digest(&input, &enzymes, circular),
+        Cmd::Assemble {
+            inputs,
+            method,
+            topology,
+            enzymes,
+            expand,
+            emit_recipe,
+            dry_run,
+            fidelity_dataset,
+            fidelity_matrix,
+        } => seqforge_cli::run_assemble(
+            &inputs,
+            &method,
+            &topology,
+            enzymes.as_deref(),
+            &expand,
+            emit_recipe.as_deref(),
+            dry_run,
+            fidelity_dataset.as_deref(),
+            fidelity_matrix,
+        ),
+        Cmd::Annotate { .. } => {
             anyhow::bail!("not yet implemented (post-MVP)")
         }
 

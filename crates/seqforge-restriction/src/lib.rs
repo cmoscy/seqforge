@@ -21,12 +21,16 @@
 //! J. Roberts. The snapshot under `data/` retains the original copyright
 //! header. Codegen emits the same attribution into `enzymes_generated.rs`.
 
+mod digest;
 mod enzyme;
 mod enzymes_generated;
 mod methylation;
 mod preset;
 mod scan;
 
+pub use digest::{
+    digest, reassemble, DigestResult, EndGeom, RestrictionFragment, Topology as FragmentTopology,
+};
 pub use enzyme::{
     Enzyme, EnzymeType, Iupac, MethylEffect, MethylSensitivity, OverhangKind, Site, SiteStrand,
 };

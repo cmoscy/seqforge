@@ -176,6 +176,388 @@ pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Digest a sequence file with restriction enzymes (Restriction Tier 2) — the
+/// **local** CLI face of `digest`. Loads the file, resolves the enzyme query
+/// (same grammar as the GUI: names or presets like `golden gate` / `type IIs`),
+/// and prints the virtual `FragmentInfo` set. Nothing is written — fragments are
+/// virtual (decision 25); the molecule's methylation defaults apply (Dam⁺ Dcm⁺).
+/// `--circular` overrides the file's topology.
+pub fn run_digest(path: &Path, enzymes: &[String], circular_override: bool) -> anyhow::Result<()> {
+    let doc =
+        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
+    let circular = circular_override || matches!(doc.topology, Topology::Circular);
+    // Mint ids exactly like a GUI load so inherited features project consistently.
+    let ann = Annotations::from_parts(doc.features, doc.primers);
+
+    // Accept comma- or space-separated enzyme lists (`--enzymes EcoRI,BamHI`).
+    let query = enzymes.join(" ").replace(',', " ");
+    let parsed = seqforge_bio::parse_enzyme_query(&query);
+    let names = seqforge_bio::resolve_query_names(&parsed, &doc.sequence, circular);
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    let (frags, warnings) = seqforge_bio::digest_fragments(
+        &doc.sequence,
+        &ann,
+        &refs,
+        circular,
+        &doc.name,
+        &seqforge_core::MethylContext::default(),
+    );
+    let infos: Vec<_> = frags
+        .iter()
+        .enumerate()
+        .map(|(i, f)| f.to_info(i))
+        .collect();
+
+    let out = serde_json::json!({
+        "kind": "digest",
+        "name": doc.name,
+        "enzymes": names,
+        "count": infos.len(),
+        "fragments": infos,
+        "warnings": warnings,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// Assemble a product from a recipe (Assembly A1) — the **local** CLI face of
+/// `assemble`. Accepts either a single `recipe.json` or inline bin tokens
+/// (`SOURCE[@FROM..TO]`), runs the shared `seqforge_bio` engine over the
+/// filesystem, and prints the products. Both faces build the same `Recipe`
+/// (parity with the GUI, which runs the identical `seqforge_bio::run`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_assemble(
+    inputs: &[String],
+    method: &str,
+    topology: &str,
+    default_enzymes: Option<&str>,
+    expand: &str,
+    emit_recipe: Option<&Path>,
+    dry_run: bool,
+    fidelity_dataset: Option<&str>,
+    fidelity_matrix: bool,
+) -> anyhow::Result<()> {
+    use seqforge_core::{Expand, JoinKind, Recipe, TopologyIntent};
+
+    // Build the recipe: a lone `*.json` loads; otherwise each input is a bin.
+    let recipe = if inputs.len() == 1 && inputs[0].ends_with(".json") {
+        let text = std::fs::read_to_string(&inputs[0])
+            .with_context(|| format!("read recipe {}", inputs[0]))?;
+        serde_json::from_str::<Recipe>(&text).with_context(|| "parse recipe json")?
+    } else if inputs.is_empty() {
+        anyhow::bail!("no inputs — pass a recipe.json or bin tokens (SOURCE[@FROM..TO])");
+    } else {
+        let bins = inputs
+            .iter()
+            .map(|t| parse_bin_token(t, default_enzymes))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let join = match method {
+            "ligate" => JoinKind::Ligate,
+            "golden-gate" | "golden_gate" | "gg" => {
+                let enzyme = default_enzymes
+                    .map(normalize_enzymes)
+                    .and_then(|e| e.split_whitespace().next().map(str::to_string))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("--method golden-gate needs --enzymes (e.g. BsaI)")
+                    })?;
+                JoinKind::GoldenGate { enzyme }
+            }
+            other => {
+                anyhow::bail!("unknown --method {other:?} (supports: ligate, golden-gate)")
+            }
+        };
+        Recipe {
+            bins,
+            join,
+            intent: match topology {
+                "linear" => TopologyIntent::Linear,
+                "any" => TopologyIntent::Any,
+                _ => TopologyIntent::Circular,
+            },
+            expand: if expand == "zip" {
+                Expand::Zip
+            } else {
+                Expand::AllToAll
+            },
+            name_template: None,
+        }
+    };
+
+    if let Some(path) = emit_recipe {
+        std::fs::write(path, serde_json::to_string_pretty(&recipe)?)
+            .with_context(|| format!("write recipe {}", path.display()))?;
+    }
+
+    if dry_run {
+        if fidelity_matrix && fidelity_dataset.is_none() {
+            anyhow::bail!("--fidelity-matrix requires --fidelity-dataset");
+        }
+        let dataset = match fidelity_dataset {
+            None => None,
+            Some(name) => Some(seqforge_bio::FidelityDataset::parse(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --fidelity-dataset {name:?} (try t4_25c_18h, bsai, sapi, …)"
+                )
+            })?),
+        };
+        // Report the plan without materializing products: per-bin fragment
+        // counts + per-combo summaries (identity-only join probe).
+        let bins: Vec<_> = recipe
+            .bins
+            .iter()
+            .map(|b| {
+                let (infos, warnings) = seqforge_bio::preview_bin(b, &seqforge_bio::FileResolver);
+                serde_json::json!({ "role": b.role, "fragments": infos.len(), "warnings": warnings })
+            })
+            .collect();
+        let (summaries, warnings) =
+            seqforge_bio::enumerate_combos(&recipe, &seqforge_bio::FileResolver, dataset);
+        let compatible = summaries.iter().filter(|c| c.ok).count();
+        let combos_json: Vec<_> = summaries
+            .iter()
+            .map(|c| {
+                let mut obj = serde_json::json!({
+                    "index": c.index,
+                    "ok": c.ok,
+                    "parts": c.parts.iter().map(|p| serde_json::json!({
+                        "source": p.source_name,
+                        "length": p.length,
+                    })).collect::<Vec<_>>(),
+                    "detail": c.detail,
+                });
+                if dataset.is_some() {
+                    let obj = obj.as_object_mut().unwrap();
+                    obj.insert(
+                        "fidelity".into(),
+                        match c.fidelity {
+                            Some(f) => serde_json::json!(f),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                    obj.insert(
+                        "fidelity_three_prime".into(),
+                        serde_json::json!(c.fidelity_three_prime),
+                    );
+                }
+                obj
+            })
+            .collect();
+        let mut out = serde_json::json!({
+            "kind": "assembly_dry_run",
+            "bins": bins,
+            "combos": summaries.len(),
+            "compatible_combos": compatible,
+            "combo_list": combos_json,
+            "warnings": warnings,
+        });
+        if let Some(ds) = dataset {
+            let root = out.as_object_mut().unwrap();
+            root.insert("fidelity_dataset".into(), serde_json::json!(ds.id()));
+            if fidelity_matrix {
+                if let Some((combo_index, matrix)) = seqforge_bio::first_combo_fidelity_matrix(
+                    &recipe,
+                    &seqforge_bio::FileResolver,
+                    ds,
+                ) {
+                    let n = matrix.dim();
+                    let labels: Vec<String> = matrix
+                        .labels
+                        .iter()
+                        .map(|l| String::from_utf8_lossy(l).into_owned())
+                        .collect();
+                    let counts: Vec<Vec<u32>> = (0..n)
+                        .map(|i| (0..n).map(|j| matrix.get(i, j)).collect())
+                        .collect();
+                    root.insert(
+                        "fidelity_matrix".into(),
+                        serde_json::json!({
+                            "combo_index": combo_index,
+                            "labels": labels,
+                            "counts": counts,
+                        }),
+                    );
+                } else {
+                    root.insert("fidelity_matrix".into(), serde_json::Value::Null);
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if fidelity_dataset.is_some() {
+        anyhow::bail!("--fidelity-dataset only applies with --dry-run (scores are not persisted)");
+    }
+    if fidelity_matrix {
+        anyhow::bail!("--fidelity-matrix only applies with --dry-run --fidelity-dataset");
+    }
+
+    let result = seqforge_bio::run(&recipe, &seqforge_bio::FileResolver);
+    let products: Vec<_> = result
+        .products
+        .iter()
+        .map(|p| {
+            let info = p.fragment.to_info(0);
+            serde_json::json!({
+                "name": p.name,
+                "length": info.length,
+                "topology": info.topology,
+                "left": info.left,
+                "right": info.right,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "assembly",
+            "method": method,
+            "count": products.len(),
+            "products": products,
+            "warnings": result.warnings,
+        }))?
+    );
+    Ok(())
+}
+
+/// Parse a bin token `SOURCE[@FROM..TO]` into a [`Bin`] (decision 26).
+///
+/// - `SOURCE` may be a **glob** (`parts/*.gb`) → every match becomes a source in
+///   the **same** bin (bulk, shared 5′→3′ prepare).
+/// - `@E1..E2` is the digest 5′→3′ walk (`EcoRI..PstI`, `BsaI..BsaI`, `EcoRI@410..BamHI`).
+/// - `@pcr:fwd..rev` / `@as-is` for PCR and pass-through.
+/// - Trailing `[5′..3′]` is a per-source span override (rare `@pos` exception).
+///
+/// Without `@…`, defaults to `Digest(E..E)` from `--enzymes` (GG sugar:
+/// bare path + `--enzymes BsaI` → `BsaI..BsaI`), else `AsIs`.
+fn parse_bin_token(
+    token: &str,
+    default_enzymes: Option<&str>,
+) -> anyhow::Result<seqforge_core::Bin> {
+    use seqforge_core::{Bin, Boundary, PrepareKind, Source, SourceRef, SpanEnds};
+
+    // Split off a trailing [span] (per-input override).
+    let (rest, span_override) = match (token.find('['), token.ends_with(']')) {
+        (Some(open), true) => {
+            let inner = &token[open + 1..token.len() - 1];
+            let span = inner
+                .parse::<SpanEnds>()
+                .map_err(|e| anyhow::anyhow!("bad span override in {token:?}: {e}"))?;
+            (&token[..open], Some(span))
+        }
+        _ => (token, None),
+    };
+
+    // Split off @prepare / @5′..3′.
+    let (source, prepare) = match rest.split_once('@') {
+        Some((src, spec)) => (src, parse_prepare(spec)?),
+        None => {
+            let prep = match default_enzymes {
+                Some(e) => {
+                    let names: Vec<String> = normalize_enzymes(e)
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect();
+                    match names.as_slice() {
+                        [] => PrepareKind::AsIs,
+                        [one] => PrepareKind::Digest {
+                            five_prime: Boundary::enzyme(one.clone()),
+                            three_prime: Boundary::enzyme(one.clone()),
+                        },
+                        [a, b, ..] => PrepareKind::Digest {
+                            five_prime: Boundary::enzyme(a.clone()),
+                            three_prime: Boundary::enzyme(b.clone()),
+                        },
+                    }
+                }
+                None => PrepareKind::AsIs,
+            };
+            (rest, prep)
+        }
+    };
+    if source.is_empty() {
+        anyhow::bail!("empty source in bin token {token:?}");
+    }
+
+    let paths = seqforge_bio::expand_glob(source);
+    if paths.is_empty() {
+        anyhow::bail!("no files match {source:?}");
+    }
+    let sources: Vec<Source> = paths
+        .into_iter()
+        .map(|p| Source {
+            ref_: SourceRef::Path(p),
+            pin: None,
+            span: span_override.clone(),
+        })
+        .collect();
+
+    Ok(Bin {
+        role: bin_role(source),
+        sources,
+        prepare,
+    })
+}
+
+/// A bin role from the source token: a glob → its parent directory name; a plain
+/// path → its file stem.
+fn bin_role(source: &str) -> String {
+    if source.contains('*') {
+        Path::new(source)
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bin".to_string())
+    } else {
+        Path::new(source)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.to_string())
+    }
+}
+
+fn parse_prepare(spec: &str) -> anyhow::Result<seqforge_core::PrepareKind> {
+    use seqforge_core::{Boundary, PrepareKind, SpanEnds};
+    let spec = spec.trim();
+    if spec.eq_ignore_ascii_case("as-is") || spec.eq_ignore_ascii_case("asis") {
+        return Ok(PrepareKind::AsIs);
+    }
+    if let Some(pair) = spec.strip_prefix("pcr:") {
+        let span: SpanEnds = pair
+            .parse()
+            .map_err(|e| anyhow::anyhow!("pcr prepare needs fwd..rev, got {spec:?}: {e}"))?;
+        let (fwd, rev) = match (&span.five_prime, &span.three_prime) {
+            (
+                Boundary::EnzymeSite {
+                    enzyme: f,
+                    at: None,
+                },
+                Boundary::EnzymeSite {
+                    enzyme: r,
+                    at: None,
+                },
+            ) => (f.clone(), r.clone()),
+            _ => anyhow::bail!("pcr prepare needs primer names (fwd..rev), got {spec:?}"),
+        };
+        return Ok(PrepareKind::Pcr { fwd, rev });
+    }
+    // Optional legacy `digest:` prefix, then 5′..3′.
+    let span_text = spec.strip_prefix("digest:").unwrap_or(spec);
+    let span: SpanEnds = span_text
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad prepare {spec:?}: {e}"))?;
+    Ok(PrepareKind::Digest {
+        five_prime: span.five_prime,
+        three_prime: span.three_prime,
+    })
+}
+
+/// Enzyme lists accept `,`, `+`, or `/` separators; the query grammar wants whitespace.
+fn normalize_enzymes(list: &str) -> String {
+    list.replace([',', '+', '/'], " ")
+}
+
 // ── Viewer command socket dispatch ────────────────────────────────────────────
 
 /// Send a `ViewerRequest` to a running SeqForge GUI via the Unix domain socket
@@ -268,6 +650,76 @@ mod tests {
         unsafe { std::env::remove_var("SEQFORGE_SOCKET") };
         let err = super::dispatch_viewer_cmd(ViewerRequest::Close).unwrap_err();
         assert!(err.to_string().contains("SEQFORGE_SOCKET"));
+    }
+}
+
+#[cfg(test)]
+mod assemble_tests {
+    use seqforge_core::{Bin, Boundary, PrepareKind, Source, SourceRef, SpanEnds};
+
+    /// Parity: the bin a CLI token parses to is byte-identical to the bin a GUI
+    /// would author, and it survives serde + the 5′→3′ Display/FromStr round-trip.
+    #[test]
+    fn cli_token_equals_gui_authored_bin() {
+        let bin = super::parse_bin_token("pUC19.gb@BamHI..EcoRI", None).unwrap();
+
+        let expected = Bin {
+            role: "pUC19".into(),
+            sources: vec![Source {
+                ref_: SourceRef::Path("pUC19.gb".into()),
+                pin: None,
+                span: None,
+            }],
+            prepare: PrepareKind::Digest {
+                five_prime: Boundary::enzyme("BamHI"),
+                three_prime: Boundary::enzyme("EcoRI"),
+            },
+        };
+        assert_eq!(bin, expected, "CLI token must equal the GUI-authored bin");
+
+        let json = serde_json::to_string(&bin).unwrap();
+        assert_eq!(serde_json::from_str::<Bin>(&json).unwrap(), bin);
+
+        let span = SpanEnds::new(Boundary::enzyme("BamHI"), Boundary::enzyme("EcoRI"));
+        assert_eq!(span.to_string(), "BamHI..EcoRI");
+        assert_eq!("BamHI..EcoRI".parse::<SpanEnds>().unwrap(), span);
+    }
+
+    /// A per-input `[5′..3′]` with an `@pos` occurrence rides each source.
+    #[test]
+    fn per_input_span_override_is_carried_on_the_source() {
+        let bin = super::parse_bin_token("geneC.gb@EcoRI..BamHI[EcoRI@410..BamHI]", None).unwrap();
+        let span = bin.sources[0].span.as_ref().expect("span override");
+        assert_eq!(span.to_string(), "EcoRI@410..BamHI");
+    }
+
+    /// A glob source expands to N sources in **one** bin (bulk).
+    #[test]
+    fn glob_expands_to_n_sources_in_one_bin() {
+        let dir = std::env::temp_dir().join(format!("sf_glob_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.gb", "b.gb", "c.gb", "skip.txt"] {
+            std::fs::write(dir.join(name), b">x\nACGT\n").unwrap();
+        }
+        let pattern = format!("{}/*.gb", dir.display());
+        let bin = super::parse_bin_token(&format!("{pattern}@EcoRI..EcoRI"), None).unwrap();
+        assert_eq!(bin.sources.len(), 3, "3 .gb files, not the .txt");
+        let combos: usize = [bin.sources.len()].iter().product();
+        assert_eq!(combos, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Bare path + `--enzymes BsaI` sugars to `Digest { BsaI..BsaI }`.
+    #[test]
+    fn golden_gate_bare_path_sugars_to_bsai_span() {
+        let bin = super::parse_bin_token("vector.gb", Some("BsaI")).unwrap();
+        assert_eq!(
+            bin.prepare,
+            PrepareKind::Digest {
+                five_prime: Boundary::enzyme("BsaI"),
+                three_prime: Boundary::enzyme("BsaI"),
+            }
+        );
     }
 }
 

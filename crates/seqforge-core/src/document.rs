@@ -36,6 +36,16 @@ impl Default for MethylContext {
     }
 }
 
+impl MethylContext {
+    /// No methylation active — every site cuts. Mirrors
+    /// `seqforge_restriction::MethylContext::NONE`.
+    pub const NONE: MethylContext = MethylContext {
+        dam: false,
+        dcm: false,
+        cpg: false,
+    };
+}
+
 /// Two-factor verdict for one cut site under a methylation context. Variants are
 /// ordered by severity (`Cuttable < Impaired < Blocked`) so the worst state
 /// across systems/sites is `.max()`.
@@ -207,6 +217,14 @@ impl Lineage {
 pub enum LineageOp {
     /// Sliced out of a source document by transport `extract`.
     Extract,
+    /// Excised as one piece of a restriction digest. `left`/`right` name the
+    /// enzymes that cut the two boundaries (`None` = a free molecule terminus);
+    /// a [`Fragment`](crate::Fragment)'s per-end `cut_by` is read off this op,
+    /// **not** stored a second time on the `End`.
+    Digest {
+        left: Option<String>,
+        right: Option<String>,
+    },
 }
 
 /// GenBank-native feature geometry — a core-owned mirror of

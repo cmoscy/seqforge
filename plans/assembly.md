@@ -17,11 +17,11 @@
 > straddling a junction, or spanning a circular origin → one `Join`/segmented
 > feature) — is `Annotations::place(..., merge=true)`, *not* new assembly code.
 
-> **Status — NOT STARTED (design of record).** This is the convergence track:
-> Restriction Tier 3 + the primers cloning convergence + the workbench region
-> substrate (decision 19), unified into one ligation-based cloning surface. PCR
-> (a fragment *generator*) ships first and standalone in the primers track; this
-> doc owns everything downstream of "I have fragments."
+> **Status — A1 v0 landed (in progress).** Bins + Digest/PCR/AsIs prepare +
+> Ligate/Golden Gate join + combo expand/probe + assembly workbench + CLI
+> `assemble --dry-run` (optional fidelity % / matrix overlay). Fidelity scoring
+> is NEB Viewer–aligned (matrix-first; see [`fidelity.md`](fidelity.md)). Gibson /
+> homology join and GetSet-style overhang design remain later phases.
 
 ## Goal
 
@@ -226,6 +226,48 @@ enum  Location { Ends(EnzymeRef, EnzymeRef), Contains(FeatureRef), Span(Range, O
 The text grammar is this struct's `Display`/`FromStr`; the GUI produces the struct
 from a click and shows the same string as the fragment's label.
 
+### Authoring UX (A1.1) — 5′/3′ prepare ends, bulk sources, multi-cut `@pos`
+
+Prepare is **one ordered 5′→3′ walk** (decision 26): the fragment bounded by its
+5′ and 3′ ends. **Bin index is join order**; **prepared orientation is placement
+orientation** (join never reverse-complements a fragment). Both orientations are
+authored as multiple sources or complementary walks — not invented by the engine.
+
+1. **Prepare is set once per bin** — `Digest { five_prime, three_prime }`
+   (enzymes = named `EnzymeSite`s), `Pcr { fwd, rev }` (5′/3′ of the amplicon),
+   or `AsIs`. Every source inherits it. GUI ⇄ swaps the two ends.
+2. **Sources are a bulk list** — multi-select · glob · open-buffer. Combinatorial
+   width = sources-in-bin (∏|binᵢ|); not "keep all digest bands."
+3. **Ambiguity** — only when a **named endpoint enzyme cuts >1×** on that source
+   (site dropdown / `@pos` on that end). Multi-band digests after a unique pair
+   are not ambiguous. Same enzyme twice with exactly two sites defaults to
+   lowest-coord → other; ⇄ pins the other arc. Product-level pick stays A3.
+
+```rust
+enum Boundary { EnzymeSite { enzyme, at? }, Coordinate(usize), FeatureEdge { … }, Terminus }
+enum PrepareKind {
+    Digest { five_prime: Boundary, three_prime: Boundary },
+    Pcr { fwd: String, rev: String },
+    AsIs,
+}
+// Source.span: Option<SpanEnds> — per-input override only
+```
+
+**CLI:** (`E1..E2` = 5′..3′ walk; swap sides of `..` for the complementary walk.
+Join is identity-only. `--dry-run` reports join end-compatibility without products.)
+
+```
+seqforge assemble --method ligate --topology circular \
+  pUC19.gb@EcoRI..PstI \
+  insert.gb@EcoRI..PstI
+seqforge assemble --method golden-gate --enzymes BsaI \
+  vector.gb 'parts/*.gb'@BsaI..BsaI          # bare + --enzymes → BsaI..BsaI
+seqforge assemble … geneC.gb@EcoRI..BamHI[EcoRI@410..BamHI]   # override
+```
+
+GUI 5′/3′ fields + ⇄ write the same `Boundary`s; row previews are memoized on
+`(source, stamp, five_prime, three_prime)`.
+
 ### Fragment references — by-handle · by-provenance · by-content
 
 A bin points at its source; that reference resolves differently for *live* use vs a
@@ -270,7 +312,9 @@ else                 { preview grid → subset → run }   // "batch"
 ```
 
 The **preview grid** (pure ops, nothing materialized) lists each candidate with
-**derived name · topology · fidelity % · warnings**; you deselect rows to subset.
+**derived name · topology · fidelity % (informational) · warnings**; you deselect
+rows to subset. Fidelity % is session/CLI-overlay only — **never** stored in
+`recipe.json` and **never** gates Run.
 **Naming from provenance** is the extensibility.md pattern (`Product { name }` =
 "template against provenance") — default `{backbone}_{insert}`, user-overridable,
 falling back to `suggest_*_name` (decision 9) on collision.
@@ -301,8 +345,10 @@ seqforge assemble --method ligate   vector.gb:EcoRI/BamHI  insert.gb:EcoRI/BamHI
 seqforge assemble --method gibson   --overlap 25  a.gb b.gb c.gb
 seqforge assemble recipe.json          # structured; --emit-recipe out.json on any run
 
-# score (fidelity)
-seqforge fidelity AATG,GCTT,CGCT [--dataset t4-25c-18h]           # Ligase Fidelity Viewer analog
+# score (fidelity) — dry-run overlay only; never written into recipe.json
+seqforge assemble recipe.json --dry-run --fidelity-dataset t4_25c_18h
+seqforge assemble recipe.json --dry-run --fidelity-dataset bsai --fidelity-matrix
+# (standalone `seqforge fidelity` CLI is optional later; F1 scores via assemble dry-run / GUI)
 ```
 
 Everything discussed is a **flag or recipe field, not a new verb**: `--method`
@@ -345,8 +391,9 @@ seqforge-restriction (Tier 2/3)            seqforge-fidelity (NEW, codegen table
                        Product provenance; write-op via command/edit.rs
                      ┌─────┴─────┐
               seqforge-app     seqforge-cli
-              Tab::Recipe +    digest · pcr · assemble · fidelity (inline + recipe.json);
-              fidelity strip   --dry-run / --emit-recipe; batch is emergent
+              Tab::Recipe +    digest · pcr · assemble --dry-run
+              Join strip       [--fidelity-dataset]; fidelity never in recipe.json;
+              (Fidelity %)     batch is emergent; Run never gated by fidelity
 ```
 
 Dependency discipline (decisions 1/2/18): engine crates stay pure/zero-dep/
@@ -354,12 +401,33 @@ extractable. Gibson overlap is hand-rolled seed-and-extend (the
 `find_primer_binding_sites` pattern) — **not** `rust-bio` (heavy tree; full SW is
 overkill for 20–40 bp near-exact arms). Fidelity is a codegen static table.
 
+## Workbench layout (Join-centric)
+
+```
+1. Header           Assembly · Load/Save recipe
+2. Bins             prepare + sources
+3. Join strip       Join verb + verb settings + Fidelity + Topology + Expand
+4. Combo preview    table (parts, status, fidelity %, checkboxes)
+5. Run              Run selected (under the table) — unaffected by fidelity
+```
+
+Fidelity is a **join-strip capability** (Ligate and Golden Gate): one dropdown
+`Off | T4… | BsaI | … | SapI (3-base)`, length-gated. Scores fill the combo
+column when a dataset is selected.
+
 ## Fidelity is a universal junction metric — no IIS "mode"
 
-The Potapov matrix is indexed by **overhang sequence**, not enzyme, so the join
-**always** scores its junction overhang set as a **% correct** (`on_target /
-(on_target + Σ off_target)` per junction, product across the set — the number NEB's
-Viewer returns; full engine + formula: [`fidelity.md`](fidelity.md)).
+The Potapov/Pryor matrix is indexed by **overhang sequence**, not enzyme, so the
+join **can** score its junction overhang set as a **% correct** (NEB Viewer:
+RC-expanded subset matrix with palindromes doubled on the axes; per-junction
+`on/total`, product across the set — full engine + formula: [`fidelity.md`](fidelity.md)).
+
+**Hard product rules:** the score is **informational only** — never in recipe IR,
+never filters/sorts/gates Run. GUI session dropdown or CLI `--dry-run
+--fidelity-dataset` (optional `--fidelity-matrix`). F1 ships **full 4-nt and 3-nt
+(SapI)** tables.
+**Sequence-only** like NEB Viewer: sticky overhang letters are scored regardless
+of 5′/3′ chemistry (5′-assay data assumed); blunt / wrong length stay `—`.
 
 - **Type II** cut palindromic sites → **self-complementary overhangs** (EcoRI →
   `AATT`, RC `AATT`); a single-Type-II digest gives every fragment the same overhang
@@ -400,9 +468,9 @@ one join (A1), then the two axes that generalize it — correctness (A2) and sca
   `Recipe` + `FragmentSelector` + the shared pipeline; `Tab::Recipe`; verb dispatch
   over the fragment selection; **derived topology** from the start; combos == 1
   (no preview yet). `seqforge digest`/`assemble` inline arg parsing. First product.
-- **A2 — Golden Gate join + fidelity + intent filter.** `GoldenGate` one-pot
-  (enzyme-**set**, no mode); wire `seqforge-fidelity` F1 (% readout + worst
-  junction); intended-vs-derived topology filter + reaction warnings.
+- **A2 — Golden Gate join + fidelity + intent filter.** `GoldenGate` one-pot;
+  wire `seqforge-fidelity` F1 (informational per-combo % + Join strip; never
+  recipe IR / never gates Run); intended-vs-derived topology filter + reaction warnings.
 - **A3 — Batch: `expand` (all-to-all | zip) + preview grid + subset + provenance
   naming + recipe files.** Pure engine already supports it; this is the preview UI +
   name template + `assemble recipe.json` + `--dry-run` / `--emit-recipe` + a
@@ -473,11 +541,11 @@ flowchart LR
    forced; ambiguous joins return a product *set*; unachievable intent warns.
 5. **Per-bin operator (prepare) with an assembly-level default + override** —
    `Digest(enzyme-SET)` / `Pcr` / `Homology` / `AsIs`; enzymes are always a **set**.
-6. **One fragment-selection grammar** — `source[left..right]` with polymorphic
-   endpoints (enzyme · feature · coordinate), orientation by order; `:E/E`
-   shorthand; semantic-first per decision 12; backed by a structured
-   `FragmentSelector` (the `ViewSelection` analog, decision 17). `End` carries
-   `cut_by` for selection/orientation only.
+6. **One 5′/3′ prepare language + identity-only join** — `Digest { five_prime,
+   three_prime }` / `Pcr { fwd, rev }` / `AsIs`; walk 5′→3′; bin order = join
+   order; prepared orientation is placement (no flip search); both orients =
+   sources-in-bin or complementary walks; `@pos` only when an endpoint enzyme
+   cuts >1×. No KeepRule / band picker / undirected join mode.
 7. **Individual vs batch is emergent** (combo count), not a mode; preview appears
    when combos > 1; naming is a provenance template.
 8. **Parity is one structured request, three faces** (GUI gesture / CLI text /

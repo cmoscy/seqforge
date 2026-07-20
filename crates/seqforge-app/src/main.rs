@@ -1,4 +1,5 @@
 mod app;
+mod assembly;
 mod browser;
 mod cache;
 mod cli_install;
@@ -6,6 +7,7 @@ mod command;
 mod config;
 mod event;
 mod focus;
+mod fragments;
 mod inspector;
 mod keymap;
 mod minimap;
@@ -15,6 +17,7 @@ mod persistence;
 mod socket;
 mod tabs;
 mod terminal;
+mod ui_icon;
 mod viewer;
 mod workspace;
 

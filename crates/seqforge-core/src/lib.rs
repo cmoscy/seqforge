@@ -12,9 +12,11 @@
 
 pub mod commands;
 pub mod document;
+pub mod fragment;
 pub mod history;
 pub mod model;
 pub mod mutations;
+pub mod recipe;
 pub mod span;
 pub mod topology;
 pub mod transport;
@@ -27,10 +29,15 @@ pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,
     MethylContext, MethylState, Primer, PrimerId, SearchHit, Strand, Topology,
 };
+pub use fragment::{End, Fragment, OverhangSide, Product};
 pub use history::{EditKind, History, HistoryEntry};
 pub use model::{
-    Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, Selection, View, ViewId, ViewKind,
-    ViewSelection,
+    Annotations, Buffer, BufferId, CutSiteKey, DeleteIntent, RecipeId, Selection, View, ViewId,
+    ViewKind, ViewSelection,
+};
+pub use recipe::{
+    Bin, Boundary, Expand, FeatureSide, JoinKind, PrepareKind, Recipe, Source, SourceRef, SpanEnds,
+    TopologyIntent, default_role,
 };
 pub use span::{Pieces, Span};
 pub use topology::{reverse_complement_circular, rotate_origin};

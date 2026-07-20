@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use seqforge_core::{ViewId, ViewKind};
+use seqforge_core::{RecipeId, ViewId, ViewKind};
 
 /// Which leaf "owns" the keyboard when no overlay is active.
 ///
@@ -31,6 +31,10 @@ use seqforge_core::{ViewId, ViewKind};
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum FocusScope {
     View(ViewId),
+    /// An assembly-recipe workbench tab (a non-buffer document in the center
+    /// dock). Mouse-driven like the Inspector; shares the viewer key-context so
+    /// keymap resolution is unperturbed.
+    Recipe(RecipeId),
     #[default]
     Terminal,
     Browser,
@@ -45,6 +49,7 @@ impl FocusScope {
     pub fn pane_tag(self) -> &'static str {
         match self {
             FocusScope::View(_) => KeyContext::PANE_VIEWER,
+            FocusScope::Recipe(_) => KeyContext::PANE_VIEWER,
             FocusScope::Terminal => KeyContext::PANE_TERMINAL,
             FocusScope::Browser => KeyContext::PANE_BROWSER,
             FocusScope::Inspector => KeyContext::PANE_INSPECTOR,

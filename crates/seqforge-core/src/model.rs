@@ -64,6 +64,7 @@ macro_rules! id_newtype {
 
 id_newtype!(BufferId);
 id_newtype!(ViewId);
+id_newtype!(RecipeId);
 
 // ── Buffer ───────────────────────────────────────────────────────────────────
 
@@ -380,6 +381,10 @@ pub enum ViewKind {
     /// Dual-strand monospace text rendering — the current viewer.
     #[default]
     TextView,
+    /// Read-only projection of a restriction digest over the view's (source)
+    /// buffer — a list of virtual fragments (Restriction Tier 2). The enzyme set
+    /// lives in [`View::fragments_query`]; nothing is materialized.
+    Fragments,
 }
 
 impl ViewKind {
@@ -388,6 +393,7 @@ impl ViewKind {
     pub fn context_tag(self) -> &'static str {
         match self {
             ViewKind::TextView => "Pane:TextView",
+            ViewKind::Fragments => "Pane:Fragments",
         }
     }
 }
@@ -689,6 +695,12 @@ pub struct View {
     pub selection: ViewSelection,
     /// Last persisted scroll offset, restored on tab switch / app restart.
     pub scroll_pos: Option<f32>,
+    /// For a [`ViewKind::Fragments`] view: the enzyme query the digest projection
+    /// runs. `None` for a `TextView`. The fragment list itself is **virtual** —
+    /// recomputed on demand from the source buffer (never stored), so only the
+    /// query persists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragments_query: Option<String>,
     /// One-shot scroll request, consumed by the viewer each frame.
     #[serde(skip)]
     pub scroll_to: Option<usize>,
@@ -734,6 +746,7 @@ impl View {
             // may overwrite this; `clear_selection` still clears to None.
             selection: ViewSelection::Text(Selection::cursor(0)),
             scroll_pos: None,
+            fragments_query: None,
             scroll_to: None,
             search_hits: Vec::new(),
             cut_sites: Vec::new(),

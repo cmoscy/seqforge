@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use seqforge_core::ViewId;
+use seqforge_core::{RecipeId, ViewId};
 use serde::{Deserialize, Serialize};
 
 use crate::command::{AppCommand, PendingCommand};
@@ -20,6 +20,8 @@ use crate::workspace::Workspace;
 pub enum Tab {
     Welcome,
     View(ViewId),
+    /// An assembly-recipe workbench (a non-buffer document spanning many sources).
+    Recipe(RecipeId),
 }
 
 pub struct TabViewer<'a> {
@@ -32,6 +34,12 @@ pub struct TabViewer<'a> {
     pub clipboard: Option<&'a [u8]>,
     /// Per-frame snapshot of the active config; cheap to clone.
     pub config: Arc<Config>,
+    /// Session combo checkbox sets for assembly Run subset.
+    pub recipe_combo_selection:
+        &'a std::collections::HashMap<RecipeId, std::collections::HashSet<usize>>,
+    /// Session fidelity dataset choice (informational; not recipe IR).
+    pub recipe_fidelity:
+        &'a std::collections::HashMap<RecipeId, Option<seqforge_bio::FidelityDataset>>,
 }
 
 impl egui_dock::TabViewer for TabViewer<'_> {
@@ -51,12 +59,13 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // and the rest with `text_color()` (grey). No hand-painting here.
                 name.unwrap_or_else(|| "Untitled".to_string()).into()
             }
+            Tab::Recipe(_) => "Assembly".into(),
         }
     }
 
-    /// View tabs are user-closeable; everything else is structural.
+    /// View + Recipe tabs are user-closeable; Welcome is structural.
     fn closeable(&mut self, tab: &mut Tab) -> bool {
-        matches!(tab, Tab::View(_))
+        matches!(tab, Tab::View(_) | Tab::Recipe(_))
     }
 
     /// Route the dock's × button through our command system so close
@@ -65,12 +74,19 @@ impl egui_dock::TabViewer for TabViewer<'_> {
     /// to remove the tab from the tree — `CloseTab` does it via
     /// `dock_state.remove_tab` inside `apply()`.
     fn on_close(&mut self, tab: &mut Tab) -> bool {
-        if let Tab::View(vid) = tab {
-            self.pending_commands
-                .push((AppCommand::CloseTab { view: *vid }, None));
-            return false;
+        match tab {
+            Tab::View(vid) => {
+                self.pending_commands
+                    .push((AppCommand::CloseTab { view: *vid }, None));
+                false
+            }
+            Tab::Recipe(id) => {
+                self.pending_commands
+                    .push((AppCommand::CloseRecipe { id: *id }, None));
+                false
+            }
+            Tab::Welcome => true,
         }
-        true
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
@@ -78,6 +94,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
         let pane_scope = match tab {
             Tab::Welcome => FocusScope::View(ViewId(0)),
             Tab::View(vid) => FocusScope::View(*vid),
+            Tab::Recipe(id) => FocusScope::Recipe(*id),
         };
 
         match tab {
@@ -150,6 +167,21 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                                 clipboard,
                             );
                         }
+                        seqforge_core::ViewKind::Fragments => {
+                            // Virtual projection: recompute the digest list on
+                            // demand from the source buffer (nothing materialized).
+                            let query = view.fragments_query.clone().unwrap_or_default();
+                            let methyl = view.methylation;
+                            let (infos, warnings, _) =
+                                crate::fragments::compute(buf, ann, &query, &methyl);
+                            crate::fragments::show(
+                                ui,
+                                view.id,
+                                &infos,
+                                &warnings,
+                                pending_commands,
+                            );
+                        }
                     }
                 });
                 if rendered.is_err() {
@@ -161,6 +193,18 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // No focused-pane border: focus is cued by the blinking caret
                 // (solid when unfocused, blinking when focused). The accent
                 // rectangle read as visual noise, especially in a single pane.
+            }
+            Tab::Recipe(id) => {
+                let selection = self.recipe_combo_selection.get(id);
+                let fidelity = self.recipe_fidelity.get(id).copied().flatten();
+                crate::assembly::show(
+                    ui,
+                    *id,
+                    self.workspace,
+                    selection,
+                    fidelity,
+                    self.pending_commands,
+                );
             }
         }
 

@@ -28,8 +28,8 @@ use std::sync::{Arc, RwLock};
 use std::ops::Range;
 
 use seqforge_core::{
-    Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Orient, Selection,
-    SeqSlice, View, ViewId, ViewKind, ViewSelection, mutations, transport,
+    Annotations, BioOps, Buffer, BufferId, DispatchError, EditKind, History, Orient, RecipeId,
+    Selection, SeqSlice, View, ViewId, ViewKind, ViewSelection, mutations, transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -150,6 +150,11 @@ impl BufferStore {
         let count = Arc::strong_count(&buf);
         drop(buf);
         Some(count)
+    }
+
+    /// Look up an already-open buffer by its source path (no disk read).
+    pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
+        self.by_path.get(path).copied()
     }
 
     /// Find or load a buffer for `path`. If a buffer is already loaded
@@ -273,7 +278,16 @@ pub struct Workspace {
     #[serde(skip)]
     pub seq_views: HashMap<ViewId, SequenceView>,
 
+    /// Open assembly-recipe workbench documents (a non-buffer document type).
+    /// Session-scoped like views — tabs are not restored on relaunch. Recipe
+    /// JSON is explicit import/export from the workbench header (or CLI
+    /// `assemble` / `--emit-recipe`), not a File-menu document type.
+    #[serde(skip)]
+    pub recipes: HashMap<RecipeId, seqforge_core::Recipe>,
+
     next_view: u64,
+    #[serde(skip)]
+    next_recipe: u64,
 }
 
 impl Default for Workspace {
@@ -283,7 +297,9 @@ impl Default for Workspace {
             active_view: None,
             buffers: BufferStore::new(),
             seq_views: HashMap::new(),
+            recipes: HashMap::new(),
             next_view: 0,
+            next_recipe: 0,
         }
     }
 }
@@ -292,6 +308,27 @@ impl Workspace {
     pub fn alloc_view_id(&mut self) -> ViewId {
         self.next_view += 1;
         ViewId(self.next_view)
+    }
+
+    /// Mint a fresh `RecipeId` (session-scoped, never persisted).
+    pub fn alloc_recipe_id(&mut self) -> RecipeId {
+        self.next_recipe += 1;
+        RecipeId(self.next_recipe)
+    }
+
+    /// Insert a recipe document and return its id.
+    pub fn add_recipe(&mut self, recipe: seqforge_core::Recipe) -> RecipeId {
+        let id = self.alloc_recipe_id();
+        self.recipes.insert(id, recipe);
+        id
+    }
+
+    pub fn recipe(&self, id: RecipeId) -> Option<&seqforge_core::Recipe> {
+        self.recipes.get(&id)
+    }
+
+    pub fn recipe_mut(&mut self, id: RecipeId) -> Option<&mut seqforge_core::Recipe> {
+        self.recipes.get_mut(&id)
     }
 
     pub fn active_view(&self) -> Option<&View> {
