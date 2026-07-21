@@ -174,12 +174,10 @@ pub struct AppState {
     /// the `ReloadConfig` command. Wrapped in `Arc` so widgets cheaply
     /// clone a per-frame reference.
     pub config: Arc<Config>,
-    /// In-memory clipboard for Cut/Copy/Paste (editor v0.2). Holds an annotated
-    /// [`SeqSlice`] — bytes **plus** carried features/primers (feature-model
-    /// track F1) — so paste re-homes annotations, not just bytes. The `.bytes()`
-    /// projection feeds byte-only consumers (staged-paste preview, GUI clipboard
-    /// interop via arboard, which is layered on separately).
-    pub(crate) clipboard: Option<seqforge_core::SeqSlice>,
+    /// Clipboard cache for Cut/Copy/Paste. The OS clipboard is authoritative;
+    /// this holds the rich [`seqforge_core::SeqSlice`] only while pasteboard
+    /// generation still shows we own the last write. See [`crate::clipboard`].
+    pub(crate) clipboard: crate::clipboard::ClipboardState,
     /// Set while a Save-As file dialog is open, naming the view to write on
     /// pick. Discriminates the save-mode dialog from an open-mode one in the
     /// shared file-dialog pick handler. Cleared on pick or cancel.
@@ -249,7 +247,7 @@ impl Default for AppState {
             minimap: MiniMap::default(),
             pending_file_state: std::collections::HashMap::new(),
             config: Arc::new(Config::default()),
-            clipboard: None,
+            clipboard: crate::clipboard::ClipboardState::default(),
             pending_save_as: None,
             pending_recipe_dialog: None,
             recipe_combo_selection: std::collections::HashMap::new(),
@@ -357,7 +355,10 @@ impl SeqForgeApp {
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
-        let mut state = AppState::default();
+        let mut state = AppState {
+            clipboard: crate::clipboard::ClipboardState::for_gui(),
+            ..AppState::default()
+        };
         let (config, cfg_warnings) = Config::load();
         state.config = config;
         for w in cfg_warnings {
@@ -1062,6 +1063,10 @@ impl eframe::App for SeqForgeApp {
                 });
         }
 
+        // Keep Paste enablement / staged preview honest with the OS clipboard.
+        // Cheap when generation is unchanged (no text read).
+        crate::clipboard::sync_from_os(&mut self.state);
+
         // ── Dirty title bar + quit/close intercept ────────────────────────────
         self.sync_window_title(ctx);
         self.handle_quit_intercept(ctx);
@@ -1325,6 +1330,13 @@ impl eframe::App for SeqForgeApp {
                     };
                     let has_range =
                         command::is_enabled(&AppCommand::Viewer(range_probe), &self.state);
+                    let copy_probe = ViewerRequest::Copy {
+                        start: 0,
+                        end: 0,
+                        view: None,
+                    };
+                    let can_copy =
+                        command::is_enabled(&AppCommand::Viewer(copy_probe), &self.state);
                     if ui
                         .add_enabled(has_range, egui::Button::new("Cut  ⌘X"))
                         .clicked()
@@ -1340,13 +1352,25 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_range, egui::Button::new("Copy  ⌘C"))
+                        .add_enabled(can_copy, egui::Button::new("Copy  ⌘C"))
                         .clicked()
                     {
                         if let Some((start, end)) = sel_range {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
                                 start,
                                 end,
+                                view: None,
+                            }));
+                        } else if self
+                            .state
+                            .workspace
+                            .active_view()
+                            .is_some_and(|v| v.selection.selected_primer().is_some())
+                        {
+                            // Bare primer selection — same zero-range trigger as ⌘C.
+                            menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
+                                start: 0,
+                                end: 0,
                                 view: None,
                             }));
                         }
@@ -1724,7 +1748,7 @@ impl eframe::App for SeqForgeApp {
                     // Staged-edit indicator (Phase 13.6). Lives here rather than
                     // floating in the canvas; the accent colour marks the active
                     // staging mode. The track-changes diff wash stays in-canvas.
-                    let clipboard = self.state.clipboard.as_ref().map(|s| s.bytes());
+                    let clipboard = self.state.clipboard.bytes();
                     if let Some(summary) = self
                         .state
                         .workspace
@@ -1920,7 +1944,7 @@ impl eframe::App for SeqForgeApp {
                             pending_commands,
                             overlays,
                             focus,
-                            clipboard: clipboard.as_ref().map(|s| s.bytes()),
+                            clipboard,
                             config: config.clone(),
                             recipe_combo_selection,
                             recipe_fidelity,

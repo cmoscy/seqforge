@@ -365,12 +365,11 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             ViewerRequest::Undo { .. } => active_can_undo(state),
             ViewerRequest::Redo { .. } => active_can_redo(state),
             ViewerRequest::Cut { .. }
-            | ViewerRequest::Copy { .. }
             | ViewerRequest::Delete { .. }
             | ViewerRequest::ReverseComplement { .. } => has_range_selection(state),
+            ViewerRequest::Copy { .. } => has_copy_operand(state),
             ViewerRequest::Paste { .. } => {
-                state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
-                    && state.workspace.active_view().is_some()
+                !state.clipboard.is_empty() && state.workspace.active_view().is_some()
             }
             ViewerRequest::Save { .. } => active_dirty(state),
             ViewerRequest::Open { .. } => true,
@@ -385,8 +384,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
             has_range_selection(state)
         }
         StageEdit(StagedEdit::Paste { .. }) => {
-            state.clipboard.as_ref().is_some_and(|c| !c.is_empty())
-                && state.workspace.active_view().is_some()
+            !state.clipboard.is_empty() && state.workspace.active_view().is_some()
         }
         Select(_) => true,
         // New Feature (create form from the menu) needs a range selection;
@@ -479,6 +477,16 @@ pub(super) fn active_selection(state: &AppState) -> Option<Selection> {
 /// cursor) — gates Cut/Copy/Delete/Reverse-Complement.
 pub(super) fn has_range_selection(state: &AppState) -> bool {
     active_selection(state).is_some_and(|s| !s.is_cursor())
+}
+
+/// True when Copy has an operand: a range selection **or** a selected primer
+/// (keyboard ⌘C already copies the oligo; menu Copy must match).
+pub(super) fn has_copy_operand(state: &AppState) -> bool {
+    has_range_selection(state)
+        || state
+            .workspace
+            .active_view()
+            .is_some_and(|v| v.selection.selected_primer().is_some())
 }
 
 /// `(can_undo, can_redo)` for the active buffer's history, `(false, false)` if

@@ -22,6 +22,7 @@ use seqforge_core::{
     Selection, Strand, View, ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
 };
 
+use crate::clipboard::filter_bases as iupac_filter;
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 
@@ -39,21 +40,6 @@ pub use translation::TranslationDisplay;
 /// Cursor blink half-period (ms): the cursor toggles visible/hidden each
 /// interval while the viewer has focus.
 const BLINK_MS: u64 = 500;
-
-/// IUPAC nucleotide alphabet (DNA + ambiguity codes). Typed characters outside
-/// it are silently dropped (plan §6) so junk keystrokes never reach the edit
-/// layer; `edit::parse_bases` re-validates defensively for CLI/agent input.
-const IUPAC: &[u8] = b"ACGTURYSWKMBDHVN";
-
-/// Keep only IUPAC codes from typed text, upper-cased; drop everything else.
-fn iupac_filter(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| {
-            let u = c.to_ascii_uppercase();
-            (u.is_ascii() && IUPAC.contains(&(u as u8))).then_some(u)
-        })
-        .collect()
-}
 
 /// A staged in-canvas edit (§6 / ROADMAP decision 10). Armed by keyboard input,
 /// previewed, and committed to exactly one `ViewerRequest` on `Enter`. The
@@ -317,8 +303,8 @@ fn move_focus(base: usize, delta: isize, seq_len: usize) -> usize {
 /// `PendingEdit`. In-canvas edits stage (commit on `Enter`, cancel on `Esc`):
 /// typing, Backspace/Delete, **⌘X (Cut)** and **⌘V (Paste)** all arm a staged
 /// edit previewed before commit. ⌘C (Copy, read-only) and undo / redo / save
-/// post directly — they have no "after" state to preview. `clipboard` gates
-/// arming a Paste (nothing to paste ⇒ no stage). Never mutates the buffer or
+/// post directly — they have no "after" state to preview. Paste reconciles the
+/// OS clipboard (via `clipboard`) before arming. Never mutates the buffer or
 /// `view.selection`.
 fn handle_keyboard(
     pending: &mut Option<PendingEdit>,
@@ -326,7 +312,7 @@ fn handle_keyboard(
     view: &View,
     buffer: &Buffer,
     line_width: usize,
-    clipboard: Option<&[u8]>,
+    clipboard: &mut crate::clipboard::ClipboardState,
     cmds: &mut Vec<PendingCommand>,
 ) {
     let seq_len = buffer.text.len();
@@ -468,12 +454,16 @@ fn handle_keyboard(
     // previewed before commit — both lower to the same Cut/Paste the menu/CLI
     // post.
     let (mut want_cut, mut want_copy, mut want_paste) = (false, false, false);
+    let mut paste_hint: Option<String> = None;
     ui.input(|i| {
         for ev in &i.events {
             match ev {
                 egui::Event::Cut => want_cut = true,
                 egui::Event::Copy => want_copy = true,
-                egui::Event::Paste(_) => want_paste = true,
+                egui::Event::Paste(s) => {
+                    want_paste = true;
+                    paste_hint = Some(s.clone());
+                }
                 _ => {}
             }
         }
@@ -517,10 +507,11 @@ fn handle_keyboard(
         return;
     }
     if want_paste {
-        // Only arm if there's something to paste; the preview reads the same
-        // in-memory clipboard the commit will.
+        // OS-authoritative: reconcile (prefer Event::Paste text as the plain
+        // hint) then arm only if there is something to paste.
+        crate::clipboard::sync_with_plain_hint(clipboard, paste_hint.as_deref());
         if let Some(pos) = cursor.or(range.map(|(s, _)| s)) {
-            if clipboard.is_some_and(|c| !c.is_empty()) {
+            if !clipboard.is_empty() {
                 *pending = Some(PendingEdit::Paste { pos });
             }
         }
@@ -770,7 +761,7 @@ impl SequenceView {
         cmds: &mut Vec<PendingCommand>,
         cfg: &Config,
         focused: bool,
-        clipboard: Option<&[u8]>,
+        clipboard: &mut crate::clipboard::ClipboardState,
     ) {
         // ── Drive in-canvas staging from the keyboard, *before* layout ──
         // Editing must run before sizing so the realized diff preview drives
@@ -795,7 +786,7 @@ impl SequenceView {
         // Rebuild the memoized realized-diff preview iff the fingerprint
         // changed, then take it out as an owned local so the render closure can
         // freely mutate `self` without aliasing the borrow.
-        self.refresh_preview(buffer, annotations, clipboard);
+        self.refresh_preview(buffer, annotations, clipboard.bytes());
         let preview = self.preview.take();
         let staging = preview.is_some();
         // Render source: the speculative preview while staging, else the

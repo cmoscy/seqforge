@@ -377,9 +377,22 @@ Shortcuts (read in `viewer.rs` only when `response.has_focus()`; `request_focus(
 
 Non-IUPAC characters are silently dropped from staged text (`iupac_filter`); whitespace in a paste is stripped. `edit::parse_bases` re-validates defensively for CLI/agent input.
 
-### 7. Clipboard — arboard + in-memory fallback
+### 7. Clipboard — OS-authoritative + rich cache
 
-`state.clipboard: Option<Vec<u8>>` lives on `AppState` as an in-memory fallback for headless/test paths. For GUI, `arboard 3.x` is added to `seqforge-app/Cargo.toml` only (not `seqforge-core`). `edit::apply_cut` and `edit::apply_copy` write to both; `edit::apply_paste` reads arboard first, falls back to `state.clipboard`.
+`AppState.clipboard: ClipboardState` caches a [`SeqSlice`] (bases + carried
+features/primers). The **OS clipboard is authoritative** for what Paste does:
+
+- **Copy/cut** write the rich slice into the cache and mirror bases as plain
+  text via `arboard` (`clipboard::set_slice`).
+- **Paste / menu enablement / staged preview** call `clipboard::sync_from_os`
+  (or `sync_with_plain_hint` from `Event::Paste`). If pasteboard generation
+  still matches our last write, the rich cache is kept; otherwise the cache
+  becomes bytes-only from the current OS text (IUPAC-filtered).
+- Headless / unit tests use `memory_only` (default under `cfg(test)`): no OS
+  I/O, so tests that fill the cache directly keep working.
+
+Private rich pasteboard types (cross-process annotated paste) are deferred;
+generation ownership covers the single-process “most recent copy wins” UX.
 
 ### 8. Dirty state + save UX
 
@@ -555,7 +568,7 @@ Six refinements the surrounding code forces (each folded into a sub-step below):
 
 - [x] **12a — types (core) + CLI flatten.** Added the v0.2 `ViewerRequest` variants from §4, each with `view: Option<ViewId>` and doc comments that read as CLI help. Added `target_view()` arms; `unreachable!` arms in `core::dispatch` (**A**); `ViewerResponse::Edited { len, changed }` (**C**); refreshed the stale `dispatch` doc comment; 6 serde round-trip tests. **Also flattened `ViewerRequest` into the CLI `Cmd` enum** (deleted the per-variant mirror + map) — see the CLI-surface note above. *Done: workspace compiles, `dispatch` exhaustive, tests + clippy green, `seqforge --help` lists all 14 editor ops with the `rc` alias.*
 - [x] **12b — content-given ops (`command/edit.rs`).** `apply_insert/delete/replace` → `workspace.edit(...)`; `apply_undo/redo` → `workspace.undo/redo`. Extracted `resolve_target` (**B**, shared with `file.rs`); mapped variants to `EditKind` (**E**: Insert→Insert, Delete→Delete, Replace/RC/Paste→Other). Added `parse_bases` (IUPAC validate + whitespace-strip, `InvalidInput` on bad base). 19 headless unit tests. *Done.*
-- [x] **12c — composed + clipboard.** `apply_reverse_complement` — first **composed edit**: `read_slice` → `seqforge_bio::reverse_complement` → `workspace.edit`. `apply_cut/copy/paste` via `state.clipboard: Option<Vec<u8>>` (new `AppState` field; copy is read-only, no history; paste is `Other` so it never coalesces with typing). **arboard OS-clipboard mirror deferred** to Phase 13 — in-memory clipboard covers terminal/CLI/test now. *Done.*
+- [x] **12c — composed + clipboard.** `apply_reverse_complement` — first **composed edit**: `read_slice` → `seqforge_bio::reverse_complement` → `workspace.edit`. `apply_cut/copy/paste` via clipboard cache (later upgraded to annotated `SeqSlice` + OS-authoritative sync in `clipboard.rs`). Paste is `Other` so it never coalesces with typing. *Done.*
 - [x] **12d — feature ops.** `apply_add_feature/remove_feature/rename_feature` via `with_buffer_mut`; bump `buf.version`; `AddFeature` validates `start < end <= len`. **Not yet undoable** (annotation-only edits don't record history) — feature-op undo is Phase 14. *Done.*
 - [x] **12e — routing + save side-effects.** Editor variants routed in `command/mod.rs` `Viewer(req)` arm → `edit::*` (read-scoped GoTo/Find/Enzymes still fall through to `dispatch_active`). Added `AppCommand::{SaveDocument { view, path }, OpenSaveAs { view }}`. `file::save_buffer` is the synchronous core (→ `seqforge_bio::save`, clear `dirty`, toast); `apply_save` calls it directly when `source_path` is `Some` (immediate CLI feedback — **F** refined: only Save-As *needs* the dialog round-trip), else routes to Save-As. Save-As opens a save-mode `FileDialog`; new `AppState.pending_save_as: Option<ViewId>` discriminates it in the shared pick handler (`app.rs`) → enqueues `SaveDocument`. *Done.* ✅ **CLI/terminal walk verified by user.**
 - [x] **12f — menu + `is_enabled`.** `Edit → Undo/Redo · Cut/Copy/Paste/Delete · Reverse Complement Selection`, `File → Save/Save As…`. Editor variants broken out of `is_enabled` (**D**): Undo/Redo→`can_undo`/`can_redo` (read through `buffers.history`), Save→`dirty` (shared-borrow read of the buffer), Cut/Copy/Delete/RC→range selection, Paste→non-empty clipboard. Menu reads the live selection for operands; greyed when the operand is absent. Headless regression test `menu_enablement_tracks_state`. *Done: 161 tests + clippy + fmt green.*

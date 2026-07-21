@@ -3,6 +3,7 @@ mod assembly;
 mod browser;
 mod cache;
 mod cli_install;
+mod clipboard;
 mod command;
 mod config;
 mod event;

@@ -29,9 +29,8 @@ pub struct TabViewer<'a> {
     pub pending_commands: &'a mut Vec<PendingCommand>,
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
-    /// In-memory clipboard bytes (`AppState.clipboard`), passed to the sequence
-    /// viewer so a staged Paste can preview the clipboard contents.
-    pub clipboard: Option<&'a [u8]>,
+    /// Session clipboard (OS-synced cache); sequence viewer stages Paste from it.
+    pub clipboard: &'a mut crate::clipboard::ClipboardState,
     /// Per-frame snapshot of the active config; cheap to clone.
     pub config: Arc<Config>,
     /// Session combo checkbox sets for assembly Run subset.
@@ -133,12 +132,11 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // Computed before the `self` destructure below borrows it.
                 let view_focused =
                     self.focus.scope == FocusScope::View(view_id) && self.overlays.is_empty();
-                // `Option<&[u8]>` is `Copy`; read it out before the destructure.
-                let clipboard = self.clipboard;
                 let TabViewer {
                     workspace,
                     pending_commands,
                     config,
+                    clipboard,
                     ..
                 } = self;
                 // ViewKind dispatch (Stage 2.5d). Today only `TextView`

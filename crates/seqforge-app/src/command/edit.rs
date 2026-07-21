@@ -78,6 +78,13 @@ pub(super) fn apply_stage_edit(
     // Focus the target pane so the stage survives + Enter reaches it.
     state.workspace.focus_view(vid);
     state.focus.set_scope(FocusScope::View(vid));
+    // Reconcile paste payload before borrowing the sequence view.
+    if matches!(edit, StagedEdit::Paste { .. }) {
+        crate::clipboard::sync_from_os(state);
+        if state.clipboard.is_empty() {
+            return Ok(None);
+        }
+    }
     if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
         match edit {
             StagedEdit::Cut { start, end } => sv.stage_cut(start, end),
@@ -91,27 +98,7 @@ pub(super) fn apply_stage_edit(
 /// IUPAC nucleotide alphabet (DNA + ambiguity codes). Validation is the command
 /// layer's job so a malformed CLI/agent insert is rejected with a clear error;
 /// the GUI keystroke path (Phase 13) pre-filters before it ever gets here.
-const IUPAC: &[u8] = b"ACGTURYSWKMBDHVN";
-
-/// Uppercase, strip ASCII whitespace, validate IUPAC. Returns the clean bytes
-/// or `InvalidInput` naming the first offending character.
-fn parse_bases(s: &str) -> Result<Vec<u8>, DispatchError> {
-    let mut out = Vec::with_capacity(s.len());
-    for ch in s.chars() {
-        if ch.is_ascii_whitespace() {
-            continue;
-        }
-        let up = ch.to_ascii_uppercase();
-        if up.is_ascii() && IUPAC.contains(&(up as u8)) {
-            out.push(up as u8);
-        } else {
-            return Err(DispatchError::InvalidInput(format!(
-                "`{ch}` is not an IUPAC nucleotide code"
-            )));
-        }
-    }
-    Ok(out)
-}
+use crate::clipboard::{parse_bases, set_slice, sync_from_os};
 
 /// Read `[start, end)` from the target buffer, validating the range. Used by the
 /// composed edits (RC, cut, copy) that need the old bytes before splicing.
@@ -329,7 +316,7 @@ pub(super) fn apply_copy(
         None => extract_region(state, vid, start..end)?,
     };
     let len = slice.bytes.len();
-    state.clipboard = Some(slice);
+    set_slice(state, slice);
     // Copy doesn't mutate the buffer — report the copied length, not a buffer
     // change, and record no history.
     Ok(Some(ViewerResponse::Edited {
@@ -348,7 +335,7 @@ pub(super) fn apply_cut(
     // Carry the annotated slice, then delete the region (which shifts/drops the
     // remaining annotations via the splice policy).
     let slice = extract_region(state, vid, start..end)?;
-    state.clipboard = Some(slice);
+    set_slice(state, slice);
     state
         .workspace
         .edit(vid, EditKind::Delete, start..end, &[])?;
@@ -361,8 +348,11 @@ pub(super) fn apply_paste(
     pos: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
+    // OS clipboard is authoritative — reconcile before trusting the cache.
+    sync_from_os(state);
     let slice = state
         .clipboard
+        .slice
         .clone()
         .ok_or_else(|| DispatchError::InvalidInput("clipboard is empty".into()))?;
     if slice.bytes.is_empty() {
@@ -946,7 +936,10 @@ mod tests {
         let mut s = state_with(b"ATGCATGCATGCATGCATGC"); // 20 bp
         add_feat(&mut s, 4, 12, "gene");
         apply_copy(&mut s, None, 4, 12).unwrap();
-        assert!(s.clipboard.is_some(), "region copy fills the clipboard");
+        assert!(
+            s.clipboard.slice.is_some(),
+            "region copy fills the clipboard"
+        );
 
         // New empty circular buffer becomes the active view.
         crate::command::file::apply_new(&mut s, true, Some("construct".into())).unwrap();
@@ -1063,7 +1056,7 @@ mod tests {
         apply_cut(&mut s, None, 2, 4).unwrap();
         assert_eq!(text(&mut s), b"ATAA");
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"GC".as_slice())
         );
     }
@@ -1087,7 +1080,7 @@ mod tests {
         let resp = apply_copy(&mut s, None, 0, 2).unwrap();
         assert_eq!(text(&mut s), b"ATGC");
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"AT".as_slice())
         );
         assert!(matches!(
@@ -1121,7 +1114,7 @@ mod tests {
         // Copying the primer's exact footprint copies the oligo, not "TGC".
         apply_copy(&mut s, None, 5, 8).unwrap();
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"GCA".as_slice())
         );
 
@@ -1129,7 +1122,7 @@ mod tests {
         // gate is `range == binding`, so CLI/agent range copies are unaffected.
         apply_copy(&mut s, None, 0, 3).unwrap();
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"AAA".as_slice())
         );
     }
@@ -1158,7 +1151,7 @@ mod tests {
 
         apply_copy(&mut s, None, 0, 0).unwrap();
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"GCA".as_slice())
         );
     }
@@ -1186,7 +1179,7 @@ mod tests {
 
         apply_copy(&mut s, None, 0, 0).unwrap();
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"TTTGGG".as_slice())
         );
     }
@@ -1196,7 +1189,7 @@ mod tests {
         let mut s = state_with(b"AAATGCGG");
         apply_copy(&mut s, None, 3, 6).unwrap();
         assert_eq!(
-            s.clipboard.as_ref().map(|c| c.bytes()),
+            s.clipboard.slice.as_ref().map(|c| c.bytes()),
             Some(b"TGC".as_slice())
         );
     }
@@ -1204,7 +1197,7 @@ mod tests {
     #[test]
     fn paste_inserts_clipboard() {
         let mut s = state_with(b"ATGC");
-        s.clipboard = Some(clip(b"NN"));
+        s.clipboard.slice = Some(clip(b"NN"));
         apply_paste(&mut s, None, 4).unwrap();
         assert_eq!(text(&mut s), b"ATGCNN");
     }
@@ -2296,7 +2289,7 @@ mod tests {
         assert!(is_enabled(&save, &s));
 
         // Clipboard populated → paste available.
-        s.clipboard = Some(clip(b"AA"));
+        s.clipboard.slice = Some(clip(b"AA"));
         assert!(is_enabled(&paste, &s));
 
         // Range selection → cut available; a bare cursor does not enable it.
