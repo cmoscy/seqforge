@@ -46,8 +46,6 @@ pub struct FontSettings {
     pub label_size: f32,
     /// Ruler tick labels.
     pub ruler_size: f32,
-    /// General UI text (header rows, etc).
-    pub ui_size: f32,
 }
 
 impl Default for FontSettings {
@@ -56,7 +54,6 @@ impl Default for FontSettings {
             sequence_size: 13.0,
             label_size: 12.0,
             ruler_size: 11.0,
-            ui_size: 13.0,
         }
     }
 }

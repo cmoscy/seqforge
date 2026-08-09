@@ -14,7 +14,6 @@ theme = "default-dark"
 sequence_size = 13.0   # DNA letters in the viewer (monospace)
 label_size    = 12.0   # feature names on annotation bars
 ruler_size    = 11.0   # ruler tick labels
-ui_size       = 13.0   # header / chrome text
 
 [editor]
 left_margin           = 30.0
