@@ -18,6 +18,7 @@ use super::row::{
 };
 use super::{InspectorState, InspectorTab};
 use crate::command::{AppCommand, PendingCommand};
+use crate::config::Theme;
 use crate::workspace::Workspace;
 
 /// The enzyme catalog (name + Type IIs / overhang-length projection), built once.
@@ -254,7 +255,7 @@ fn commit_primer_outcome(
 /// plus the gesture into edit mode. Returns `true` when the user asks to edit
 /// (Edit button; double-click is the other entry point). Enqueues its own
 /// site/rescan commands. Mirror of [`super::feature`]'s `feature_viewer`.
-fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCommand>) -> bool {
+fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCommand>, _theme: &Theme) -> bool {
     let mut edit = false;
     detail_frame().show(ui, |ui| {
         for line in primer_detail_lines(p) {
@@ -346,7 +347,7 @@ fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCom
 /// — a **staged** string mutation, so the QC readout / site list update live and
 /// commit still rides the existing `UpdatePrimer`. The tail leaves the binding
 /// footprint untouched (it's 5'), so `decompose_primer` treats it as tail.
-fn insert_tools(ui: &mut egui::Ui, d: &mut PrimerDraft) {
+fn insert_tools(ui: &mut egui::Ui, d: &mut PrimerDraft, theme: &Theme) {
     let salt = d.id.map_or(0, |id| id.0.wrapping_add(1));
     ui.horizontal_wrapped(|ui| {
         ui.label("Insert");
@@ -404,7 +405,7 @@ fn insert_tools(ui: &mut egui::Ui, d: &mut PrimerDraft) {
         }
     });
     if let Some(err) = &d.insert.error {
-        ui.colored_label(egui::Color32::from_rgb(0xE0, 0x60, 0x60), err);
+        ui.colored_label(theme.ui.error.0, err);
     }
 }
 
@@ -414,7 +415,7 @@ fn insert_tools(ui: &mut egui::Ui, d: &mut PrimerDraft) {
 /// is confirmed, else `None`. **Enter always commits the current primary action**
 /// (Save when editing, the delete when armed) — the canvas staging grammar.
 /// Carries a live Tm/%GC/self-structure QC readout off the draft oligo.
-fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft) -> Option<EditOutcome> {
+fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft, theme: &Theme) -> Option<EditOutcome> {
     let mut outcome = None;
     let mut submit_on_enter = false;
     let grid_salt = d.id.map_or(0, |id| id.0.wrapping_add(1));
@@ -482,7 +483,7 @@ fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft) -> Option<EditOutcome> 
             });
 
         ui.add_space(2.0);
-        insert_tools(ui, d);
+        insert_tools(ui, d, theme);
 
         // Live QC readout off the draft oligo (Phase 0.5 thermo). The evaluation
         // layer is total + self-describing (decision 12): Tm is a `Result` whose
@@ -540,7 +541,7 @@ fn primer_editor(ui: &mut egui::Ui, d: &mut PrimerDraft) -> Option<EditOutcome> 
                     ))
                     .color(egui::Color32::WHITE),
                 )
-                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
+                .fill(theme.ui.danger.0);
                 if (ui.add(btn).clicked() || enter) && d.to_delete_request().is_some() {
                     outcome = Some(EditOutcome::Delete(d.to_delete_request().expect("checked")));
                 }
@@ -614,7 +615,7 @@ impl InspectorState {
     /// renders at the top. Editing/creating is pane-local until commit, which
     /// posts one `UpdatePrimer`/`AddPrimer` (the CLI verb) through the single
     /// applier + history. Mirrors `show_features`.
-    pub(super) fn show_primers(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {
+    pub(super) fn show_primers(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
         // Attached-first, floating oligos last (list mirrors the map top→bottom).
         let mut primers = self.primers().to_vec();
         primers.sort_by_key(|p| p.binding.as_ref().map_or(usize::MAX, |b| b.start));
@@ -637,7 +638,7 @@ impl InspectorState {
                     ui.add_space(6.0);
                     ui.strong("New primer");
                 });
-                if let Some(outcome) = primer_editor(ui, d) {
+                        if let Some(outcome) = primer_editor(ui, d, theme) {
                     commit_primer_outcome(outcome, editing, pending);
                 }
                 ui.separator();
@@ -684,7 +685,7 @@ impl InspectorState {
             for p in &primers {
                 let in_pair = pair.is_some_and(|(f, r)| f == p.id || r == p.id);
                 let is_sel = selected == Some(p.id) || in_pair;
-                let resp = row_shell(ui, &primer_display_row(p, is_sel));
+                let resp = row_shell(ui, &primer_display_row(p, is_sel), theme);
                 if resp.double_clicked() {
                     *editing = Some(PrimerDraft::from_info(p));
                     pending.push((AppCommand::RevealPrimer { id: p.id }, None));
@@ -708,10 +709,10 @@ impl InspectorState {
                     let editing_this = editing.as_ref().is_some_and(|d| d.id == Some(p.id));
                     if editing_this {
                         let d = editing.as_mut().expect("editing_this ⇒ Some");
-                        if let Some(outcome) = primer_editor(ui, d) {
+                if let Some(outcome) = primer_editor(ui, d, theme) {
                             commit_primer_outcome(outcome, editing, pending);
                         }
-                    } else if primer_viewer(ui, p, pending) {
+                    } else if primer_viewer(ui, p, pending, theme) {
                         *editing = Some(PrimerDraft::from_info(p));
                         pending.push((AppCommand::RevealPrimer { id: p.id }, None));
                     }

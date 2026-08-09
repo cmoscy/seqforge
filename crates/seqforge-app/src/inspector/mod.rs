@@ -26,6 +26,7 @@ use seqforge_core::{
 };
 
 use crate::command::{AppCommand, PendingCommand};
+use crate::config::Theme;
 use crate::viewer::PrimerDisplay;
 use crate::workspace::Workspace;
 
@@ -378,7 +379,7 @@ impl InspectorState {
 
     /// Render the active sub-tab. Row interactions enqueue commands only
     /// (single-applier contract preserved).
-    pub fn show(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {
+    pub fn show(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
         if !self.has_view {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| ui.weak("No file open."));
@@ -470,9 +471,9 @@ impl InspectorState {
         }
 
         match self.tab {
-            InspectorTab::Primers => self.show_primers(ui, pending),
-            InspectorTab::CutSites => self.show_cutsites(ui, pending),
-            InspectorTab::Features => self.show_features(ui, pending),
+            InspectorTab::Primers => self.show_primers(ui, pending, theme),
+            InspectorTab::CutSites => self.show_cutsites(ui, pending, theme),
+            InspectorTab::Features => self.show_features(ui, pending, theme),
         }
     }
 

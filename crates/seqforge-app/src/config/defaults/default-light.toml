@@ -13,6 +13,17 @@ label_text     = "#FFFFFF"   # used on dark feature swatches
 label_text_alt = "#101010"   # used on light feature swatches (auto-picked via WCAG)
 ruler_text     = "#606060"
 mismatch       = "#C77A10"   # amber accent for a primer's mismatched bases
+hover_wash     = "#969BA540"  # neutral wash over hovered elements
+danger         = "#B03030"     # destructive action fill
+danger_hover   = "#E06060"     # danger button hover
+warn           = "#E0A030"     # warning indicators
+error          = "#E06060"     # error text
+methyl_blocked = "#808080"     # methylated/blocked enzyme text
+
+[diff]
+add_bg   = "#28784B46"
+del_bg   = "#782D2B46"
+del_line = "#D65C5C"
 
 [features]
 gene       = "#3B7BD8"
@@ -33,3 +44,8 @@ unknown = "#A8A8A85A"
 viewport  = "#0000001C"
 selection = "#7AB8FF5A"
 cursor    = "#000000"
+
+[translation]
+stop     = "#D24646"
+start    = "#46AF5A"
+orf_wash = "#5AAF6A1A"

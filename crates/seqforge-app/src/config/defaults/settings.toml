@@ -45,6 +45,9 @@ spine_feature_gap         = 3.0
 # Panel sizes (Files / Terminal / Inspector) are managed by the window manager
 # — drag a panel edge to resize; egui remembers it. No [layout] fractions.
 
+[inspector]
+follow_selection = true   # auto-switch inspector tab when selection changes
+
 [terminal]
 # Empty = use $SHELL (or /bin/bash as a fallback)
 shell = ""

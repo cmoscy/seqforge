@@ -9,6 +9,8 @@
 
 use seqforge_core::{PrimerInfo, Strand};
 
+use crate::config::Theme;
+
 /// Tone for a row's state dot / name (mapped to a colour at render time).
 pub(super) enum Tone {
     Normal,
@@ -52,7 +54,7 @@ pub(super) enum EditOutcome {
 /// placement, one logic across Inspector tabs. `icon` conveys intent (`X` =
 /// reversible remove-from-view; `TRASH` = destructive delete). Red-tinted on
 /// hover. Returns its response so callers add hover text / read `clicked()`.
-pub(super) fn remove_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
+pub(super) fn remove_button(ui: &mut egui::Ui, theme: &Theme, icon: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
     let hovered = resp.hovered();
     if hovered {
@@ -60,7 +62,7 @@ pub(super) fn remove_button(ui: &mut egui::Ui, icon: &str) -> egui::Response {
             .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.bg_fill);
     }
     let color = if hovered {
-        egui::Color32::from_rgb(0xE0, 0x60, 0x60)
+        theme.ui.danger_hover.0
     } else {
         ui.visuals().weak_text_color()
     };
@@ -109,9 +111,9 @@ pub(super) fn visibility_button(ui: &mut egui::Ui, visible: bool) -> egui::Respo
 /// Paint a primer state dot (filled for Confirmed/Drifted, hollow ring for
 /// Detached), coloured by tone. Painted rather than a font glyph because the
 /// bundled font tofus ●◐○, and colour is the primary signal for a status dot.
-fn state_dot(ui: &mut egui::Ui, tone: &Tone) {
+fn state_dot(ui: &mut egui::Ui, theme: &Theme, tone: &Tone) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 14.0), egui::Sense::hover());
-    let color = tone_color(ui, tone);
+    let color = tone_color(ui, theme, tone);
     let c = rect.center();
     match tone {
         Tone::Dim => {
@@ -127,7 +129,7 @@ fn state_dot(ui: &mut egui::Ui, tone: &Tone) {
 /// Draw a row's compact shell (fill + glyph + dot + name + right cells) and return
 /// its click-sensed response. Shared by every tab so their rows look and behave
 /// identically.
-pub(super) fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
+pub(super) fn row_shell(ui: &mut egui::Ui, row: &Row, theme: &Theme) -> egui::Response {
     let fill = if row.selected {
         ui.visuals().selection.bg_fill
     } else {
@@ -144,7 +146,7 @@ pub(super) fn row_shell(ui: &mut egui::Ui, row: &Row) -> egui::Response {
                     ui.weak(g);
                 }
                 if let Some(tone) = &row.dot {
-                    state_dot(ui, tone);
+                    state_dot(ui, theme, tone);
                 }
                 if row.dim_name {
                     ui.weak(&row.name);
@@ -192,10 +194,10 @@ pub(super) fn strand_flag(strand: Strand) -> &'static str {
     }
 }
 
-fn tone_color(ui: &egui::Ui, tone: &Tone) -> egui::Color32 {
+fn tone_color(ui: &egui::Ui, theme: &Theme, tone: &Tone) -> egui::Color32 {
     match tone {
         Tone::Normal => ui.visuals().text_color(),
-        Tone::Warn => egui::Color32::from_rgb(0xE0, 0xA0, 0x30),
+        Tone::Warn => theme.ui.warn.0,
         Tone::Dim => ui.visuals().weak_text_color(),
     }
 }

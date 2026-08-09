@@ -1900,13 +1900,13 @@ impl eframe::App for SeqForgeApp {
                                     minimap.show(ui, workspace, pending_commands, config);
                                 });
                             egui::CentralPanel::default().show_inside(ui, |ui| {
-                                inspector.show(ui, pending_commands);
+                                inspector.show(ui, pending_commands, &config.theme);
                             });
                         }
                         // Only the Inspector: it fills the whole column.
                         (true, false) => {
                             egui::CentralPanel::default().show_inside(ui, |ui| {
-                                inspector.show(ui, pending_commands);
+                                inspector.show(ui, pending_commands, &config.theme);
                             });
                         }
                         // Only the minimap: it fills the whole column.

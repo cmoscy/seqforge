@@ -606,6 +606,12 @@ pub(crate) struct Style {
     pub orf_wash: Color32,
     /// Amber accent for a primer's mismatched annealed bases.
     pub primer_mismatch: Color32,
+    /// Green wash behind added bases in staged diff preview.
+    pub diff_add_bg: Color32,
+    /// Red wash behind deleted bases in staged diff preview.
+    pub diff_del_bg: Color32,
+    /// Strikethrough line on deleted bases in staged diff preview.
+    pub diff_del_line: Color32,
 }
 
 // ── Track trait + per-block context/geometry ───────────────────────────────────
@@ -1205,6 +1211,9 @@ mod tests {
             aa_start: c,
             orf_wash: c,
             primer_mismatch: c,
+            diff_add_bg: c,
+            diff_del_bg: c,
+            diff_del_line: c,
         }
     }
 

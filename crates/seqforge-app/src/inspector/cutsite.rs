@@ -10,6 +10,7 @@ use seqforge_core::{CutSite, CutSiteKey, MethylState};
 use super::InspectorState;
 use super::row::remove_button;
 use crate::command::{AppCommand, PendingCommand};
+use crate::config::Theme;
 use crate::overlay::enzyme_rows;
 
 /// Cached methylation verdict for the site keyed by (enzyme, recognition_start),
@@ -68,17 +69,17 @@ fn preset_label_for_query(query: &str) -> Option<&'static str> {
     PRESET_MENU.iter().find(|(_, qs)| *qs == q).map(|(l, _)| *l)
 }
 
-fn methyl_rich_text(text: String, state: MethylState) -> egui::RichText {
+fn methyl_rich_text(text: String, state: MethylState, theme: &Theme) -> egui::RichText {
     let rt = egui::RichText::new(text);
     match state {
         MethylState::Cuttable => rt,
-        MethylState::Blocked => rt.weak().color(egui::Color32::GRAY),
+        MethylState::Blocked => rt.weak().color(theme.ui.methyl_blocked.0),
         MethylState::Impaired => rt.weak(),
     }
 }
 
 impl InspectorState {
-    pub(super) fn show_cutsites(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {
+    pub(super) fn show_cutsites(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
         // ── Query header (verb) ──────────────────────────────────────────
         ui.add_space(2.0);
         let mut submit_show = false;
@@ -256,7 +257,7 @@ impl InspectorState {
                     let name = if n == 0 {
                         egui::RichText::new(display_name).monospace().weak()
                     } else {
-                        methyl_rich_text(display_name, row_methyl).monospace()
+                        methyl_rich_text(display_name, row_methyl, theme).monospace()
                     };
                     let hover = match n {
                         0 => "No sites",
@@ -300,7 +301,7 @@ impl InspectorState {
                     // this drops the enzyme from the displayed set (reversible via
                     // re-query), not a destructive delete — hence ✕, not trash.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if remove_button(ui, egui_phosphor::regular::X)
+                        if remove_button(ui, theme, egui_phosphor::regular::X)
                             .on_hover_text(format!("Remove {} from view", r.name))
                             .clicked()
                         {
@@ -335,7 +336,7 @@ impl InspectorState {
                             if ui
                                 .add(egui::SelectableLabel::new(
                                     site_selected,
-                                    methyl_rich_text(label, site_methyl),
+                                    methyl_rich_text(label, site_methyl, theme),
                                 ))
                                 .clicked()
                             {

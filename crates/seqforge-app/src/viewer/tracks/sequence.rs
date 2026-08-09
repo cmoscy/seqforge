@@ -6,20 +6,11 @@
 //! (`plans/render-tracks.md`). Still a **legacy core** paint in T2 — T4 splits
 //! the decorations into their own paint helpers and memoizes layout.
 
-use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, Vec2};
+use egui::{Align2, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::viewer::track::{
     BlockCtx, BlockGeom, Hit, Track, build_strand_galley, search_hit_color,
 };
-
-/// Track-changes diff washes for the realized staged-edit preview (Phase 13.6).
-/// A faint background channel painted *behind* the per-base glyphs so the
-/// A/C/G/T foreground colours stay legible — the diff never recolours the bases.
-const DIFF_ADD_BG: Color32 = Color32::from_rgba_premultiplied(40, 120, 75, 70); // added
-const DIFF_DEL_BG: Color32 = Color32::from_rgba_premultiplied(120, 45, 45, 70); // removed
-/// Strikethrough line struck through kept-but-deleted bases (drawn over the
-/// glyphs, so opaque rather than a wash).
-const DIFF_DEL_LINE: Color32 = Color32::from_rgb(214, 92, 92);
 
 pub(crate) struct SequenceTrack;
 
@@ -182,7 +173,7 @@ impl Track for SequenceTrack {
                 painter.rect_filled(
                     Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, strand_h * 2.0)),
                     0.0,
-                    DIFF_ADD_BG,
+                    style.diff_add_bg,
                 );
             }
         }
@@ -195,7 +186,7 @@ impl Track for SequenceTrack {
                 painter.rect_filled(
                     Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, strand_h * 2.0)),
                     0.0,
-                    DIFF_DEL_BG,
+                    style.diff_del_bg,
                 );
             }
         }
@@ -243,7 +234,7 @@ impl Track for SequenceTrack {
             if vis_s < vis_e {
                 let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                 let ex = seq_x0 + (vis_e - block_start) as f32 * char_width;
-                let stroke = Stroke::new(1.5, DIFF_DEL_LINE);
+                let stroke = Stroke::new(1.5, style.diff_del_line);
                 for strand_top in [top_y, bot_y] {
                     let my = strand_top + char_height * 0.5;
                     painter.line_segment([Pos2::new(sx, my), Pos2::new(ex, my)], stroke);

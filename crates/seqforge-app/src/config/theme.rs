@@ -37,6 +37,8 @@ pub struct Theme {
     pub minimap: MinimapColors,
     #[serde(default)]
     pub translation: TranslationColors,
+    #[serde(default)]
+    pub diff: DiffColors,
 }
 
 impl Default for Theme {
@@ -171,6 +173,16 @@ pub struct UiColors {
     /// so it reads as a transient "here it sits" cue, distinct from the chromatic
     /// (blue) `selection` — hue, not just alpha, separates the two states.
     pub hover_wash: HexColor,
+    /// Red tint for destructive action fills (delete confirm buttons).
+    pub danger: HexColor,
+    /// Red tint for danger button hover state.
+    pub danger_hover: HexColor,
+    /// Amber accent for warning indicators (primer drifted state dot).
+    pub warn: HexColor,
+    /// Red for error text / labels.
+    pub error: HexColor,
+    /// Grey for methylated / blocked enzyme state text.
+    pub methyl_blocked: HexColor,
 }
 
 impl Default for UiColors {
@@ -184,6 +196,11 @@ impl Default for UiColors {
             ruler_text: HexColor(Color32::from_rgb(160, 160, 160)),
             mismatch: HexColor(Color32::from_rgb(235, 155, 40)),
             hover_wash: HexColor(Color32::from_rgba_unmultiplied(150, 155, 165, 64)),
+            danger: HexColor(Color32::from_rgb(0xB0, 0x30, 0x30)),
+            danger_hover: HexColor(Color32::from_rgb(0xE0, 0x60, 0x60)),
+            warn: HexColor(Color32::from_rgb(0xE0, 0xA0, 0x30)),
+            error: HexColor(Color32::from_rgb(0xE0, 0x60, 0x60)),
+            methyl_blocked: HexColor(Color32::GRAY),
         }
     }
 }
@@ -246,6 +263,28 @@ impl Default for MinimapColors {
             viewport: HexColor(Color32::from_rgba_unmultiplied(255, 255, 255, 28)),
             selection: HexColor(Color32::from_rgba_unmultiplied(173, 214, 255, 90)),
             cursor: HexColor(Color32::WHITE),
+        }
+    }
+}
+
+/// Colours for the staged-edit diff preview (Phase 13.6).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DiffColors {
+    /// Green wash behind added bases.
+    pub add_bg: HexColor,
+    /// Red wash behind deleted bases.
+    pub del_bg: HexColor,
+    /// Strikethrough line on deleted bases.
+    pub del_line: HexColor,
+}
+
+impl Default for DiffColors {
+    fn default() -> Self {
+        Self {
+            add_bg: HexColor(Color32::from_rgba_premultiplied(40, 120, 75, 70)),
+            del_bg: HexColor(Color32::from_rgba_premultiplied(120, 45, 45, 70)),
+            del_line: HexColor(Color32::from_rgb(214, 92, 92)),
         }
     }
 }

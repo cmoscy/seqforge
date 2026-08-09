@@ -924,6 +924,9 @@ impl SequenceView {
             aa_start: cfg.theme.translation.start.0,
             orf_wash: cfg.theme.translation.orf_wash.0,
             primer_mismatch: cfg.theme.ui.mismatch.0,
+            diff_add_bg: cfg.theme.diff.add_bg.0,
+            diff_del_bg: cfg.theme.diff.del_bg.0,
+            diff_del_line: cfg.theme.diff.del_line.0,
         };
 
         // Per-block layout: each block sizes itself to the items it contains

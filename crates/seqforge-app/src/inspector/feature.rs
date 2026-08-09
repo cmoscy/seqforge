@@ -11,6 +11,7 @@ use super::row::{
     EditOutcome, Row, detail_frame, row_shell, strand_flag, strand_glyph, visibility_button,
 };
 use crate::command::{AppCommand, PendingCommand};
+use crate::config::Theme;
 use crate::overlay::FEATURE_KINDS;
 
 /// Owned per-frame projection of a feature (avoids holding an annotations borrow).
@@ -116,7 +117,7 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
 /// Read-only detail shown under a selected (non-editing) feature row, plus the
 /// gesture into edit mode. Returns `true` when the user asks to edit (Edit button
 /// — double-clicking the row is the other entry point). Kept keyless.
-fn feature_viewer(ui: &mut egui::Ui, f: &FeatureRow) -> bool {
+fn feature_viewer(ui: &mut egui::Ui, f: &FeatureRow, _theme: &Theme) -> bool {
     let mut edit = false;
     detail_frame().show(ui, |ui| {
         ui.weak(format!(
@@ -143,7 +144,7 @@ fn feature_viewer(ui: &mut egui::Ui, f: &FeatureRow) -> bool {
 /// delete?") — mirroring the canvas staging grammar (arm → Enter → commit).
 /// Handled at the widget level: the keymap has no plain-key bindings, and the
 /// `Pane:Inspector:Editing` tag suppresses single-key user bindings while typing.
-fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome> {
+fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft, theme: &Theme) -> Option<EditOutcome> {
     let mut outcome = None;
     let mut submit_on_enter = false;
     detail_frame().show(ui, |ui| {
@@ -204,7 +205,7 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
                     ))
                     .color(egui::Color32::WHITE),
                 )
-                .fill(egui::Color32::from_rgb(0xB0, 0x30, 0x30));
+                .fill(theme.ui.danger.0);
                 if ui.add(btn).clicked() || enter {
                     outcome = Some(EditOutcome::Delete(d.to_delete_request()));
                 }
@@ -250,7 +251,7 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft) -> Option<EditOutcome
 }
 
 impl InspectorState {
-    pub(super) fn show_features(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>) {
+    pub(super) fn show_features(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
         if self.features.is_empty() {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| ui.weak("No features on this sequence."));
@@ -287,7 +288,7 @@ impl InspectorState {
                             }
                             pending.push((AppCommand::SetFeatureVisibility(v), None));
                         }
-                        row_shell(ui, &feature_display_row(f, is_sel))
+                        row_shell(ui, &feature_display_row(f, is_sel), theme)
                     })
                     .inner;
                 if resp.double_clicked() {
@@ -306,7 +307,7 @@ impl InspectorState {
                     let editing_this = editing.as_ref().is_some_and(|d| d.id == f.id);
                     if editing_this {
                         let d = editing.as_mut().expect("editing_this ⇒ Some");
-                        if let Some(outcome) = feature_editor(ui, d) {
+                        if let Some(outcome) = feature_editor(ui, d, theme) {
                             match outcome {
                                 EditOutcome::Commit(req) => {
                                     pending.push((AppCommand::Viewer(req), None));
@@ -319,7 +320,7 @@ impl InspectorState {
                                 EditOutcome::Cancel => *editing = None,
                             }
                         }
-                    } else if feature_viewer(ui, f) {
+                    } else if feature_viewer(ui, f, theme) {
                         *editing = Some(FeatureDraft::from_row(f));
                         pending.push((AppCommand::RevealFeature { id: f.id }, None));
                     }
