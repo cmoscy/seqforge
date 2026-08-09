@@ -115,8 +115,9 @@ impl FootprintStrands {
 }
 
 /// First hit whose rect contains `pos` and matches `extract`, in collection
-/// order. Callers query by variant in priority order (feature → search → cut →
-/// codon → seqpos), preserving the pre-unification resolution semantics.
+/// order. Callers query by variant in priority order (primer → feature → search
+/// → cut → codon → seqpos), preserving the pre-unification resolution
+/// semantics.
 pub(crate) fn find_hit<T>(
     hits: &[(Rect, Hit)],
     pos: Pos2,
@@ -898,6 +899,42 @@ pub(crate) fn build_strand_galley(
     painter.layout_job(job)
 }
 
+/// Which label text (if any) fits in `bar_w` under the `label_overflow` policy.
+///
+/// Split out of [`paint_feature_label`] so the fitting policy is testable
+/// without a `Painter`. The threshold itself is a tuning choice — this has been
+/// a fixed pixel cutoff in the past and is measured width today — so tests
+/// should pin the *properties* (never wider than the bar, never a bare ellipsis)
+/// rather than a specific cutoff.
+pub(crate) fn fit_label(
+    bar_w: f32,
+    label_char_w: f32,
+    overflow: LabelOverflow,
+    label: &str,
+) -> Option<String> {
+    let full_w = label.chars().count() as f32 * label_char_w;
+    if bar_w >= full_w {
+        return Some(label.to_string());
+    }
+    match overflow {
+        LabelOverflow::Truncate => None,
+        LabelOverflow::Extend => Some(label.to_string()),
+        LabelOverflow::Ellipsis => {
+            // Reserve one char-width for the ellipsis itself; a bar with room
+            // for nothing else draws no label at all rather than a bare "…".
+            let usable = (bar_w - label_char_w).max(0.0);
+            let n = (usable / label_char_w).floor() as usize;
+            if n == 0 {
+                None
+            } else {
+                let mut s: String = label.chars().take(n).collect();
+                s.push('…');
+                Some(s)
+            }
+        }
+    }
+}
+
 /// Draw a feature label according to the `label_overflow` policy.
 /// Contrast is guaranteed by the WCAG-aware text colour picker at the
 /// call site, so no outline is needed.
@@ -910,28 +947,9 @@ pub(crate) fn paint_feature_label(
     bar: Rect,
     label: &str,
 ) {
-    let bar_w = bar.width();
-    let full_w = label.chars().count() as f32 * label_char_w;
-    let text: Option<String> = if bar_w >= full_w {
-        Some(label.to_string())
-    } else {
-        match overflow {
-            LabelOverflow::Truncate => None,
-            LabelOverflow::Extend => Some(label.to_string()),
-            LabelOverflow::Ellipsis => {
-                let usable = (bar_w - label_char_w).max(0.0);
-                let n = (usable / label_char_w).floor() as usize;
-                if n == 0 {
-                    None
-                } else {
-                    let mut s: String = label.chars().take(n).collect();
-                    s.push('…');
-                    Some(s)
-                }
-            }
-        }
+    let Some(text) = fit_label(bar.width(), label_char_w, overflow, label) else {
+        return;
     };
-    let Some(text) = text else { return };
     painter.text(
         bar.center(),
         egui::Align2::CENTER_CENTER,
@@ -1171,12 +1189,9 @@ mod tests {
     use super::*;
     use crate::config::LabelOverflow;
     use crate::viewer::tracks::{
-        cut_sites::CutSitesTrack,
         features::FeaturesTrack,
         primers::{PrimerForwardTrack, PrimerReverseTrack},
-        ruler::RulerTrack,
         sequence::SequenceTrack,
-        translation::TranslationTrack,
     };
     use seqforge_core::{Annotations, Feature, Primer, Strand};
 
@@ -1233,6 +1248,154 @@ mod tests {
         Feature {
             raw_kind: raw_kind.to_string(),
             ..feat(range)
+        }
+    }
+
+    /// Owning fixture for `BlockCtx` tests.
+    ///
+    /// `BlockCtx<'a>` is 26 fields of borrows, so a builder can't return one
+    /// directly — it would borrow temporaries. This owns the inputs and hands
+    /// out a borrowed ctx via [`BlockFixture::ctx`].
+    ///
+    /// The derived state (`ann`, `trans`, `layouts`) is rebuilt through the
+    /// **real** `build_block_layouts` / `build_translation_cache` on every
+    /// setter, so a test asserting on `layout` asserts on production geometry
+    /// rather than a hand-rolled literal.
+    struct BlockFixture {
+        seq: Vec<u8>,
+        features: Vec<Feature>,
+        primers: Vec<Primer>,
+        cut_sites: Vec<CutSite>,
+        display: TranslationDisplay,
+        block_idx: usize,
+        style: Style,
+        theme: Theme,
+        // Derived — rebuilt by `refresh`.
+        ann: Annotations,
+        trans: Option<TranslationCache>,
+        layouts: Vec<BlockLayout>,
+        offsets: Vec<f32>,
+    }
+
+    impl BlockFixture {
+        fn new(seq: &[u8]) -> Self {
+            let mut fx = Self {
+                seq: seq.to_vec(),
+                features: Vec::new(),
+                primers: Vec::new(),
+                cut_sites: Vec::new(),
+                display: TranslationDisplay::default(),
+                block_idx: 0,
+                style: test_style(),
+                theme: Theme::default(),
+                ann: Annotations::default(),
+                trans: None,
+                layouts: Vec::new(),
+                offsets: Vec::new(),
+            };
+            fx.refresh();
+            fx
+        }
+
+        fn features(mut self, features: Vec<Feature>) -> Self {
+            self.features = features;
+            self.refresh();
+            self
+        }
+
+        fn primers(mut self, primers: Vec<Primer>) -> Self {
+            self.primers = primers;
+            self.refresh();
+            self
+        }
+
+        fn cut_sites(mut self, cut_sites: Vec<CutSite>) -> Self {
+            self.cut_sites = cut_sites;
+            self.refresh();
+            self
+        }
+
+        fn translation(mut self, display: TranslationDisplay) -> Self {
+            self.display = display;
+            self.refresh();
+            self
+        }
+
+        /// Rebuild annotations, the translation cache and the block layouts from
+        /// the current inputs. `Annotations::from_parts` mints fresh ids, so the
+        /// cache's per-feature lookups line up with `render_ann`.
+        fn refresh(&mut self) {
+            self.ann = Annotations::from_parts(self.features.clone(), self.primers.clone());
+            self.trans = self.display.is_active().then(|| {
+                crate::viewer::translation::build_translation_cache(
+                    &self.seq,
+                    &self.ann,
+                    1,
+                    self.display.clone(),
+                )
+            });
+            let trans_band_h = self
+                .trans
+                .as_ref()
+                .map_or(0.0, |c| c.frame_band_rows() as f32 * self.style.aa_row_h);
+            let (layouts, offsets) = build_block_layouts(
+                &self.ann,
+                &self.cut_sites,
+                self.seq.len(),
+                &self.style,
+                &crate::viewer::FeatureVisibility::default(),
+                trans_band_h,
+                self.trans.as_ref(),
+            );
+            self.layouts = layouts;
+            self.offsets = offsets;
+        }
+
+        fn layout(&self) -> &BlockLayout {
+            &self.layouts[self.block_idx]
+        }
+
+        fn ctx(&self) -> BlockCtx<'_> {
+            let block_start = self.block_idx * self.style.line_width;
+            let block_end = (block_start + self.style.line_width).min(self.seq.len());
+            BlockCtx {
+                block_idx: self.block_idx,
+                block_start,
+                block_end,
+                seq: &self.seq,
+                seq_len: self.seq.len(),
+                render_ann: &self.ann,
+                primer_decomps: &[],
+                primer_states: &[],
+                primer_display: crate::viewer::PrimerDisplay::default(),
+                cut_sites: &self.cut_sites,
+                methyl_states: &[],
+                search_hits: &[],
+                trans_cache: self.trans.as_ref(),
+                show_orfs: false,
+                theme: &self.theme,
+                style: &self.style,
+                staging: false,
+                added: None,
+                deleted: None,
+                selection: None,
+                selected_feature: None,
+                selected_primer: None,
+                blink_on: false,
+                hovered_cut_site: None,
+                hover_footprint: None,
+                layout: self.layout(),
+            }
+        }
+
+        fn geom(&self, y0: f32, seq_x0: f32) -> BlockGeom {
+            BlockGeom {
+                y0,
+                seq_x0,
+                rect_min_x: 0.0,
+                strand_top_y: 0.0,
+                strand_bot_y: 0.0,
+            }
         }
     }
 
@@ -1328,61 +1491,20 @@ mod tests {
     /// feature, the emitted hit rect equals a `clip_range_rect` of its span.
     #[test]
     fn features_hit_rect_equals_painted_bar_rect() {
-        let style = test_style();
-        let theme = crate::config::Theme::default();
-        let ann = Annotations::new(vec![feat(2..8)]);
-        let layout = BlockLayout {
-            feat_rows: vec![(0, 0)],
-            feat_row_offsets: vec![0.0],
-            feat_band_h: 14.0,
-            ..Default::default()
-        };
-        let ctx = BlockCtx {
-            block_idx: 0,
-            block_start: 0,
-            block_end: 20,
-            seq: b"ACGTACGTACGTACGTACGT",
-            seq_len: 20,
-            render_ann: &ann,
-            primer_decomps: &[],
-            primer_states: &[],
-            primer_display: crate::viewer::PrimerDisplay::default(),
-            cut_sites: &[],
-            methyl_states: &[],
-            search_hits: &[],
-            trans_cache: None,
-            show_orfs: false,
-            theme: &theme,
-            style: &style,
-            staging: false,
-            added: None,
-            deleted: None,
-            selection: None,
-            selected_feature: None,
-            selected_primer: None,
-            blink_on: false,
-            hovered_cut_site: None,
-            hover_footprint: None,
-            layout: &layout,
-        };
-        let geom = BlockGeom {
-            y0: 100.0,
-            seq_x0: 10.0,
-            rect_min_x: 0.0,
-            strand_top_y: 0.0,
-            strand_bot_y: 0.0,
-        };
+        let fx = BlockFixture::new(b"ACGTACGTACGTACGTACGT").features(vec![feat(2..8)]);
+        let ctx = fx.ctx();
+        let geom = fx.geom(100.0, 10.0);
         let mut hits = Vec::new();
         FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
         let expected = clip_range_rect(
-            &ann.by_position(0).unwrap().bounds(20),
+            &fx.ann.by_position(0).unwrap().bounds(20),
             0,
             20,
             geom.y0, // row 0
             geom.seq_x0,
-            style.char_width,
-            style.annot_row_h,
+            fx.style.char_width,
+            fx.style.annot_row_h,
         )
         .unwrap();
         assert_eq!(
@@ -1397,8 +1519,6 @@ mod tests {
     /// between the arms no longer selects it, and it never hit-tests full-width.
     #[test]
     fn features_hit_rects_are_per_segment_not_hull() {
-        let style = test_style();
-        let theme = crate::config::Theme::default();
         // ori-shaped: join(16..20, 0..4) on a length-20 molecule, one block wide.
         let ori = Feature {
             location: seqforge_core::Location::Join(vec![
@@ -1407,53 +1527,14 @@ mod tests {
             ]),
             ..feat(0..20)
         };
-        let ann = Annotations::new(vec![ori]);
-        let layout = BlockLayout {
-            feat_rows: vec![(0, 0)],
-            feat_row_offsets: vec![0.0],
-            feat_band_h: 14.0,
-            ..Default::default()
-        };
-        let ctx = BlockCtx {
-            block_idx: 0,
-            block_start: 0,
-            block_end: 20,
-            seq: b"ACGTACGTACGTACGTACGT",
-            seq_len: 20,
-            render_ann: &ann,
-            primer_decomps: &[],
-            primer_states: &[],
-            primer_display: crate::viewer::PrimerDisplay::default(),
-            cut_sites: &[],
-            methyl_states: &[],
-            search_hits: &[],
-            trans_cache: None,
-            show_orfs: false,
-            theme: &theme,
-            style: &style,
-            staging: false,
-            added: None,
-            deleted: None,
-            selection: None,
-            selected_feature: None,
-            selected_primer: None,
-            blink_on: false,
-            hovered_cut_site: None,
-            hover_footprint: None,
-            layout: &layout,
-        };
-        let geom = BlockGeom {
-            y0: 100.0,
-            seq_x0: 10.0,
-            rect_min_x: 0.0,
-            strand_top_y: 0.0,
-            strand_bot_y: 0.0,
-        };
+        let fx = BlockFixture::new(b"ACGTACGTACGTACGTACGT").features(vec![ori]);
+        let ctx = fx.ctx();
+        let geom = fx.geom(100.0, 10.0);
         let mut hits = Vec::new();
         FeaturesTrack.hit_rects(&ctx, &geom, &mut hits);
         // Two arms → two hit rects; neither spans the whole 20-col block.
         assert_eq!(hits.len(), 2, "one hit rect per arm");
-        let full_width = 20.0 * style.char_width;
+        let full_width = 20.0 * fx.style.char_width;
         for (r, _) in &hits {
             assert!(
                 r.width() < full_width,
@@ -1474,61 +1555,15 @@ mod tests {
         }
     }
 
-    fn primer_ctx<'a>(
-        ann: &'a Annotations,
-        layout: &'a BlockLayout,
-        style: &'a Style,
-        theme: &'a crate::config::Theme,
-    ) -> BlockCtx<'a> {
-        BlockCtx {
-            block_idx: 0,
-            block_start: 0,
-            block_end: 20,
-            seq: &[b'A'; 20],
-            seq_len: 20,
-            render_ann: ann,
-            primer_decomps: &[],
-            primer_states: &[],
-            primer_display: crate::viewer::PrimerDisplay::default(),
-            cut_sites: &[],
-            methyl_states: &[],
-            search_hits: &[],
-            trans_cache: None,
-            show_orfs: false,
-            theme,
-            style,
-            staging: false,
-            added: None,
-            deleted: None,
-            selection: None,
-            selected_feature: None,
-            selected_primer: None,
-            blink_on: false,
-            hovered_cut_site: None,
-            hover_footprint: None,
-            layout,
-        }
-    }
-
     /// Co-location invariant for the forward Primer track: the emitted hit rect
     /// equals an independent `primer_body_rect` of the same footprint, and the
     /// hit carries the primer's id.
     #[test]
     fn primer_hit_rect_equals_painted_body_rect() {
-        let style = test_style();
-        let theme = crate::config::Theme::default();
-        let mut ann = Annotations::new(vec![]);
-        let pid = ann.add_primer(primer(2..8, Strand::Forward));
-        let (layouts, _off) =
-            build_block_layouts(&ann, &[], 20, &style, &Default::default(), 0.0, None);
-        let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
-        let geom = BlockGeom {
-            y0: 100.0,
-            seq_x0: 10.0,
-            rect_min_x: 0.0,
-            strand_top_y: 0.0,
-            strand_bot_y: 0.0,
-        };
+        let fx = BlockFixture::new(&[b'A'; 20]).primers(vec![primer(2..8, Strand::Forward)]);
+        let pid = fx.ann.primers().next().unwrap().id;
+        let ctx = fx.ctx();
+        let geom = fx.geom(100.0, 10.0);
         let mut hits = Vec::new();
         PrimerForwardTrack.hit_rects(&ctx, &geom, &mut hits);
         assert_eq!(hits.len(), 1);
@@ -1538,8 +1573,8 @@ mod tests {
             20,
             geom.y0,
             geom.seq_x0,
-            style.char_width,
-            style.primer_row_h,
+            fx.style.char_width,
+            fx.style.primer_row_h,
         )
         .unwrap();
         assert_eq!(
@@ -1553,25 +1588,16 @@ mod tests {
     /// a detached primer (`binding = None`) draws in neither.
     #[test]
     fn primer_bands_partition_by_strand_and_skip_detached() {
-        let style = test_style();
-        let theme = crate::config::Theme::default();
-        let mut ann = Annotations::new(vec![]);
-        ann.add_primer(primer(0..6, Strand::Forward));
-        ann.add_primer(primer(2..9, Strand::Reverse));
-        ann.add_primer(Primer {
-            binding: None,
-            ..primer(0..6, Strand::Forward)
-        });
-        let (layouts, _off) =
-            build_block_layouts(&ann, &[], 20, &style, &Default::default(), 0.0, None);
-        let ctx = primer_ctx(&ann, &layouts[0], &style, &theme);
-        let geom = BlockGeom {
-            y0: 0.0,
-            seq_x0: 0.0,
-            rect_min_x: 0.0,
-            strand_top_y: 0.0,
-            strand_bot_y: 0.0,
-        };
+        let fx = BlockFixture::new(&[b'A'; 20]).primers(vec![
+            primer(0..6, Strand::Forward),
+            primer(2..9, Strand::Reverse),
+            Primer {
+                binding: None,
+                ..primer(0..6, Strand::Forward)
+            },
+        ]);
+        let ctx = fx.ctx();
+        let geom = fx.geom(0.0, 0.0);
         let mut fwd = Vec::new();
         PrimerForwardTrack.hit_rects(&ctx, &geom, &mut fwd);
         let mut rev = Vec::new();
@@ -1584,54 +1610,21 @@ mod tests {
     /// the per-track heights the stack lays out reproduce `build_block_layouts`.
     #[test]
     fn stack_block_height_equals_build_block_layouts() {
-        let style = test_style();
-        let theme = crate::config::Theme::default();
-        let ann = Annotations::new(vec![feat(1..30), feat(2..5)]);
-        let (layouts, _off) =
-            build_block_layouts(&ann, &[], 40, &style, &Default::default(), 0.0, None);
-        let layout = &layouts[0];
-        let ctx = BlockCtx {
-            block_idx: 0,
-            block_start: 0,
-            block_end: 20,
-            seq: &[b'A'; 40],
-            seq_len: 40,
-            render_ann: &ann,
-            primer_decomps: &[],
-            primer_states: &[],
-            primer_display: crate::viewer::PrimerDisplay::default(),
-            cut_sites: &[],
-            methyl_states: &[],
-            search_hits: &[],
-            trans_cache: None,
-            show_orfs: false,
-            theme: &theme,
-            style: &style,
-            staging: false,
-            added: None,
-            deleted: None,
-            selection: None,
-            selected_feature: None,
-            selected_primer: None,
-            blink_on: false,
-            hovered_cut_site: None,
-            hover_footprint: None,
-            layout,
-        };
-        let tracks: Vec<Box<dyn Track>> = vec![
-            Box::new(CutSitesTrack),
-            Box::new(RulerTrack),
-            Box::new(PrimerForwardTrack),
-            Box::new(SequenceTrack),
-            Box::new(TranslationTrack),
-            Box::new(PrimerReverseTrack),
-            Box::new(FeaturesTrack),
-        ];
-        let sum: f32 = tracks.iter().map(|t| t.block_height(&ctx)).sum::<f32>() + style.block_gap;
+        let fx = BlockFixture::new(&[b'A'; 40]).features(vec![feat(1..30), feat(2..5)]);
+        let ctx = fx.ctx();
+        // The **real** stack, not a parallel copy — a reordering of
+        // `TrackStack::new` must not be able to leave this green.
+        let stack = TrackStack::new();
+        let sum: f32 = stack
+            .tracks
+            .iter()
+            .map(|t| t.block_height(&ctx))
+            .sum::<f32>()
+            + fx.style.block_gap;
         assert!(
-            (sum - layout.height).abs() < 1e-3,
+            (sum - fx.layout().height).abs() < 1e-3,
             "Σ track heights + gap ({sum}) must equal build_block_layouts height ({})",
-            layout.height
+            fx.layout().height
         );
     }
 
@@ -1696,5 +1689,272 @@ mod tests {
             find_hit(&hits, Pos2::new(50.0, 50.0), Hit::as_feature),
             None
         );
+    }
+
+    fn cut(enzyme: &str, cut_pos: usize) -> CutSite {
+        CutSite {
+            enzyme: enzyme.into(),
+            pattern: "NNNNNN".into(),
+            recognition: seqforge_core::Span::new(cut_pos.saturating_sub(1), 6),
+            cut_pos,
+            bottom_cut_pos: cut_pos + 4,
+        }
+    }
+
+    /// `feat_row_offsets` is a prefix sum of **variable** row heights: a stack
+    /// row whose feature carries a CDS translation is taller by `aa_row_h`, so
+    /// the offsets are *not* `row * annot_row_h`.
+    ///
+    /// This is the highest-value geometry assertion in the module — a
+    /// regression here shifts a feature bar's paint *and* its hit rect by the
+    /// same amount, so the co-location tests structurally cannot catch it.
+    #[test]
+    fn feat_row_offsets_are_a_prefix_sum_of_variable_row_heights() {
+        // Three mutually-overlapping features → three stack rows. `greedy_stack`
+        // sorts by start with a stable sort, so equal starts keep insertion
+        // order: the CDS takes row 0 and the two plain features rows 1 and 2.
+        let fx = BlockFixture::new(b"ATGAAAGGGTAACCCGGGTA")
+            .features(vec![
+                feat_kind(0..12, "CDS"),
+                feat_kind(0..5, "misc_feature"),
+                feat_kind(0..5, "misc_feature"),
+            ])
+            .translation(TranslationDisplay {
+                show_cds: true,
+                ..Default::default()
+            });
+        let layout = fx.layout();
+        let (annot, aa) = (fx.style.annot_row_h, fx.style.aa_row_h);
+
+        assert_eq!(layout.feat_rows.len(), 3, "three overlapping features");
+        assert!(
+            fx.trans
+                .as_ref()
+                .unwrap()
+                .feature_has_aa(fx.ann.by_position(0).unwrap().id),
+            "row 0's CDS must actually translate, or the test proves nothing"
+        );
+        assert_eq!(
+            layout.feat_row_offsets,
+            vec![0.0, annot + aa, annot * 2.0 + aa],
+            "row 0 carries an AA sub-row, so rows 1 and 2 are pushed down by aa_row_h"
+        );
+        assert_eq!(
+            layout.feat_band_h,
+            annot * 3.0 + aa,
+            "band height is the sum of the variable row heights"
+        );
+    }
+
+    /// Isoschizomers sharing a `cut_pos` collapse into a **single** `CutGroup`
+    /// whose names stack under one leader tick, and a row's height is its
+    /// *tallest* group rather than the number of groups.
+    #[test]
+    fn isoschizomers_at_one_cut_pos_collapse_into_one_group() {
+        let fx = BlockFixture::new(&[b'A'; 20]).cut_sites(vec![
+            cut("BamHI", 5),
+            cut("BstI", 5),
+            cut("EcoRI", 15),
+        ]);
+        let layout = fx.layout();
+
+        assert_eq!(
+            layout.cut_groups.len(),
+            2,
+            "three sites at two distinct positions → two groups"
+        );
+        let co_located = layout
+            .cut_groups
+            .iter()
+            .find(|g| g.cut_pos == 5)
+            .expect("group at the shared cut_pos");
+        assert_eq!(
+            co_located.members.len(),
+            2,
+            "both isoschizomers stay individually addressable inside one group"
+        );
+        assert_eq!(
+            layout.cut_band_lines, 2,
+            "row height is the tallest group in the row (2 names), not the group count (3)"
+        );
+    }
+
+    /// `SEQUENCE_TRACK` must index the Sequence track in `TrackStack::new` —
+    /// `geom_for` feeds `y0s[SEQUENCE_TRACK]` to every connector track as
+    /// `strand_top_y`, so a reorder silently drops cut staples and primer bands
+    /// at the wrong row.
+    #[test]
+    fn sequence_track_constant_matches_the_stack_order() {
+        let fx = BlockFixture::new(&[b'A'; 20]);
+        let ctx = fx.ctx();
+        let stack = TrackStack::new();
+        let heights: Vec<f32> = stack.tracks.iter().map(|t| t.block_height(&ctx)).collect();
+
+        assert_eq!(
+            heights[SEQUENCE_TRACK],
+            SequenceTrack.block_height(&ctx),
+            "the track at SEQUENCE_TRACK must be the Sequence track"
+        );
+        // On a bare fixture every other band collapses to 0 (or the ruler's
+        // 12.0), so the strand height is unique — without this the assertion
+        // above would pass against any track that happened to match.
+        assert_eq!(
+            heights
+                .iter()
+                .filter(|h| **h == heights[SEQUENCE_TRACK])
+                .count(),
+            1,
+            "sequence height must be unique here for the index check to bite"
+        );
+    }
+
+    /// The height identity with **every** variable band non-zero. The existing
+    /// `stack_block_height_equals_build_block_layouts` only exercises the case
+    /// where the cut, primer and translation bands all contribute 0 on both
+    /// sides — i.e. where the identity is trivially true. This also pins
+    /// `trans_band_h` (a `build_block_layouts` input) against
+    /// `TranslationTrack::block_height`, which is computed independently.
+    #[test]
+    fn stack_block_height_matches_layout_with_every_band_populated() {
+        let fx = BlockFixture::new(b"ATGAAAGGGTAACCCGGGTA")
+            .features(vec![feat_kind(0..12, "CDS"), feat(2..5)])
+            .primers(vec![
+                primer(0..6, Strand::Forward),
+                primer(2..9, Strand::Reverse),
+            ])
+            .cut_sites(vec![cut("BamHI", 5), cut("BstI", 5)])
+            .translation(TranslationDisplay {
+                frames: [true, false, false, false, false, false],
+                show_cds: true,
+                ..Default::default()
+            });
+        let ctx = fx.ctx();
+        let stack = TrackStack::new();
+        let heights: Vec<f32> = stack.tracks.iter().map(|t| t.block_height(&ctx)).collect();
+
+        for (idx, what) in [
+            (0, "cut band"),
+            (2, "forward primer band"),
+            (4, "translation band"),
+            (5, "reverse primer band"),
+            (6, "feature band"),
+        ] {
+            assert!(
+                heights[idx] > 0.0,
+                "{what} must contribute a non-zero height"
+            );
+        }
+
+        let sum: f32 = heights.iter().sum::<f32>() + fx.style.block_gap;
+        assert!(
+            (sum - fx.layout().height).abs() < 1e-3,
+            "Σ track heights + gap ({sum}) must equal build_block_layouts height ({})",
+            fx.layout().height
+        );
+    }
+
+    /// `paint_block` iterates `paint_order` while `hit_block` iterates
+    /// `0..tracks.len()`, so a dropped or duplicated index yields elements that
+    /// are invisible but still clickable.
+    #[test]
+    fn paint_order_is_a_permutation_with_cut_staples_last() {
+        let stack = TrackStack::new();
+        assert_eq!(
+            stack.paint_order.last(),
+            Some(&0),
+            "cut-site staples paint last so they overlay the strands they cross"
+        );
+        let mut sorted = stack.paint_order.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            (0..stack.tracks.len()).collect::<Vec<_>>(),
+            "paint_order must be a permutation of every track index"
+        );
+    }
+
+    /// `greedy_stack` sorts by start and packs each range into the first row
+    /// whose last element ends at or before that start. `pub(crate)` and
+    /// re-exported for the minimap, so it is an external contract.
+    #[test]
+    fn greedy_stack_packs_into_the_first_free_row() {
+        let (rows, n) = greedy_stack(&[(0, 10), (5, 15), (10, 20), (3, 4)]);
+        assert_eq!(n, 2);
+        // (0,10)→row 0; (3,4)→row 1 (row 0 still open); (5,15)→row 1 (ends at
+        // 4 ≤ 5); (10,20)→row 0 (ends at 10 ≤ 10).
+        assert_eq!(rows, vec![0, 1, 0, 1]);
+        assert_eq!(greedy_stack(&[]), (vec![], 0), "empty input → no rows");
+    }
+
+    /// The packing predicate is `end <= start`, so *touching* ranges are not
+    /// overlapping and share a row.
+    #[test]
+    fn greedy_stack_shares_a_row_for_adjacent_ranges() {
+        let (rows, n) = greedy_stack(&[(0, 5), (5, 10)]);
+        assert_eq!(n, 1, "adjacent ranges are not stacked");
+        assert_eq!(rows, vec![0, 0]);
+    }
+
+    /// `offsets[i]` is the *top* of block i and the last entry is the total
+    /// height, so the last offset is past-the-end and maps to no block.
+    #[test]
+    fn y_to_block_resolves_boundaries_and_rejects_out_of_range() {
+        let offsets = [0.0, 50.0, 120.0];
+        assert_eq!(y_to_block(-1.0, &offsets), None, "negative y");
+        assert_eq!(y_to_block(0.0, &offsets), Some(0), "top of block 0");
+        assert_eq!(y_to_block(49.9, &offsets), Some(0), "last row of block 0");
+        assert_eq!(y_to_block(50.0, &offsets), Some(1), "top of block 1");
+        assert_eq!(
+            y_to_block(120.0, &offsets),
+            None,
+            "total height is past-EOF"
+        );
+        assert_eq!(y_to_block(999.0, &offsets), None, "far past the last block");
+        assert_eq!(y_to_block(10.0, &[0.0]), None, "degenerate offsets");
+    }
+
+    /// Label fitting is a **policy**, and its threshold has changed before — a
+    /// fixed pixel cutoff became measured width in `937de81`. So these pin
+    /// properties (never wider than the bar, never a bare ellipsis, actually
+    /// shortened) rather than a specific cutoff, which would turn a styling
+    /// tweak into a test edit.
+    #[test]
+    fn fit_label_respects_the_bar_under_every_overflow_policy() {
+        const CW: f32 = 6.0;
+        let label = "promoter"; // 8 chars → 48px at CW
+
+        // Fits → the full label, whatever the policy.
+        for ov in [
+            LabelOverflow::Truncate,
+            LabelOverflow::Extend,
+            LabelOverflow::Ellipsis,
+        ] {
+            assert_eq!(fit_label(200.0, CW, ov, label).as_deref(), Some(label));
+        }
+
+        // Doesn't fit: Truncate drops it; Extend keeps it whole (overflowing is
+        // the point of that policy).
+        assert_eq!(fit_label(20.0, CW, LabelOverflow::Truncate, label), None);
+        assert_eq!(
+            fit_label(20.0, CW, LabelOverflow::Extend, label).as_deref(),
+            Some(label)
+        );
+
+        // Ellipsis: shortened, marked, and never wider than the bar it sits in.
+        let e = fit_label(40.0, CW, LabelOverflow::Ellipsis, label).expect("room for some text");
+        assert!(e.ends_with('…'), "ellipsis policy must mark the elision");
+        assert!(
+            e.chars().count() < label.chars().count(),
+            "must actually shorten (was {e:?})"
+        );
+        assert!(
+            e.chars().count() as f32 * CW <= 40.0,
+            "must not overflow the bar (was {e:?})"
+        );
+
+        // Too narrow for even one char beside the ellipsis → draw nothing,
+        // rather than a bare "…" that names no feature.
+        assert_eq!(fit_label(CW, CW, LabelOverflow::Ellipsis, label), None);
+        assert_eq!(fit_label(0.0, CW, LabelOverflow::Ellipsis, label), None);
     }
 }
