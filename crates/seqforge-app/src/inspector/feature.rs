@@ -251,7 +251,12 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft, theme: &Theme) -> Opt
 }
 
 impl InspectorState {
-    pub(super) fn show_features(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
+    pub(super) fn show_features(
+        &mut self,
+        ui: &mut egui::Ui,
+        pending: &mut Vec<PendingCommand>,
+        theme: &Theme,
+    ) {
         if self.features.is_empty() {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| ui.weak("No features on this sequence."));

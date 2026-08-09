@@ -79,7 +79,12 @@ fn methyl_rich_text(text: String, state: MethylState, theme: &Theme) -> egui::Ri
 }
 
 impl InspectorState {
-    pub(super) fn show_cutsites(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
+    pub(super) fn show_cutsites(
+        &mut self,
+        ui: &mut egui::Ui,
+        pending: &mut Vec<PendingCommand>,
+        theme: &Theme,
+    ) {
         // ── Query header (verb) ──────────────────────────────────────────
         ui.add_space(2.0);
         let mut submit_show = false;

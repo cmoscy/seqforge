@@ -255,7 +255,12 @@ fn commit_primer_outcome(
 /// plus the gesture into edit mode. Returns `true` when the user asks to edit
 /// (Edit button; double-click is the other entry point). Enqueues its own
 /// site/rescan commands. Mirror of [`super::feature`]'s `feature_viewer`.
-fn primer_viewer(ui: &mut egui::Ui, p: &PrimerInfo, pending: &mut Vec<PendingCommand>, _theme: &Theme) -> bool {
+fn primer_viewer(
+    ui: &mut egui::Ui,
+    p: &PrimerInfo,
+    pending: &mut Vec<PendingCommand>,
+    _theme: &Theme,
+) -> bool {
     let mut edit = false;
     detail_frame().show(ui, |ui| {
         for line in primer_detail_lines(p) {
@@ -615,7 +620,12 @@ impl InspectorState {
     /// renders at the top. Editing/creating is pane-local until commit, which
     /// posts one `UpdatePrimer`/`AddPrimer` (the CLI verb) through the single
     /// applier + history. Mirrors `show_features`.
-    pub(super) fn show_primers(&mut self, ui: &mut egui::Ui, pending: &mut Vec<PendingCommand>, theme: &Theme) {
+    pub(super) fn show_primers(
+        &mut self,
+        ui: &mut egui::Ui,
+        pending: &mut Vec<PendingCommand>,
+        theme: &Theme,
+    ) {
         // Attached-first, floating oligos last (list mirrors the map top→bottom).
         let mut primers = self.primers().to_vec();
         primers.sort_by_key(|p| p.binding.as_ref().map_or(usize::MAX, |b| b.start));
@@ -638,7 +648,7 @@ impl InspectorState {
                     ui.add_space(6.0);
                     ui.strong("New primer");
                 });
-                        if let Some(outcome) = primer_editor(ui, d, theme) {
+                if let Some(outcome) = primer_editor(ui, d, theme) {
                     commit_primer_outcome(outcome, editing, pending);
                 }
                 ui.separator();
@@ -709,7 +719,7 @@ impl InspectorState {
                     let editing_this = editing.as_ref().is_some_and(|d| d.id == Some(p.id));
                     if editing_this {
                         let d = editing.as_mut().expect("editing_this ⇒ Some");
-                if let Some(outcome) = primer_editor(ui, d, theme) {
+                        if let Some(outcome) = primer_editor(ui, d, theme) {
                             commit_primer_outcome(outcome, editing, pending);
                         }
                     } else if primer_viewer(ui, p, pending, theme) {
