@@ -320,6 +320,11 @@ A bin points at its source; that reference resolves differently for *live* use v
   documents** (index / basename / path, the `buffers`/`focus` vocabulary). A PCR
   product is an open `Buffer` the moment it's made, so "PCR → assemble it" works
   **without saving**. This is extensibility.md's live-state coupling.
+  **Landed on the CLI** (ROADMAP decision 27): `seqforge assemble buffer:3@BsaI..BsaI`
+  parses to `SourceRef::Buffer` and round-trips through serde, so a recipe
+  authored in the workbench and one authored on the command line are the same
+  document. Resolving it still needs a session — the local file resolver reports
+  `buffer sources require a running SeqForge` rather than guessing a path.
 - **The catch:** an *unsaved* buffer has only a **session-scoped** handle (index /
   auto-name, no path), so a `buffer:2` reference **dangles** when a recipe is
   replayed in a fresh process or after relaunch (same fragility as positional

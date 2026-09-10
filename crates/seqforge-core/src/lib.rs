@@ -7,7 +7,7 @@
 //  - `model`     — editor-ready types: Buffer, Annotations, View,
 //                   ViewKind plus id newtypes. The canonical state
 //                   shape after Stage 2.5a.
-//  - `commands`  — ViewerRequest, ViewerResponse, FileCommand,
+//  - `commands`  — ViewerRequest, ViewerResponse,
 //                   dispatch(), DispatchError.
 
 pub mod commands;
@@ -22,8 +22,8 @@ pub mod topology;
 pub mod transport;
 
 pub use commands::{
-    BioOps, DispatchError, DocInfo, EnzymeOp, FileCommand, PrimerInfo, PrimerSiteInfo, PrimerState,
-    ProductInfo, ViewerRequest, ViewerResponse, dispatch, dispatch_file, rescan_if_stale,
+    BioOps, DispatchError, DocInfo, EnzymeOp, PrimerInfo, PrimerSiteInfo, PrimerState, ProductInfo,
+    ViewerRequest, ViewerResponse, dispatch, rescan_if_stale,
 };
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,

@@ -348,15 +348,4 @@ mod tests {
         let resp = super::handle_rpc_line(line, &tx, &egui::Context::default());
         assert_eq!(resp.error.as_ref().unwrap().code, -32000);
     }
-
-    #[test]
-    fn file_command_needs_no_socket() {
-        let cmd = seqforge_core::FileCommand::Digest {
-            input: std::path::PathBuf::from("in.gb"),
-            enzymes: vec!["EcoRI".into()],
-            output: std::path::PathBuf::from("out.gb"),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("EcoRI"));
-    }
 }

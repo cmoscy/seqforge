@@ -20,27 +20,6 @@ fn default_methyl_dcm() -> bool {
 
 // ── File commands ─────────────────────────────────────────────────────────────
 
-/// Commands that operate on sequence files on disk. No running GUI required.
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum FileCommand {
-    /// Print info about a sequence file
-    Info { input: PathBuf },
-    /// Digest a sequence with restriction enzymes (post-MVP implementation)
-    Digest {
-        input: PathBuf,
-        #[arg(short, long)]
-        enzymes: Vec<String>,
-        #[arg(short, long)]
-        output: PathBuf,
-    },
-    /// Annotate a sequence file (post-MVP implementation)
-    Annotate {
-        input: PathBuf,
-        #[arg(short, long)]
-        output: PathBuf,
-    },
-}
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -1123,15 +1102,6 @@ pub fn dispatch<B: BioOps>(
                 methyl_states: view.methyl_states.clone(),
             })
         }
-    }
-}
-
-/// Dispatch a file command. Runs entirely in the calling process; no GUI needed.
-pub fn dispatch_file(cmd: FileCommand) -> Result<(), DispatchError> {
-    match cmd {
-        FileCommand::Info { .. } => Ok(()), // handled directly by seqforge-cli
-        FileCommand::Digest { .. } => Err(DispatchError::Unimplemented("digest")),
-        FileCommand::Annotate { .. } => Err(DispatchError::Unimplemented("annotate")),
     }
 }
 

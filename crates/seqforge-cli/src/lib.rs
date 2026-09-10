@@ -592,18 +592,34 @@ fn parse_bin_token(
         anyhow::bail!("empty source in bin token {token:?}");
     }
 
-    let paths = seqforge_bio::expand_glob(source);
-    if paths.is_empty() {
-        anyhow::bail!("no files match {source:?}");
-    }
-    let sources: Vec<Source> = paths
-        .into_iter()
-        .map(|p| Source {
-            ref_: SourceRef::Path(p),
+    // `buffer:<n>` names an open document in a running SeqForge rather than a
+    // file on disk — the other half of `SourceRef`, and the reason a recipe
+    // authored in the workbench round-trips through the CLI. Resolving one needs
+    // a session, so the local file resolver rejects it with that message; over
+    // the socket it resolves against the buffer store.
+    let sources: Vec<Source> = if let Some(handle) = source.strip_prefix("buffer:") {
+        let id: u64 = handle.trim().parse().map_err(|_| {
+            anyhow::anyhow!("bad buffer handle in {token:?}: expected `buffer:<n>`, got {handle:?}")
+        })?;
+        vec![Source {
+            ref_: SourceRef::Buffer(seqforge_core::BufferId(id)),
             pin: None,
             span: span_override.clone(),
-        })
-        .collect();
+        }]
+    } else {
+        let paths = seqforge_bio::expand_glob(source);
+        if paths.is_empty() {
+            anyhow::bail!("no files match {source:?}");
+        }
+        paths
+            .into_iter()
+            .map(|p| Source {
+                ref_: SourceRef::Path(p),
+                pin: None,
+                span: span_override.clone(),
+            })
+            .collect()
+    };
 
     Ok(Bin {
         role: bin_role(source),
@@ -613,8 +629,11 @@ fn parse_bin_token(
 }
 
 /// A bin role from the source token: a glob → its parent directory name; a plain
-/// path → its file stem.
+/// path → its file stem; `buffer:<n>` → `buffer<n>`.
 fn bin_role(source: &str) -> String {
+    if let Some(handle) = source.strip_prefix("buffer:") {
+        return format!("buffer{}", handle.trim());
+    }
     if source.contains('*') {
         Path::new(source)
             .parent()
@@ -798,6 +817,38 @@ mod assemble_tests {
     }
 
     /// A per-input `[5′..3′]` with an `@pos` occurrence rides each source.
+    /// The other half of `SourceRef`. `buffer:<n>` was documented in
+    /// plans/assembly.md but unimplemented, so the CLI could only ever name a
+    /// path — half a `core` type was GUI-only in practice (ROADMAP decision 27).
+    #[test]
+    fn buffer_token_parses_to_a_buffer_source() {
+        let bin = super::parse_bin_token("buffer:3@BsaI..BsaI", None).unwrap();
+        assert_eq!(bin.sources.len(), 1);
+        assert_eq!(
+            bin.sources[0].ref_,
+            SourceRef::Buffer(seqforge_core::BufferId(3)),
+            "a buffer handle must not be mistaken for a path"
+        );
+        assert_eq!(bin.role, "buffer3");
+    }
+
+    /// Parity: the value survives the wire, so a recipe authored in the
+    /// workbench and one authored on the command line are the same document.
+    #[test]
+    fn buffer_source_round_trips_through_serde() {
+        let bin = super::parse_bin_token("buffer:7", None).unwrap();
+        let json = serde_json::to_string(&bin).unwrap();
+        assert!(json.contains("\"buffer\""), "serde tag: {json}");
+        let back: seqforge_core::Bin = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, bin);
+    }
+
+    #[test]
+    fn a_malformed_buffer_handle_is_an_error_not_a_path() {
+        let err = super::parse_bin_token("buffer:xyz", None).unwrap_err();
+        assert!(err.to_string().contains("bad buffer handle"), "{err}");
+    }
+
     #[test]
     fn per_input_span_override_is_carried_on_the_source() {
         let bin = super::parse_bin_token("geneC.gb@EcoRI..BamHI[EcoRI@410..BamHI]", None).unwrap();
