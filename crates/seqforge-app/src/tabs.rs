@@ -26,6 +26,9 @@ pub enum Tab {
 
 pub struct TabViewer<'a> {
     pub workspace: &'a mut Workspace,
+    /// Per-view render caches. Borrowed alongside `workspace` rather than
+    /// living on it — see `viewer::SeqViewCache`.
+    pub seq_views: &'a mut crate::viewer::SeqViewCache,
     pub pending_commands: &'a mut Vec<PendingCommand>,
     pub overlays: &'a mut OverlayStack,
     pub focus: &'a mut FocusState,
@@ -134,11 +137,16 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     self.focus.scope == FocusScope::View(view_id) && self.overlays.is_empty();
                 let TabViewer {
                     workspace,
+                    seq_views,
                     pending_commands,
                     config,
                     clipboard,
                     ..
                 } = self;
+                // The render cache is a sibling borrow of `workspace`, not a
+                // field of it, so mint this view's entry before taking the
+                // buffer lock below.
+                let seq_view = seq_views.get_or_default(view_id);
                 // ViewKind dispatch (Stage 2.5d). Today only `TextView`
                 // exists; adding `LinearView` / `CircularView` later is
                 // a new arm + a new renderer module — no changes
@@ -146,7 +154,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 // dispatch and keeps the renderer module per-kind
                 // closed.
                 let cfg = config.clone();
-                let rendered = workspace.with_view_buffer(view_id, |seq_view, view, buf, ann| {
+                let rendered = workspace.with_view_buffer(view_id, |view, buf, ann| {
                     // Freshen-at-read: recompute stale cut sites/methyl (bytes may
                     // have moved under them since the last scan) and drop stale
                     // search highlights before painting. No-op when fresh; scans

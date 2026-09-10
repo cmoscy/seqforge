@@ -85,12 +85,11 @@ pub(super) fn apply_stage_edit(
             return Ok(None);
         }
     }
-    if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
-        match edit {
-            StagedEdit::Cut { start, end } => sv.stage_cut(start, end),
-            StagedEdit::Delete { start, end } => sv.stage_delete(start, end),
-            StagedEdit::Paste { pos } => sv.stage_paste(pos),
-        }
+    let sv = state.seq_views.get_or_default(vid);
+    match edit {
+        StagedEdit::Cut { start, end } => sv.stage_cut(start, end),
+        StagedEdit::Delete { start, end } => sv.stage_delete(start, end),
+        StagedEdit::Paste { pos } => sv.stage_paste(pos),
     }
     Ok(None)
 }
@@ -1103,7 +1102,7 @@ mod tests {
         // Focuses the target view (so the stage survives + Enter commits) and
         // arms the canvas pending edit.
         assert_eq!(s.focus.scope, FocusScope::View(vid));
-        assert!(s.workspace.seq_views.get(&vid).unwrap().is_staging());
+        assert!(s.seq_views.get(vid).unwrap().is_staging());
     }
 
     #[test]

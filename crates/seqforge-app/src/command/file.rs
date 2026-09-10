@@ -384,6 +384,9 @@ pub(super) fn apply_close_view(
         let _ = state.dock_state.remove_tab((si, ni, ti));
     }
     state.workspace.close_view(view_id)?;
+    // The render cache is keyed by `ViewId` and no longer owned by the
+    // workspace, so the close path prunes it explicitly.
+    state.seq_views.retain_open(&state.workspace);
     layout::ensure_welcome_invariant(state);
 
     state.events.emit(AppEvent::TabClosed { view: view_id });

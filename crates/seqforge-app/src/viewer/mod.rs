@@ -606,6 +606,36 @@ impl FeatureVisibility {
     }
 }
 
+/// Per-view render caches for the sequence viewer, keyed by `ViewId`.
+///
+/// This lives on `AppState`, **not** on `Workspace`: a `SequenceView` holds
+/// egui geometry, and `Workspace` is otherwise headless session state the CLI
+/// drives with no renderer in scope (ROADMAP decision 27). Keying by `ViewId`
+/// rather than `BufferId` keeps two views of one buffer independent — e.g.
+/// divergent feature-row stacking once zoom levels differ.
+///
+/// Entries are minted on demand, so a view that never paints costs nothing;
+/// [`SeqViewCache::retain_open`] drops the caches of views that have closed.
+#[derive(Debug, Default)]
+pub struct SeqViewCache(std::collections::HashMap<ViewId, SequenceView>);
+
+impl SeqViewCache {
+    /// The cache for `id`, read-only. `None` when the view has never painted.
+    pub fn get(&self, id: ViewId) -> Option<&SequenceView> {
+        self.0.get(&id)
+    }
+
+    /// The cache for `id`, creating an empty one if this is its first paint.
+    pub fn get_or_default(&mut self, id: ViewId) -> &mut SequenceView {
+        self.0.entry(id).or_default()
+    }
+
+    /// Drop caches whose view is gone. Cheap; call after closing a view.
+    pub fn retain_open(&mut self, ws: &crate::workspace::Workspace) {
+        self.0.retain(|id, _| ws.view(*id).is_some());
+    }
+}
+
 /// Per-document state for the sequence viewer widget.
 #[derive(Debug, Default)]
 pub struct SequenceView {
@@ -658,17 +688,6 @@ pub struct SequenceView {
 }
 
 impl SequenceView {
-    /// Reset transient interaction state on document change.
-    pub fn reset(&mut self) {
-        self.drag_start = None;
-        self.pending = None;
-        self.preview = None;
-        // A different document invalidates the memoized layout (its fingerprint
-        // is version-keyed to the old buffer).
-        self.layout_cache = None;
-        self.primer_anneal_cache = None;
-    }
-
     // ── Stage a destructive edit from outside the canvas (Edit menu) ──────
     // These arm the same `PendingEdit` an in-canvas keystroke would, so a menu
     // Cut/Delete/Paste previews before commit instead of mutating immediately.

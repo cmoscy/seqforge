@@ -120,6 +120,11 @@ pub struct AppState {
     pub browser: BrowserState,
     /// Workspace = view storage + buffer store + active-view bookkeeping.
     pub workspace: Workspace,
+    /// Per-view sequence-viewer render caches, keyed by `ViewId`. Held here
+    /// rather than on `Workspace` because a `SequenceView` is egui geometry
+    /// and the workspace is headless session state (ROADMAP decision 27).
+    /// Entries are minted on first paint and pruned when a view closes.
+    pub seq_views: crate::viewer::SeqViewCache,
     /// Recently opened files (most-recent first, max 10). Restored from
     /// [`PersistedSession::recent_files`] on launch; saved back on exit.
     pub recent_files: Vec<PathBuf>,
@@ -230,6 +235,7 @@ impl Default for AppState {
             dock_state,
             browser: BrowserState::default(),
             workspace: Workspace::default(),
+            seq_views: Default::default(),
             recent_files: Vec::new(),
             pending_commands: Vec::new(),
             terminal: None,
@@ -1055,12 +1061,9 @@ impl eframe::App for SeqForgeApp {
         // minimap) reads them this frame; the per-tab paint (`tabs.rs`) freshens
         // the remaining visible views. No-op when already fresh.
         if let Some(vid) = self.state.workspace.active_view {
-            let _ = self
-                .state
-                .workspace
-                .with_view_buffer(vid, |_, view, buf, _| {
-                    seqforge_core::rescan_if_stale(view, buf, &AppBio);
-                });
+            let _ = self.state.workspace.with_view_buffer(vid, |view, buf, _| {
+                seqforge_core::rescan_if_stale(view, buf, &AppBio);
+            });
         }
 
         // Keep Paste enablement / staged preview honest with the OS clipboard.
@@ -1496,7 +1499,7 @@ impl eframe::App for SeqForgeApp {
                         .state
                         .workspace
                         .active_view()
-                        .and_then(|v| self.state.workspace.seq_views.get(&v.id))
+                        .and_then(|v| self.state.seq_views.get(v.id))
                         .map(|sv| sv.translation.clone())
                         .unwrap_or_default();
                     let has_view = self.state.workspace.active_view().is_some();
@@ -1756,9 +1759,8 @@ impl eframe::App for SeqForgeApp {
                     let clipboard = self.state.clipboard.bytes();
                     if let Some(summary) = self
                         .state
-                        .workspace
                         .seq_views
-                        .get(&view_id)
+                        .get(view_id)
                         .and_then(|sv| sv.staged_summary(clipboard))
                     {
                         let accent = ui.visuals().selection.stroke.color;
@@ -1802,6 +1804,7 @@ impl eframe::App for SeqForgeApp {
             dock_state,
             browser,
             workspace,
+            seq_views,
             pending_commands,
             terminal,
             overlays,
@@ -1821,7 +1824,11 @@ impl eframe::App for SeqForgeApp {
 
         // Refresh the Inspector's memoized primer projection before the dock
         // reads it (version-keyed; a no-op when nothing changed).
-        inspector.refresh(workspace, config.settings.inspector.follow_selection);
+        inspector.refresh(
+            workspace,
+            seq_views,
+            config.settings.inspector.follow_selection,
+        );
 
         // ── Terminal: native bottom region (decision 19) ──────────────────────
         // Drawn before the side panels so it spans full width (matches the prior
@@ -1902,7 +1909,13 @@ impl eframe::App for SeqForgeApp {
                                 .default_height(200.0)
                                 .height_range(48.0..=f32::INFINITY)
                                 .show_inside(ui, |ui| {
-                                    minimap.show(ui, workspace, pending_commands, config);
+                                    minimap.show(
+                                        ui,
+                                        workspace,
+                                        seq_views,
+                                        pending_commands,
+                                        config,
+                                    );
                                 });
                             egui::CentralPanel::default().show_inside(ui, |ui| {
                                 inspector.show(ui, pending_commands, &config.theme);
@@ -1917,7 +1930,7 @@ impl eframe::App for SeqForgeApp {
                         // Only the minimap: it fills the whole column.
                         (false, true) => {
                             egui::CentralPanel::default().show_inside(ui, |ui| {
-                                minimap.show(ui, workspace, pending_commands, config);
+                                minimap.show(ui, workspace, seq_views, pending_commands, config);
                             });
                         }
                         // Unreachable: the column is gated off when both are hidden.
@@ -1946,6 +1959,7 @@ impl eframe::App for SeqForgeApp {
                         ui,
                         &mut TabViewer {
                             workspace,
+                            seq_views,
                             pending_commands,
                             overlays,
                             focus,

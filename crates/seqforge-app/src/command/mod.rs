@@ -707,34 +707,27 @@ pub fn apply<B: BioOps>(
         SubmitRenameFeature { id, label } => edit::apply_submit_rename_feature(state, id, label),
         SetTranslationDisplay(display) => {
             if let Some(vid) = state.workspace.active_view {
-                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
-                    sv.translation = display;
-                }
+                state.seq_views.get_or_default(vid).translation = display;
             }
             Ok(None)
         }
         SetPrimerDisplay(display) => {
             if let Some(vid) = state.workspace.active_view {
-                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
-                    sv.primer_display = display;
-                }
+                state.seq_views.get_or_default(vid).primer_display = display;
             }
             Ok(None)
         }
         SetFeatureVisibility(visibility) => {
             if let Some(vid) = state.workspace.active_view {
-                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
-                    sv.feature_visibility = visibility;
-                }
+                state.seq_views.get_or_default(vid).feature_visibility = visibility;
             }
             Ok(None)
         }
         ToggleFeatureTranslation(id) => {
             if let Some(vid) = state.workspace.active_view {
-                if let Some(sv) = state.workspace.seq_views.get_mut(&vid) {
-                    if !sv.translation.features.remove(&id) {
-                        sv.translation.features.insert(id);
-                    }
+                let sv = state.seq_views.get_or_default(vid);
+                if !sv.translation.features.remove(&id) {
+                    sv.translation.features.insert(id);
                 }
             }
             Ok(None)

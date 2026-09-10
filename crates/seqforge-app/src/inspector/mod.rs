@@ -139,7 +139,12 @@ impl InspectorState {
     /// (reuses `seqforge_bio::primer_infos` = the `ListPrimers`/CLI projection);
     /// features + cut-sites (cheap) + the panel selection every frame. Called
     /// once before the dock renders.
-    pub fn refresh(&mut self, workspace: &mut Workspace, follow_selection: bool) {
+    pub fn refresh(
+        &mut self,
+        workspace: &mut Workspace,
+        seq_views: &crate::viewer::SeqViewCache,
+        follow_selection: bool,
+    ) {
         let Some(view_id) = workspace.active_view else {
             self.clear();
             return;
@@ -232,14 +237,12 @@ impl InspectorState {
                 self.editing = None;
             }
         }
-        self.primer_display = workspace
-            .seq_views
-            .get(&view_id)
+        self.primer_display = seq_views
+            .get(view_id)
             .map(|sv| sv.primer_display)
             .unwrap_or_default();
-        self.feature_visibility = workspace
-            .seq_views
-            .get(&view_id)
+        self.feature_visibility = seq_views
+            .get(view_id)
             .map(|sv| sv.feature_visibility.clone())
             .unwrap_or_default();
 

@@ -14,10 +14,14 @@
 //! with one tab strip (no second strip needed).
 //!
 //! Workspace still owns the things the dock can't: buffer storage,
-//! view identity, the active-view focus marker, and the per-view
-//! render cache (`SequenceView`). Buffer sharing across multiple
-//! views (split-view of the same plasmid) still works via
-//! `BufferStore`'s Arc-clone behaviour.
+//! view identity, and the active-view focus marker. Buffer sharing
+//! across multiple views (split-view of the same plasmid) still works
+//! via `BufferStore`'s Arc-clone behaviour.
+//!
+//! The per-view *render* cache is deliberately **not** here — it lives on
+//! `AppState` as `viewer::SeqViewCache`. Everything in this module is headless
+//! session state, so it can move below the GUI crate (ROADMAP decision 27);
+//! `SequenceView` holds egui geometry and cannot.
 
 #![allow(dead_code)]
 
@@ -78,8 +82,6 @@ pub fn display_name(buf: &Buffer) -> String {
         .map(str::to_owned)
         .unwrap_or_else(|| buf.name.clone())
 }
-
-use crate::viewer::SequenceView;
 
 // ── BufferStore ──────────────────────────────────────────────────────────────
 
@@ -270,14 +272,6 @@ pub struct Workspace {
     #[serde(skip)]
     pub buffers: BufferStore,
 
-    /// Per-view render caches for the sequence viewer. Transient;
-    /// rebuilt on next paint via the `(buffer_id, version)` cache
-    /// key. Keyed by `ViewId` so opening the same buffer in two views
-    /// gives each one its own independent cache (e.g. different
-    /// feature-row stacking when zoom levels diverge later).
-    #[serde(skip)]
-    pub seq_views: HashMap<ViewId, SequenceView>,
-
     /// Open assembly-recipe workbench documents (a non-buffer document type).
     /// Session-scoped like views — tabs are not restored on relaunch. Recipe
     /// JSON is explicit import/export from the workbench header (or CLI
@@ -296,7 +290,6 @@ impl Default for Workspace {
             views: HashMap::new(),
             active_view: None,
             buffers: BufferStore::new(),
-            seq_views: HashMap::new(),
             recipes: HashMap::new(),
             next_view: 0,
             next_recipe: 0,
@@ -393,7 +386,6 @@ impl Workspace {
     pub fn add_view(&mut self, buffer_id: BufferId, kind: ViewKind) -> ViewId {
         let id = self.alloc_view_id();
         self.views.insert(id, View::new(id, buffer_id, kind));
-        self.seq_views.insert(id, SequenceView::default());
         self.active_view = Some(id);
         id
     }
@@ -437,14 +429,15 @@ impl Workspace {
 
     /// Close a view by id. If the closed view held the last reference
     /// to its buffer, the buffer is dropped from the store too. The
-    /// caller is responsible for removing the corresponding dock tab.
+    /// caller is responsible for removing the corresponding dock tab,
+    /// and — in the GUI — for pruning the view's render cache with
+    /// `SeqViewCache::retain_open`.
     /// Returns Ok(view_id) on success, ViewNotFound otherwise.
     pub fn close_view(&mut self, view_id: ViewId) -> Result<ViewId, DispatchError> {
         let view = self
             .views
             .remove(&view_id)
             .ok_or(DispatchError::ViewNotFound(view_id))?;
-        self.seq_views.remove(&view_id);
 
         // Drop the buffer if no surviving view references it.
         let still = self.views.values().any(|v| v.buffer_id == view.buffer_id);
@@ -474,12 +467,16 @@ impl Workspace {
 
     // ── Buffer-locking helpers ────────────────────────────────────────────────
 
-    /// Run `f` with `(seq_view, view, buffer, annotations)` for a
-    /// specific view. Lock acquisition is bounded by the closure scope.
+    /// Run `f` with `(view, buffer, annotations)` for a specific view. Lock
+    /// acquisition is bounded by the closure scope.
+    ///
+    /// The renderer's per-view cache is deliberately *not* threaded through
+    /// here — it lives on `AppState` (see `viewer::SeqViewCache`), so a caller
+    /// that needs both borrows them as separate fields.
     pub fn with_view_buffer<R>(
         &mut self,
         view_id: ViewId,
-        f: impl FnOnce(&mut SequenceView, &mut View, &Buffer, &mut Annotations) -> R,
+        f: impl FnOnce(&mut View, &Buffer, &mut Annotations) -> R,
     ) -> Result<R, DispatchError> {
         let bid = self
             .views
@@ -492,9 +489,8 @@ impl Workspace {
             .ok_or(DispatchError::ViewNotFound(view_id))?;
         let buf = buf_arc.read().map_err(|_| DispatchError::PoisonedLock)?;
         let view = self.views.get_mut(&view_id).expect("located above");
-        let seq_view = self.seq_views.entry(view_id).or_default();
         let ann = self.buffers.annotations_mut(bid).expect("located above");
-        Ok(f(seq_view, view, &buf, ann))
+        Ok(f(view, &buf, ann))
     }
 
     /// `with_view_buffer` variant that read-locks the buffer and only
@@ -881,15 +877,6 @@ impl Workspace {
             Ok((changed, sel))
         })
     }
-
-    /// Reset every per-view render cache. Called by command arms
-    /// (Open, Close, GoTo, etc.) that previously reset the single
-    /// `seq_view` on `AppState`.
-    pub fn reset_all_seq_views(&mut self) {
-        for sv in self.seq_views.values_mut() {
-            sv.reset();
-        }
-    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -967,7 +954,6 @@ mod tests {
         let vid = ws.add_view(bid, ViewKind::TextView);
         assert_eq!(ws.active_view, Some(vid));
         assert!(ws.views.contains_key(&vid));
-        assert!(ws.seq_views.contains_key(&vid));
     }
 
     #[test]
@@ -1216,7 +1202,7 @@ mod tests {
         assert_eq!(ws.active_view, Some(v1));
 
         // v2 has a prior scan installed (active enzymes + a site + fresh stamp).
-        ws.with_view_buffer(v2, |_, view, buf, _| {
+        ws.with_view_buffer(v2, |view, buf, _| {
             view.active_enzymes = vec!["EcoRI".into()];
             seqforge_core::rescan_if_stale(view, buf, &OneSiteBio);
         })
@@ -1230,7 +1216,7 @@ mod tests {
         assert!(ws.view(v2).unwrap().cut_sites_stale(new_version));
 
         // Freshen v2 by id — no focus change, v1 still active — and it re-derives.
-        ws.with_view_buffer(v2, |_, view, buf, _| {
+        ws.with_view_buffer(v2, |view, buf, _| {
             seqforge_core::rescan_if_stale(view, buf, &OneSiteBio);
         })
         .unwrap();

@@ -228,6 +228,7 @@ impl MiniMap {
         &mut self,
         ui: &mut egui::Ui,
         workspace: &mut Workspace,
+        seq_views: &crate::viewer::SeqViewCache,
         cmds: &mut Vec<PendingCommand>,
         cfg: &Config,
     ) {
@@ -286,9 +287,8 @@ impl MiniMap {
         // The active view's feature-visibility (Source hidden by default, plus any
         // user toggles) — the minimap honors it like the main map, so a hidden
         // feature reserves no arc/bar (closes the source-still-shows divergence).
-        let visibility = workspace
-            .seq_views
-            .get(&snap.view_id)
+        let visibility = seq_views
+            .get(snap.view_id)
             .map(|sv| sv.feature_visibility.clone())
             .unwrap_or_default();
 
