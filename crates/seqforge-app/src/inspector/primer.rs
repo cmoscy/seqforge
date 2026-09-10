@@ -764,6 +764,7 @@ mod tests {
             binding: binding.map(Span::from_range),
             strand,
             len: 6,
+            tail: String::new(),
             tm: Some(42.0),
             gc: 50.0,
             hairpin_dg: None,

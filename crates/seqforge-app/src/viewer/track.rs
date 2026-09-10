@@ -387,6 +387,22 @@ pub(crate) fn build_block_layouts(
 /// band. Detached primers (`binding = None`) draw nowhere and are skipped.
 /// Returns `(primer_idx → row, n_rows)`; `primer_idx` is the positional index
 /// into `Annotations::primers()`.
+/// How many tail bases the primer track draws before collapsing to a `+N` stub.
+/// Shared with the paint pass so layout reserves exactly what gets drawn.
+pub(crate) const PRIMER_TAIL_CAP: usize = 8;
+
+/// Columns a primer's 5' tail occupies on the row, drawn inline beside the body.
+/// `None` when the oligo has no tail. Capped like the paint pass, plus one
+/// column for the `+N` stub when it overflows.
+pub(crate) fn primer_tail_cols(p: &seqforge_core::Primer) -> usize {
+    let Some(b) = p.binding else { return 0 };
+    let tail = p.sequence.len().saturating_sub(b.len);
+    if tail == 0 {
+        return 0;
+    }
+    tail.min(PRIMER_TAIL_CAP) + usize::from(tail > PRIMER_TAIL_CAP)
+}
+
 fn stack_primers(
     annotations: &Annotations,
     block_start: usize,
@@ -401,10 +417,23 @@ fn stack_primers(
         if (p.strand == Strand::Reverse) != want_rev {
             continue;
         }
+        // Inclusion still keys on the **body**, which is what `paint_band` draws
+        // (it bails when `primer_body_rect` misses the block), so a tail reaching
+        // back into a neighbouring block cannot reserve a phantom empty row
+        // there. Packing, though, uses the **drawn extent**: the tail draws
+        // inline beside the body, so two primers whose tails overlap must not
+        // share a row even when their bindings do not touch.
         let b_end = b.start + b.len;
         if b.start < block_end && b_end > block_start {
+            let tail = primer_tail_cols(p);
+            let (drawn_start, drawn_end) = if want_rev {
+                (b.start, b_end + tail)
+            } else {
+                (b.start.saturating_sub(tail), b_end)
+            };
             idx_list.push(i);
-            ranges.push((b.start.max(block_start), b_end.min(block_end)));
+            let lo = drawn_start.max(block_start);
+            ranges.push((lo, drawn_end.min(block_end).max(lo)));
         }
     }
     let (rows, n_rows) = greedy_stack(&ranges);

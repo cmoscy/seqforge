@@ -37,6 +37,77 @@
 > cross-track status:
 > [`../ROADMAP.md`](../ROADMAP.md).
 
+> **1.1b — tail-aware seed-and-extend (landed).** `find_primer_binding_sites`
+> seeded on the 3' k-mer but then scored the *full* oligo length, so every
+> restriction-cloning primer was unfindable: an 8–20 nt BsaI/SapI tail scored as
+> mismatches against a 4-mismatch budget. It now extends 3'→5' with an X-drop
+> (+1 paired, −1 mismatch, stop `extend_drop_off` below the best) and reports the
+> annealed footprint, leaving the rest as the `PrimerDecomposition::tail` the
+> engine already modelled. Ties keep the **shorter** footprint, so a tail base
+> that pairs by coincidence is not claimed; an interior mismatch is repaid by the
+> bases after it, so a mutagenic primer keeps its full footprint. A
+> `min_anneal_len` floor (12) stops a seed-length coincidence being called a
+> site, and an oligo no longer than that floor behaves exactly as before.
+> `anneal_tm` is now 3'-anchored to match, and `primers find` reports
+> `anneal_len` / `tail` / `anneal_tm`. This also fixes the Inspector and
+> `rescan-primer` for the very primers `add-primer-site` creates.
+
+> **1.1c — a tailed primer survives a round trip (landed).** Finding the tail was
+> only half of it: `map_primer` fell back to `best_effort_oligo` ("assume a
+> perfect anneal with no 5' tail") for any file we did not write ourselves, so a
+> cloning primer reloaded as its footprint and `PrepareKind::Pcr` would amplify a
+> fragment with no restriction sites on it. The tail render in
+> `viewer/tracks/primers.rs` had been correct all along — it simply never had a
+> tail to draw.
+>
+> - **Read**: a SnapGene/Benchling `;`-delimited `/note` carrying `sequence: …`
+>   is now honoured between `/seqforge_primer` and the best-effort fallback, and
+>   **only when consistent with the binding** (its 3' end must be what anneals
+>   there) — a stale note must not silently replace a correct reagent.
+> - **Write**: the same note is emitted alongside `/seqforge_primer`, but only
+>   when there *is* a tail to lose, and appended to the record's own `/note`
+>   rather than written as a second one (`Primer::qualifiers` is keyed by name, so
+>   a second `/note` would overwrite the description on reload).
+> - **Show**: `PrimerInfo::tail` (derived, wrap-safe) — one data field on the
+>   shared projection, for the CLI/agent face. The **map already owned the
+>   display** and needed no change: the lift-off ribbon in
+>   `viewer/tracks/primers.rs` had been correct since Phase 1.1 and simply never
+>   had a tail to draw. Its one gap is fixed here: the lift no longer hides in
+>   arrow mode, because a tail is part of the primer's *shape*, not a
+>   base-rendering extra (a 20 nt BsaI tail drawn as nothing reads as a primer
+>   that anneals over its whole length). Bases mode keeps the lifted letters +
+>   `+N` stub; arrow mode gets a lifted stub carrying its length. The Inspector
+>   detail line stays the plain full oligo — the track is where annealed-vs-tail
+>   is expressed, and a second vocabulary in the panel only competes with it.
+>
+> Together these make `assemble '<template>@pcr:F..R' --out …` a real fragment
+> source: the 6H8 library now builds all ten of its fragments that way and
+> asserts each reproduces its design part byte-for-byte.
+
+> **1.1d — one priming event, two anneal lengths (landed).** Consistency item 2
+> says decomposition anchors on the 3' terminus, never `binding.len()`.
+> `same_site` was the one place that rule was not applied: it compared whole
+> spans, so a stored footprint and a longer clean anneal at the same 3' anchor
+> read as two different sites. That is not a corner case — it is what every PCR
+> product looks like, because the product contains its own primer's tail and the
+> oligo therefore pairs full length there. The result was `Drifted` + a phantom
+> off-target on a perfectly correct primer.
+>
+> `same_site` now compares the 3' anchor + strand (forward: `start + len`;
+> reverse: `start`), and `primer_infos` calls it instead of carrying a second
+> copy of the comparison — the site list and the state it explains cannot
+> disagree. Drift and off-target detection are unaffected: both turn on the
+> anchor *moving*, which is what drift means.
+>
+> **1.1e — the tail comes back on-row (landed).** GUI-walk finding: with tails
+> finally reaching the renderer, the lifted ribbon drew half a row above the
+> band — which for a primer on the top row is the **ruler**. The band reserves
+> `n_rows × primer_row_h` and never had a sliver for it. Rather than pay extra
+> height on every block for the occasional tailed primer, the tail now draws
+> inline on the primer's own row (dimmed, notch at the anneal boundary), and
+> `stack_primers` packs on the drawn extent so two tails cannot collide either.
+> See § Rendering.
+
 ## Goal
 
 Display, ingest, evaluate, and (later) design primers, backed by a shared,
@@ -219,6 +290,42 @@ stringency (min 3' match / max mismatch — also gates `Detached`) and Tm params
 (Na⁺/Mg²⁺/oligo conc, default = seqfold Owczarzy-2008). Defaulted now, exposed
 later.
 
+### Tm is undefined over ambiguous sequence
+
+`tm`/`duplex_tm` reject any base outside `A/C/G/T`. A nearest-neighbour Tm is a
+property of a **specific duplex**, and an IUPAC code stands for a set of bases,
+so a degenerate oligo has a range of melting temperatures rather than one.
+
+This was found as a crash. `parse_input` derived the complement by indexing a map
+holding only `A/C/G/T/N`, so anything else **panicked** — and since the status bar
+computes a Tm over the current selection, clicking a diversified feature took the
+whole app down. The degenerate half of a mutagenesis library is exactly the input
+that hits it.
+
+**It closes an inconsistency rather than adding a layer.** The fold path already
+validated (`fold::emap_for_seq` rejects any base outside `ATGC`/`AUCG`), so the
+same crate gave three different answers for one class of input:
+
+| input | `hairpin_dg` | `tm` (before) | `tm` (now) |
+|---|---|---|---|
+| `ACGTN…` | `Err` | `Ok(number)` | `Err` |
+| `ACGTB…` | `Err` | **panic** | `Err` |
+
+`tm` now applies fold's own rule to the path that never had one. `N` is rejected
+too, deliberately: it is an ambiguity code like the rest, and the previous
+`Ok(number)` was computed by falling through the `nn`/`internal_mm` lookups to a
+zero contribution — a Tm derived as though those bases did not pair.
+
+The guard belongs in `parse_input` because `tm`, `duplex_tm` and `tm_cache` all
+funnel through it, so one check covers every entry point. There is no wrapper
+layer to put it in instead: `seqforge-bio` re-exports the thermo functions
+directly. The second strand is validated on the same pass — supplied explicitly
+it skipped the complement map entirely and hit the same silent zero-contribution
+path.
+
+Callers already treat Tm as fallible, so this surfaces as an absent value:
+`selection_qc` reports %GC (still meaningful) and no Tm.
+
 ## Thermo engine — vendoring seqfold
 
 - **Copy (vendor), not submodule.** seqfold's Rust core is `cdylib+rlib`, not on
@@ -248,10 +355,20 @@ below the strand rows. Aligned to the SnapGene/Benchling idiom:
 
 - **Annealed bases:** on-grid, column-aligned to the footprint; solid half-arrow
   with the **arrowhead at the 3' end** (extension direction).
-- **5' tail / overhang:** no template column → **lifts slightly off the grid**
-  (small vertical rise + a kink where it peels off), same hue, lighter/hatched so
-  the eye reads "not on the template." Long tail → **collapse to a stub + length
-  badge**, full tail on hover / in the panel.
+- **5' tail / overhang:** no template column → continues the arrow **inline on
+  the primer's own row**, same hue but dimmed, with a thin notch at the anneal
+  boundary so the eye reads "not on the template." Long tail → **collapse to a
+  stub + length badge** (cap `PRIMER_TAIL_CAP`), full tail on hover / in the
+  panel. Drawn in arrow mode too (as a dimmed rule + length), because the tail is
+  part of the primer's *shape*, not a base-rendering extra.
+
+  *Revised from "lifts slightly off the grid".* A raised ribbon has nowhere to
+  go: the band reserves `n_rows × primer_row_h` and nothing more, so a tail on
+  the top row lands in the ruler. Reserving extra height for every band to suit
+  the occasional tailed primer costs vertical space on every block; staying
+  on-row costs none and matches what SnapGene/Benchling actually draw. Row
+  packing (`stack_primers`) measures the **drawn extent** — body + tail columns —
+  so two primers whose tails overlap never share a row.
 - **Mismatch columns:** marked within the annealed region (warning-accent cell) —
   the visual counterpart of `Drifted`.
 - **State:** `Confirmed` normal; `Drifted` amber badge + mismatch marks;
@@ -500,8 +617,68 @@ strand, len, tm, gc, state, mismatches }`** — the *same* shape the Phase 1.4 C
 - **Diversion is a behavior change** (see Consistency §): `primer_bind` currently
   parses to a `Feature` (`genbank.rs:45`). It now routes to `Primer`; the writer
   must emit it from `primers` **only** (no double-emit from `features`).
-- **Within our files:** lossless. **Cross-tool:** binding preserved; tail
-  best-effort in `/note`. Full fidelity needs `.dna` (separate, later).
+- **Within our files:** lossless. **Cross-tool:** now genuinely round-trips, in
+  both directions (was: "tail best-effort in `/note`"). SnapGene and Benchling
+  write `primer_bind` notes as `;`-delimited `key: value` pairs carrying the
+  authored oligo:
+
+  ```
+  /note="color: black; sequence: aggcgtctaaccagtcacagtc; added: 2020-11-14"
+  ```
+
+  **Read** (`map_primer`): three tiers, most trustworthy first — our
+  `/seqforge_primer`, then a `sequence:` field from any `/note`, then
+  `best_effort_oligo`. Tier 2 is accepted **only when consistent with the
+  binding**: its 3' end must be what actually anneals there, else it is stale or
+  belongs to another record and adopting it would replace a correct reagent with
+  a wrong one — worse than the truncation it fixes.
+
+  **Write** (`primer_to_gb`): the same field is emitted alongside
+  `/seqforge_primer`, but **only when there is a tail to lose** (an untailed
+  primer reconstructs exactly, so leave the file's own wording alone), and
+  **appended** to an existing `/note` rather than added as a second one —
+  `Primer::qualifiers` is keyed by name, so a second `/note` would overwrite the
+  record's description on reload.
+
+  Full fidelity for the rest still needs `.dna` (separate, later).
+
+### Where primers live (the layering rule)
+
+A primer is a **reagent** (invariant 8), and a molecule carries the oligos that
+have a *priming relationship* to it. Three layers, and the distinction matters
+now that `PrepareKind::Pcr` is a fragment source:
+
+- A **PCR template** carries the oligos run against it. This is not documentary:
+  `pcr::prepare` looks primers up **by name on the source**, so an unannotated
+  template has no reactions at all.
+- A **PCR product keeps the pair that made it** — including the overhangs their
+  tails added, which is the whole point of a tailed primer and exactly what
+  SnapGene and Benchling annotate on an amplicon. `pcr::prepare` re-homes each
+  annealed footprint onto the product (`transport::extract` + `place` at
+  `tail_f_len`), which is correct: on a product whose forward primer had a 20 nt
+  tail, `0..20` is the primer's own tail and `20..49` is what it annealed to.
+  A consumer that does not want the record can drop it in one pass; a tool that
+  discards it leaves the caller no way to recover it.
+- An **assembly product** inherits nothing meaningful. A ligation junction is not
+  a priming event, and a digest can cut a footprint in half, so what survives
+  that far is truncated and genuinely drifted. Provenance for an assembly lives
+  in the recipe and in each fragment's `lineage`.
+
+**The consequence that bit us** (fixed, see 1.1d): on the product the primer's
+tail *is* templated — the product contains it — so a fresh anneal finds the oligo
+binding over its **whole length** while the stored footprint is the shorter one
+it had on the original template. Both share the 3' anchor, so they are one
+priming event; `same_site` compared whole spans and called them two, flagging a
+correct primer as `Drifted` with a phantom off-target.
+
+**Consumers should re-anchor on the product.** `PrimerInfo::tail` is derived from
+the stored `binding`, so an inherited footprint makes a product report a tail it
+does not have — all 49 bases pair there — and every viewer then draws one. The
+binding is the annotation's claim about *this* molecule, so a consumer that keeps
+the primers should rescan them against the product (`rescan-primer`, or
+`primers find` + re-annotate) and let the reaction record live where reaction
+facts belong. The 6H8 build does exactly that: `run_pcr.py` re-anchors each
+amplicon's pair, and which oligos made it stays in `01_pcr_reactions.csv`.
 
 ## Consistency with the implemented model (fixes the audit found)
 

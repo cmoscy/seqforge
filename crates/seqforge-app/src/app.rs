@@ -1149,6 +1149,10 @@ impl eframe::App for SeqForgeApp {
                         RecipeDialog::LoadRecipe(recipe) => {
                             AppCommand::LoadRecipe { id: recipe, path }
                         }
+                        RecipeDialog::RunToDir(recipe) => AppCommand::RunRecipeToDir {
+                            id: recipe,
+                            dir: path,
+                        },
                     }
                 } else if let Some(view) = self.state.pending_save_as.take() {
                     AppCommand::SaveDocument {
@@ -1447,7 +1451,8 @@ impl eframe::App for SeqForgeApp {
                             .clicked()
                         {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::SetOrigin {
-                                index: paste_pos,
+                                index: Some(paste_pos),
+                                feature: None,
                                 view: None,
                             }));
                             ui.close_menu();
@@ -2058,6 +2063,15 @@ mod tests {
         assert_eq!(gc, 80.0);
         let tm = tm.expect("oligo-length selection should carry a Tm");
         assert!((tm - 51.9).abs() <= 7.0, "tm {tm} off reference");
+    }
+
+    /// Selecting a diversified region must report %GC and simply no Tm — not
+    /// crash. Clicking such a feature is what surfaced the thermo panic.
+    #[test]
+    fn selection_qc_reports_gc_but_no_tm_for_degenerate_sequence() {
+        let (gc, tm) = selection_qc(b"AGGTCTCAGGAGNNNNBDNNNVNBSKRRR").unwrap();
+        assert!(gc > 0.0, "%GC is still meaningful over ambiguous sequence");
+        assert_eq!(tm, None, "a degenerate region has no single Tm");
     }
 
     #[test]

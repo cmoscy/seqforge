@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use egui_file_dialog::FileDialog;
 use seqforge_core::{
-    Annotations, Bin, Boundary, DispatchError, PrepareKind, Recipe, RecipeId, SourceRef, SpanEnds,
-    TopologyIntent, ViewerResponse, default_role,
+    Annotations, Bin, Boundary, DispatchError, PrepareKind, ProductInfo, Recipe, RecipeId,
+    SourceRef, SpanEnds, TopologyIntent, ViewerResponse, default_role,
 };
 
 use super::{layout, snapshot_focus_for_overlay};
@@ -65,9 +65,14 @@ pub enum RecipeOp {
 /// What a pending file dialog should do with its pick (workbench flows).
 #[derive(Debug, Clone)]
 pub enum RecipeDialog {
-    AddSource { recipe: RecipeId, bin: usize },
+    AddSource {
+        recipe: RecipeId,
+        bin: usize,
+    },
     SaveRecipe(RecipeId),
     LoadRecipe(RecipeId),
+    /// Run the recipe and write every product into the picked directory.
+    RunToDir(RecipeId),
 }
 
 pub(super) fn apply_new_recipe(
@@ -183,28 +188,106 @@ pub(super) fn apply_run_recipe(
         .cloned()
         .ok_or_else(|| DispatchError::InvalidInput(format!("no recipe {id}")))?;
 
+    // A workbench Run honours the combo checkboxes; with none ticked it runs
+    // every compatible combo.
+    let selection = state.recipe_combo_selection.get(&id).map(|s| {
+        let mut v: Vec<usize> = s.iter().copied().collect();
+        v.sort_unstable();
+        v
+    });
+    run_and_materialize(state, &recipe, Selection::Indices(selection), None, None)
+}
+
+/// `ViewerRequest::RunRecipe` — the socket/CLI face of Run. Loads a recipe from
+/// disk, runs it, opens the products, and optionally writes them out.
+///
+/// This is deliberately the *same* body as the workbench Run below it: one
+/// engine call, one materialize loop, one export call. A GUI click and
+/// `seqforge run-recipe` differ only in where the recipe and the combo
+/// selection come from.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_run_recipe_path(
+    state: &mut AppState,
+    recipe_path: PathBuf,
+    combos: Option<String>,
+    out: Option<PathBuf>,
+    format: String,
+    name_template: Option<String>,
+    origin: Option<String>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let text = std::fs::read_to_string(&recipe_path).map_err(|e| {
+        DispatchError::InvalidInput(format!("read recipe {}: {e}", recipe_path.display()))
+    })?;
+    let mut recipe: Recipe = serde_json::from_str(&text).map_err(|e| {
+        DispatchError::InvalidInput(format!("parse recipe {}: {e}", recipe_path.display()))
+    })?;
+    if let Some(t) = name_template {
+        recipe.name_template = Some(t);
+    }
+    let format = seqforge_bio::ProductFormat::parse(&format).ok_or_else(|| {
+        DispatchError::InvalidInput(format!(
+            "unknown product format {format:?} (supports: genbank, fasta)"
+        ))
+    })?;
+    let export = out.map(|dir| (dir, format));
+    let origin = origin.map(|spec| spec.parse().unwrap_or_else(|e| match e {}));
+    run_and_materialize(state, &recipe, Selection::Spec(combos), export, origin)
+}
+
+/// How the caller chose which combos to run.
+enum Selection {
+    /// Already-resolved indices (`None` = every compatible combo).
+    Indices(Option<Vec<usize>>),
+    /// An unparsed `--combos` selector (`None` = every compatible combo).
+    Spec(Option<String>),
+}
+
+/// Run `recipe`, open each product as a buffer, and export when asked.
+///
+/// The materialization cap applies to **tabs only** — every product is still
+/// written to `export`, so a 31-member combinatorial run does not silently
+/// lose 7 files to a UI limit.
+fn run_and_materialize(
+    state: &mut AppState,
+    recipe: &Recipe,
+    selection: Selection,
+    export: Option<(PathBuf, seqforge_bio::ProductFormat)>,
+    origin: Option<seqforge_bio::OriginSpec>,
+) -> Result<Option<ViewerResponse>, DispatchError> {
     // Resolve + run under an immutable borrow; drop it before materializing.
     let result = {
         let resolver = WorkspaceResolver {
             ws: &state.workspace,
         };
-        let indices: Vec<usize> = match state.recipe_combo_selection.get(&id) {
-            Some(selected) => {
-                let mut v: Vec<usize> = selected.iter().copied().collect();
-                v.sort_unstable();
-                v
-            }
-            None => {
-                let (summaries, _) = seqforge_bio::enumerate_combos(&recipe, &resolver, None);
-                summaries
-                    .into_iter()
-                    .filter(|c| c.ok)
-                    .map(|c| c.index)
-                    .collect()
+        let compatible = |resolver: &WorkspaceResolver| -> Vec<usize> {
+            let (summaries, _) = seqforge_bio::enumerate_combos(recipe, resolver, None);
+            summaries
+                .into_iter()
+                .filter(|c| c.ok)
+                .map(|c| c.index)
+                .collect()
+        };
+        let indices: Vec<usize> = match selection {
+            Selection::Indices(Some(v)) => v,
+            Selection::Indices(None) => compatible(&resolver),
+            Selection::Spec(None) => compatible(&resolver),
+            Selection::Spec(Some(spec)) => {
+                let (summaries, _) = seqforge_bio::enumerate_combos(recipe, &resolver, None);
+                seqforge_bio::parse_combo_spec(&spec, summaries.len())
+                    .map_err(|e| DispatchError::InvalidInput(format!("combos: {e}")))?
             }
         };
-        seqforge_bio::run_indices(&recipe, &resolver, &indices)
+        seqforge_bio::run_indices(recipe, &resolver, &indices)
     };
+
+    // Rotate before anything reads a coordinate, so the buffer, the file, and
+    // the reported spans agree on where position 0 is.
+    let mut result = result;
+    if let Some(spec) = &origin {
+        seqforge_bio::set_origins(&mut result.products, spec)
+            .map_err(DispatchError::InvalidInput)?;
+    }
+    let result = result;
 
     for w in &result.warnings {
         state.toasts.warning(format!("Assemble: {w}"));
@@ -213,10 +296,37 @@ pub(super) fn apply_run_recipe(
     let total = result.products.len();
     if total == 0 {
         state.toasts.warning("Assemble: no product produced");
-        return Ok(None);
+        return Ok(Some(ViewerResponse::Products {
+            products: Vec::new(),
+            warnings: result.warnings,
+        }));
     }
-    let capped = total > MAX_MATERIALIZED;
 
+    // Export first (all of them), then materialize up to the tab cap.
+    let paths: Vec<Option<PathBuf>> = match &export {
+        Some((dir, format)) => seqforge_bio::write_products(&result.products, dir, *format)
+            .map_err(|e| DispatchError::InvalidInput(format!("write products: {e}")))?
+            .into_iter()
+            .map(Some)
+            .collect(),
+        None => vec![None; total],
+    };
+
+    let infos: Vec<ProductInfo> = result
+        .products
+        .iter()
+        .zip(&paths)
+        .map(|(p, path)| ProductInfo {
+            name: p.name.clone(),
+            length: p.fragment.len(),
+            topology: p.fragment.topology,
+            combo_index: p.combo_index,
+            parts: p.parts.iter().map(|c| c.source_name.clone()).collect(),
+            path: path.clone(),
+        })
+        .collect();
+
+    let capped = total > MAX_MATERIALIZED;
     let mut first = None;
     for prod in result.products.into_iter().take(MAX_MATERIALIZED) {
         let ann =
@@ -236,11 +346,51 @@ pub(super) fn apply_run_recipe(
         state.focus.set_scope(FocusScope::View(vid));
     }
     if capped {
+        let written = if export.is_some() {
+            " (all were written to disk)"
+        } else {
+            ""
+        };
         state.toasts.warning(format!(
-            "Assemble: {total} products, opened the first {MAX_MATERIALIZED}"
+            "Assemble: {total} products, opened the first {MAX_MATERIALIZED}{written}"
         ));
     }
-    Ok(None)
+    if let Some((dir, _)) = &export {
+        state.toasts.info(format!(
+            "Assemble: wrote {total} product(s) to {}",
+            dir.display()
+        ));
+    }
+    Ok(Some(ViewerResponse::Products {
+        products: infos,
+        warnings: result.warnings,
+    }))
+}
+
+/// Workbench Run with an export directory — the GUI half of the parity pair
+/// with `seqforge assemble --out` / `seqforge run-recipe --out`.
+pub(super) fn apply_run_recipe_to_dir(
+    state: &mut AppState,
+    id: RecipeId,
+    dir: PathBuf,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let recipe = state
+        .workspace
+        .recipe(id)
+        .cloned()
+        .ok_or_else(|| DispatchError::InvalidInput(format!("no recipe {id}")))?;
+    let selection = state.recipe_combo_selection.get(&id).map(|s| {
+        let mut v: Vec<usize> = s.iter().copied().collect();
+        v.sort_unstable();
+        v
+    });
+    run_and_materialize(
+        state,
+        &recipe,
+        Selection::Indices(selection),
+        Some((dir, seqforge_bio::ProductFormat::GenBank)),
+        None,
+    )
 }
 
 pub(super) fn apply_set_combo_selection(
@@ -487,6 +637,15 @@ pub(super) fn apply_prompt_save_recipe(
     Ok(None)
 }
 
+/// Workbench "Run → folder…" — pick an output directory, then run.
+pub(super) fn apply_prompt_run_to_dir(
+    state: &mut AppState,
+    id: RecipeId,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    open_dialog(state, RecipeDialog::RunToDir(id), DialogMode::PickDirectory);
+    Ok(None)
+}
+
 pub(super) fn apply_prompt_load_recipe(
     state: &mut AppState,
     id: RecipeId,
@@ -500,6 +659,7 @@ enum DialogMode {
     PickFile,
     PickMultiple,
     SaveFile,
+    PickDirectory,
 }
 
 fn open_dialog(state: &mut AppState, intent: RecipeDialog, mode: DialogMode) {
@@ -533,6 +693,7 @@ fn open_dialog(state: &mut AppState, intent: RecipeDialog, mode: DialogMode) {
             dialog.pick_file();
         }
         DialogMode::PickMultiple => dialog.pick_multiple(),
+        DialogMode::PickDirectory => dialog.pick_directory(),
     }
     snapshot_focus_for_overlay(state);
     state.pending_recipe_dialog = Some(intent);

@@ -15,6 +15,7 @@ mod prepare;
 mod select;
 
 pub mod discover;
+pub mod export;
 pub mod join;
 
 use std::path::{Path, PathBuf};
@@ -137,6 +138,12 @@ impl SourceResolver for FileResolver {
 pub struct NamedProduct {
     pub name: String,
     pub fragment: Fragment,
+    /// Index of the expanded combo this product came from — the join key back
+    /// to [`ComboSummary::index`] (and the CLI `--combos` selector).
+    pub combo_index: usize,
+    /// The combo's per-bin contributions, in bin order. Carried on the product
+    /// so a caller can name/report provenance without re-expanding the recipe.
+    pub parts: Vec<ComboPart>,
 }
 
 /// The outcome of running a recipe.
@@ -259,8 +266,19 @@ fn finish_run(
             warnings.push(format!("combo index {i} out of range"));
             continue;
         };
+        let parts: Vec<ComboPart> = combo
+            .iter()
+            .map(|f| ComboPart {
+                source_name: f.lineage.source_doc.clone(),
+                length: f.len(),
+            })
+            .collect();
         for fragment in join::join(&recipe.join, combo, recipe.intent) {
-            products.push(fragment);
+            products.push(naming::Pending {
+                combo_index: i,
+                parts: parts.clone(),
+                fragment,
+            });
         }
     }
     if products.is_empty()

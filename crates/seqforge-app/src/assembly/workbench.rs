@@ -1221,6 +1221,18 @@ fn run_footer(
         if run_clicked {
             pending.push((AppCommand::RunRecipe { id }, None));
         }
+        // Same run, but every product also lands on disk — the GUI half of
+        // `assemble --out`. Products beyond the tab cap are still written.
+        if ui
+            .button("Run → folder…")
+            .on_hover_text(
+                "Run and write every product as GenBank into a folder \
+                 (all products are written, even past the tab limit)",
+            )
+            .clicked()
+        {
+            pending.push((AppCommand::PromptRunToDir { id }, None));
+        }
     });
 }
 

@@ -82,6 +82,32 @@ enum Cmd {
         /// Requires `--fidelity-dataset`.
         #[arg(long)]
         fidelity_matrix: bool,
+        /// Write each product into this directory (created if absent). Without
+        /// it, products are computed and reported but not saved.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Product file format when `--out` is given: `genbank` (default,
+        /// keeps features) or `fasta` (sequence only).
+        #[arg(long, default_value = "genbank")]
+        format: String,
+        /// Name each product from a template instead of `role+role #n`.
+        /// Brace-delimited tokens: `roles`, `n` (combo index), `i` (ordinal),
+        /// and `bin0`…`binN` (the file stem that bin contributed, optionally
+        /// truncated as `bin1:6`) — e.g. `VH-{bin1}-{bin2}`. Drives both the
+        /// product name and, with `--out`, the filename.
+        #[arg(long)]
+        name_template: Option<String>,
+        /// Run only these combos: comma-separated indices and `A-B` ranges,
+        /// with `!`-prefixed exclusions (`0-31,!12`). A bare exclusion means
+        /// "all but these". Indices match the `--dry-run` combo list.
+        #[arg(long)]
+        combos: Option<String>,
+        /// Rotate each circular product so this point becomes position 1: a
+        /// feature label (`Start`) or a 0-based index. A label must match
+        /// exactly one feature. Without it, a product opens wherever the first
+        /// bin's restriction cut happened to fall.
+        #[arg(long)]
+        origin: Option<String>,
     },
     /// Annotate a sequence file (post-MVP)
     Annotate {
@@ -189,17 +215,27 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             fidelity_dataset,
             fidelity_matrix,
-        } => seqforge_cli::run_assemble(
-            &inputs,
-            &method,
-            &topology,
-            enzymes.as_deref(),
-            &expand,
-            emit_recipe.as_deref(),
+            out,
+            format,
+            name_template,
+            combos,
+            origin,
+        } => seqforge_cli::run_assemble(seqforge_cli::AssembleOpts {
+            inputs: &inputs,
+            method: &method,
+            topology: &topology,
+            default_enzymes: enzymes.as_deref(),
+            expand: &expand,
+            emit_recipe: emit_recipe.as_deref(),
             dry_run,
-            fidelity_dataset.as_deref(),
+            fidelity_dataset: fidelity_dataset.as_deref(),
             fidelity_matrix,
-        ),
+            out: out.as_deref(),
+            format: &format,
+            name_template: name_template.as_deref(),
+            combos: combos.as_deref(),
+            origin: origin.as_deref(),
+        }),
         Cmd::Annotate { .. } => {
             anyhow::bail!("not yet implemented (post-MVP)")
         }

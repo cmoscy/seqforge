@@ -23,11 +23,28 @@ pub fn load(path: &Path) -> Result<Document, BioError> {
         .unwrap_or(header)
         .to_owned();
 
-    let sequence: Vec<u8> = lines
-        .flat_map(|l| l.bytes())
-        .filter(|b| !b.is_ascii_whitespace())
-        .map(|b| b.to_ascii_uppercase())
-        .collect();
+    // Reject multi-record files rather than silently concatenating them.
+    // Before this guard, every line after the first header — including the
+    // `>` header lines themselves — was folded into one "sequence", so a
+    // 5-record file loaded as a single corrupt molecule with header text as
+    // bases. Multi-record support proper (`path#RecordName` addressing) is
+    // tracked in plans/assembly.md.
+    let mut sequence: Vec<u8> = Vec::new();
+    for line in lines {
+        if let Some(next) = line.strip_prefix('>') {
+            let next = next.split_whitespace().next().unwrap_or(next);
+            return Err(BioError::Fasta(format!(
+                "{} holds more than one record ({name:?}, {next:?}, …); \
+                 SeqForge reads one sequence per file — split it first",
+                path.display()
+            )));
+        }
+        sequence.extend(
+            line.bytes()
+                .filter(|b| !b.is_ascii_whitespace())
+                .map(|b| b.to_ascii_uppercase()),
+        );
+    }
 
     if sequence.is_empty() {
         return Err(BioError::EmptyFile);
@@ -55,4 +72,37 @@ pub fn write(buf: &Buffer, path: &Path) -> Result<(), BioError> {
     }
     fs::write(path, out)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_tmp(name: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("seqforge-fasta-{name}.fa"));
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn single_record_loads() {
+        let p = write_tmp("single", ">frag1 desc\nacgt\nAC GT\n");
+        let doc = load(&p).unwrap();
+        assert_eq!(doc.name, "frag1");
+        assert_eq!(doc.sequence, b"ACGTACGT");
+        fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn multi_record_errors_instead_of_concatenating() {
+        let p = write_tmp("multi", ">a\nACGT\n>b\nTTTT\n");
+        let err = load(&p).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("more than one record"), "unexpected: {msg}");
+        assert!(
+            msg.contains("\"a\"") && msg.contains("\"b\""),
+            "unexpected: {msg}"
+        );
+        fs::remove_file(p).ok();
+    }
 }

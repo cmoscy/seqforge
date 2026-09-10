@@ -292,6 +292,15 @@ pub enum AppCommand {
     PromptLoadRecipe {
         id: seqforge_core::RecipeId,
     },
+    /// Open a directory picker, then Run writing every product into it.
+    PromptRunToDir {
+        id: seqforge_core::RecipeId,
+    },
+    /// Run a recipe → product buffers **and** GenBank files under `dir`.
+    RunRecipeToDir {
+        id: seqforge_core::RecipeId,
+        dir: PathBuf,
+    },
     /// Session-only combo checkbox set for Run subset (not part of recipe IR).
     SetRecipeComboSelection {
         id: seqforge_core::RecipeId,
@@ -417,6 +426,8 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | PromptAddSourceFile { .. }
         | PromptSaveRecipe { .. }
         | PromptLoadRecipe { .. }
+        | PromptRunToDir { .. }
+        | RunRecipeToDir { .. }
         | SetRecipeComboSelection { .. }
         | SetRecipeFidelity { .. } => true,
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
@@ -765,6 +776,8 @@ pub fn apply<B: BioOps>(
         }
         PromptSaveRecipe { id } => assembly::apply_prompt_save_recipe(state, id),
         PromptLoadRecipe { id } => assembly::apply_prompt_load_recipe(state, id),
+        PromptRunToDir { id } => assembly::apply_prompt_run_to_dir(state, id),
+        RunRecipeToDir { id, dir } => assembly::apply_run_recipe_to_dir(state, id, dir),
         SetRecipeComboSelection { id, selected } => {
             assembly::apply_set_combo_selection(state, id, selected)
         }
@@ -914,12 +927,32 @@ pub fn apply<B: BioOps>(
                 // `SaveAs` with an explicit path is a direct write; no dialog.
                 file::apply_save_document(state, view, path)
             }
+            ViewerRequest::RunRecipe {
+                recipe,
+                combos,
+                out,
+                format,
+                name_template,
+                origin,
+            } => assembly::apply_run_recipe_path(
+                state,
+                recipe,
+                combos,
+                out,
+                format,
+                name_template,
+                origin,
+            ),
             ViewerRequest::Undo { view } => edit::apply_undo(state, view),
             ViewerRequest::Redo { view } => edit::apply_redo(state, view),
 
             // ── Buffer lifecycle / topology ──
             ViewerRequest::New { circular, name } => file::apply_new(state, circular, name),
-            ViewerRequest::SetOrigin { index, view } => edit::apply_set_origin(state, view, index),
+            ViewerRequest::SetOrigin {
+                index,
+                feature,
+                view,
+            } => edit::apply_set_origin(state, view, index, feature),
             ViewerRequest::Linearize { at, view } => edit::apply_linearize(state, view, at),
             ViewerRequest::Circularize { origin, view } => {
                 edit::apply_circularize(state, view, origin)

@@ -11,6 +11,10 @@ mod search;
 mod translate;
 
 pub use assembly::discover::{EnzymeSites, cut_boundaries};
+pub use assembly::export::{
+    OriginSpec, ProductFormat, parse_combo_spec, resolve_origin, set_origins, set_product_origin,
+    write_product, write_products,
+};
 pub use assembly::join::{
     HarvestedOverhang, JoinProbe, JunctionReport, harvest_junction_overhangs, probe_join,
 };

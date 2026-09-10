@@ -5,8 +5,12 @@
 //! Each arrow is an outlined body column-aligned to the annealed footprint,
 //! arrowhead at the **3' end**, showing the oligo's **bases** per column — matches
 //! in the base palette, **mismatches** on an amber cell (the `Drifted` cue). The
-//! 5' tail (oligo bases beyond the footprint) peels **off** the grid as lifted
-//! letters, long tails capped with a `+N` stub. A **moved** badge marks
+//! 5' tail (oligo bases beyond the footprint) continues the arrow **inline on
+//! the primer's own row**, dimmed, with a notch at the anneal boundary — it is
+//! part of the primer's shape, not a base-rendering extra, so it draws in arrow
+//! mode too (as a dimmed rule + length). It stays on-row deliberately: the band
+//! reserves `n_rows × primer_row_h`, so anything raised above the top row lands
+//! in the ruler. A **moved** badge marks
 //! [`AttachmentState::Drifted`] primers; an **×N** badge counts off-target sites.
 //!
 //! The per-primer alignment (annealed / mismatch / tail, strand-correct) comes
@@ -240,60 +244,88 @@ fn paint_band(
             paint_state_badges(painter, body, mid_y, reverse, char_width, style, att);
         }
 
-        // 5' tail: oligo bases with no template column peel off the grid as
-        // lifted letters (away from the strand), lighter. Drawn only in the block
-        // holding the 5' end. Long tails are capped with a "+N" stub.
+        // 5' tail: oligo bases with no template column. Drawn **inline on the
+        // primer's own row**, continuing the body away from the 3' end in a
+        // dimmed hue with a thin notch at the junction — the SnapGene/Benchling
+        // idiom. It deliberately does not lift into a separate row: the band
+        // reserves `n_rows × primer_row_h` and nothing more, so a raised ribbon
+        // on the top row lands in the ruler. Keeping it on-row also means a tail
+        // can never collide with a neighbouring primer that `stack_primers`
+        // packed beside it. Drawn only in the block holding the 5' end; long
+        // tails are capped with a `+N` stub.
         let tail = decomp.map(|d| d.tail.as_slice()).unwrap_or(&[]);
         let five_prime_in_block = if reverse {
             binding.start + binding.len <= block_end
         } else {
             binding.start >= block_start
         };
-        if ctx.primer_display.bases && !tail.is_empty() && five_prime_in_block {
-            let cap = 8usize;
+        if !tail.is_empty() && five_prime_in_block {
+            let cap = crate::viewer::track::PRIMER_TAIL_CAP;
             let shown = tail.len().min(cap);
-            let lift = style.primer_row_h * 0.5 * if reverse { 1.0 } else { -1.0 };
-            let lift_y = if reverse { body.max.y } else { body.min.y } + lift;
             let edge_x = if reverse { body.max.x } else { body.min.x };
             let dir = if reverse { 1.0 } else { -1.0 };
-            // Selected-emphasis pass over the lifted tail (Phase 1.5e): a soft wash
-            // behind the ribbon letters so the whole oligo — body + tail — reads as
-            // one selected object, mirroring the body highlight above.
+            let stub = if tail.len() > cap { 1.0 } else { 0.0 };
+            let span_w = dir * (shown as f32 + stub) * char_width;
+
+            // Selected-emphasis pass (Phase 1.5e): one wash over body + tail so
+            // the whole oligo reads as a single selected object.
             if is_selected {
-                let wash_w =
-                    dir * (shown as f32 + if tail.len() > cap { 1.0 } else { 0.0 }) * char_width;
                 let wash = Rect::from_two_pos(
-                    Pos2::new(edge_x, lift_y - style.primer_row_h * 0.5),
-                    Pos2::new(edge_x + wash_w, lift_y + style.primer_row_h * 0.5),
+                    Pos2::new(edge_x, body.min.y),
+                    Pos2::new(edge_x + span_w, body.max.y),
                 );
                 painter.rect_filled(wash, 2.0, tail_color.gamma_multiply(0.28));
             }
-            // Kink connecting the body's 5' corner up to the lifted ribbon.
+
+            // The notch: a short vertical tick at the anneal boundary, marking
+            // where the oligo stops touching the template.
             painter.line_segment(
                 [
-                    Pos2::new(edge_x, mid_y),
-                    Pos2::new(edge_x + dir * char_width * 0.5, lift_y),
+                    Pos2::new(edge_x, body.min.y + 1.0),
+                    Pos2::new(edge_x, body.max.y - 1.0),
                 ],
-                Stroke::new(1.5, tail_color),
+                Stroke::new(1.0, tail_color),
             );
-            // Tail bases nearest the annealed junction first (3'→5' of the tail).
-            for k in 0..shown {
-                let base = tail[tail.len() - 1 - k];
-                let cx = edge_x + dir * (k as f32 + 0.5) * char_width;
-                painter.text(
-                    Pos2::new(cx, lift_y),
-                    Align2::CENTER_CENTER,
-                    (base as char).to_string(),
-                    style.font_id.clone(),
-                    tail_color,
+
+            if ctx.primer_display.bases {
+                // Tail bases nearest the junction first (3'→5' of the tail).
+                for k in 0..shown {
+                    let base = tail[tail.len() - 1 - k];
+                    let cx = edge_x + dir * (k as f32 + 0.5) * char_width;
+                    painter.text(
+                        Pos2::new(cx, mid_y),
+                        Align2::CENTER_CENTER,
+                        (base as char).to_string(),
+                        style.font_id.clone(),
+                        tail_color,
+                    );
+                }
+                if tail.len() > cap {
+                    let cx = edge_x + dir * (shown as f32 + 0.5) * char_width;
+                    painter.text(
+                        Pos2::new(cx, mid_y),
+                        Align2::CENTER_CENTER,
+                        format!("+{}", tail.len() - cap),
+                        style.small_font.clone(),
+                        tail_color,
+                    );
+                }
+            } else {
+                // Arrow mode: no letters, but the tail is part of the primer's
+                // *shape*, not a base-rendering extra. A dimmed rule along the
+                // row, labelled with its length.
+                painter.line_segment(
+                    [Pos2::new(edge_x, mid_y), Pos2::new(edge_x + span_w, mid_y)],
+                    Stroke::new(1.5, tail_color),
                 );
-            }
-            if tail.len() > cap {
-                let cx = edge_x + dir * (shown as f32 + 0.5) * char_width;
                 painter.text(
-                    Pos2::new(cx, lift_y),
-                    Align2::CENTER_CENTER,
-                    format!("+{}", tail.len() - cap),
+                    Pos2::new(edge_x + span_w, mid_y),
+                    if reverse {
+                        Align2::LEFT_CENTER
+                    } else {
+                        Align2::RIGHT_CENTER
+                    },
+                    format!("{} nt", tail.len()),
                     style.small_font.clone(),
                     tail_color,
                 );

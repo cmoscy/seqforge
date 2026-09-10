@@ -286,6 +286,35 @@ mod tests {
         );
     }
 
+    /// A degenerate base has no single Tm, and the complement map holds only
+    /// A/C/G/T/N — so this used to **panic**, taking the GUI down whenever a
+    /// diversified feature was clicked (its span became the selection, and the
+    /// status bar computes a Tm over the selection).
+    #[test]
+    fn ambiguous_sequence_errors_instead_of_panicking() {
+        for seq in ["ACGTBCGTACGT", "ACGTNNNNACGT", "RYSWKM", "ACGTacgtRcgt"] {
+            let err = tm(seq).expect_err(&format!("{seq} should not yield a Tm"));
+            assert!(
+                err.0.contains("ambiguity code"),
+                "unhelpful error for {seq}: {}",
+                err.0
+            );
+        }
+        // …and every unambiguous oligo still computes, case-insensitively.
+        assert!(tm("ACGTACGTACGT").is_ok());
+        assert!(tm("acgtacgtacgt").is_ok());
+    }
+
+    /// The second strand is checked too: supplied explicitly, an ambiguous
+    /// partner used to slip past the complement map and score every ambiguous
+    /// pair as a zero contribution — a number, quietly computed as though those
+    /// bases did not pair.
+    #[test]
+    fn ambiguous_second_strand_errors_too() {
+        let err = duplex_tm("ACGTACGT", "TGCANGCA").expect_err("should not yield a Tm");
+        assert!(err.0.contains("second strand"), "unexpected: {}", err.0);
+    }
+
     #[test]
     fn duplex_tm_matches_monomer_when_seq2_is_complement() {
         let seq = "GCGTAC";

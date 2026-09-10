@@ -253,8 +253,18 @@ pub enum ViewerRequest {
     /// Set the origin of a **circular** molecule: rotate so `index` (0-based)
     /// becomes position 0. Topology is unchanged; a feature crossing the new
     /// origin becomes a single wrapping span.
+    ///
+    /// Give either `index` or `--feature`; a feature label must match exactly
+    /// one feature, and its start becomes the new origin. The label form is
+    /// what makes the origin reproducible across a batch of related plasmids —
+    /// the same landmark rather than the same number.
     SetOrigin {
-        index: usize,
+        #[arg(required_unless_present = "feature", conflicts_with = "feature")]
+        index: Option<usize>,
+        /// Rotate to the start of the single feature with this label.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
@@ -526,6 +536,42 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
+    /// Run an assembly recipe → materialize its product(s) as buffers, and
+    /// optionally write them straight to disk.
+    ///
+    /// The GUI's **File → New Assembly… → Run** and this request are one code
+    /// path: both call `seqforge_bio::run_indices` and both export through
+    /// `seqforge_bio::write_products`. Without a running viewer, prefer the
+    /// local `seqforge assemble --out` — same engine, no socket needed.
+    RunRecipe {
+        /// A `recipe.json`, as written by `assemble --emit-recipe` or the
+        /// workbench's Save Recipe.
+        recipe: PathBuf,
+        /// Run only these combos: indices, `A-B` ranges, and `!` exclusions
+        /// (`0-31,!12`). Omitted → every combo whose ends are compatible.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        combos: Option<String>,
+        /// Write each product into this directory as well as opening it.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<PathBuf>,
+        /// Product format for `out`: `genbank` (default) or `fasta`.
+        #[arg(long, default_value = "genbank")]
+        #[serde(default = "default_product_format")]
+        format: String,
+        /// Override the recipe's product-name template. Brace-delimited
+        /// tokens: `roles`, `n` (combo index), `i` (ordinal), `bin0`…`binN`
+        /// (optionally `bin1:6`) — e.g. `VH-{bin1}-{bin2}`.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_template: Option<String>,
+        /// Rotate each circular product so this point becomes position 1: a
+        /// feature label (`Start`) or a 0-based index.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+    },
     /// Undo the last edit on the active buffer.
     Undo {
         #[arg(long)]
@@ -585,6 +631,7 @@ impl ViewerRequest {
             | ViewerRequest::Close
             | ViewerRequest::Buffers
             | ViewerRequest::New { .. } // creates its own view
+            | ViewerRequest::RunRecipe { .. } // creates its own view(s)
             | ViewerRequest::Focus { .. } => None,
         }
     }
@@ -645,6 +692,33 @@ pub enum ViewerResponse {
         fragments: Vec<FragmentInfo>,
         warnings: Vec<String>,
     },
+    /// `RunRecipe` — the assembled product(s), in run order.
+    Products {
+        products: Vec<ProductInfo>,
+        warnings: Vec<String>,
+    },
+}
+
+/// One assembly product, projected for display / CLI. Unlike a fragment, a
+/// product **is** materialized (as a buffer, and optionally a file), so it
+/// carries the provenance a caller needs to join it back to its inputs:
+/// `combo_index` indexes the same expansion the dry-run reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductInfo {
+    pub name: String,
+    pub length: usize,
+    pub topology: Topology,
+    pub combo_index: usize,
+    /// The per-bin source names that went into this product, in bin order.
+    pub parts: Vec<String>,
+    /// Where it was written, when `out` was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+/// serde default for [`ViewerRequest::RunRecipe::format`].
+fn default_product_format() -> String {
+    "genbank".to_string()
 }
 
 /// One end of a fragment, projected for display / CLI. `kind` is `"blunt"` /
@@ -747,6 +821,12 @@ pub struct PrimerInfo {
     pub strand: Strand,
     /// Oligo length in bp (full oligo, 5' tail included).
     pub len: usize,
+    /// The 5' bases that anneal to nothing — a restriction site, an overhang, a
+    /// homology arm. Derived as `sequence` minus the `binding` length, so it is
+    /// empty for an ordinary primer and non-empty for a cloning one. Surfaced
+    /// because it is invisible from `binding` alone (a `primer_bind` can only
+    /// span what anneals) yet it is the functional half of a cloning oligo.
+    pub tail: String,
     /// Monomer nearest-neighbour Tm (°C); `None` if the oligo is too short.
     pub tm: Option<f64>,
     /// GC content (percentage, `0.0..=100.0`).
@@ -931,7 +1011,8 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::Redo { .. }
         | ViewerRequest::SetOrigin { .. }
         | ViewerRequest::Linearize { .. }
-        | ViewerRequest::Circularize { .. } => {
+        | ViewerRequest::Circularize { .. }
+        | ViewerRequest::RunRecipe { .. } => {
             unreachable!(
                 "editor write-ops are workspace-scoped; the caller routes them \
                  to command/edit.rs before invoking dispatch (see command::apply)"
@@ -1172,6 +1253,7 @@ mod tests {
                     binding: p.binding,
                     strand: p.strand,
                     len: p.sequence.chars().count(),
+                    tail: String::new(),
                     tm: None,
                     gc: 0.0,
                     hairpin_dg: None,

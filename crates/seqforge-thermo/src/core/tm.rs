@@ -164,15 +164,44 @@ fn gc_cache_bytes(seq: &[u8]) -> Vec<Vec<f64>> {
     arr_gc
 }
 
+/// Reject sequence a nearest-neighbour Tm is not defined over.
+///
+/// An IUPAC ambiguity code (`N`, `R`, `Y`, `B`, `D`, …) stands for a *set* of
+/// bases, so a degenerate oligo has a *range* of melting temperatures, not one —
+/// and the NN tables have no entry for an ambiguous pair. Two things went wrong
+/// without this check: deriving the complement indexed a map holding only
+/// `A/C/G/T/N` and **panicked** on anything else (clicking a diversified feature
+/// in the viewer crashed the app), and when the caller supplied both strands the
+/// ambiguous pairs instead fell through the `nn`/`internal_mm` lookups to a zero
+/// contribution, quietly returning a Tm computed as though those bases did not
+/// pair at all. An error is the honest answer; callers already handle it
+/// (`selection_qc` shows %GC and no Tm).
+fn reject_ambiguous(seq: &str, which: &str) -> Result<(), TmError> {
+    match seq
+        .bytes()
+        .find(|b| !matches!(b, b'A' | b'C' | b'G' | b'T'))
+    {
+        Some(b) => Err(TmError(format!(
+            "{which} contains '{}', an IUPAC ambiguity code — a Tm is defined \
+             over a specific duplex, not a degenerate set",
+            b as char
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn parse_input(seq1: &str, seq2: &str) -> Result<(String, String), TmError> {
     let seq1 = seq1.to_uppercase();
+    reject_ambiguous(&seq1, "sequence")?;
     let seq2 = if seq2.is_empty() {
         let emap = dna();
         seq1.bytes()
             .map(|c| emap.complement[&c] as char)
             .collect::<String>()
     } else {
-        seq2.to_string()
+        let seq2 = seq2.to_uppercase();
+        reject_ambiguous(&seq2, "the second strand")?;
+        seq2
     };
 
     if seq1.len() != seq2.len() {

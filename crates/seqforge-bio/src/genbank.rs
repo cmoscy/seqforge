@@ -128,12 +128,23 @@ fn map_feature(f: &GbFeature, len: usize, circular: bool) -> Option<Feature> {
 /// Map a GenBank `primer_bind` record to an authored [`Primer`] (decision 14).
 ///
 /// `binding` comes from the location, `strand` from `complement(...)`. The full
-/// oligo comes from our `/seqforge_primer` note when present (lossless, our own
-/// files); on a foreign import it is reconstructed **best-effort** from the
-/// template at the binding (forward = the footprint, reverse = its
-/// reverse-complement) — i.e. assuming a perfect anneal with no 5' tail. The
-/// name is derived like a feature label and also round-trips natively via the
-/// preserved `/note` (or `/label`) qualifier.
+/// oligo is recovered in three tiers, most trustworthy first:
+///
+/// 1. our own `/seqforge_primer` note (lossless);
+/// 2. a SnapGene-style `sequence:` field inside a `;`-delimited `/note`, if it
+///    is **consistent with the binding** (see [`note_oligo`]);
+/// 3. reconstruction from the template at the binding — forward = the footprint,
+///    reverse = its reverse-complement — i.e. assuming a perfect anneal.
+///
+/// Tier 3 is the only lossy one, and it is why tier 2 matters: a cloning primer
+/// carries a 5' tail (restriction site, overhang, homology arm) that anneals to
+/// nothing, so reconstructing from the footprint silently discards the part of
+/// the oligo that does the cloning. SnapGene and Benchling both record the full
+/// oligo in that note, so honouring it recovers the reagent rather than a
+/// truncation of it.
+///
+/// The name is derived like a feature label and also round-trips natively via
+/// the preserved `/note` (or `/label`) qualifier.
 fn map_primer(f: &GbFeature, seq: &[u8]) -> Option<Primer> {
     let bounds = f.location.find_bounds().ok()?;
     let start = bounds.0.max(0) as usize;
@@ -171,6 +182,7 @@ fn map_primer(f: &GbFeature, seq: &[u8]) -> Option<Primer> {
 
     let sequence = note
         .map(|n| n.sequence)
+        .or_else(|| note_oligo(&qualifiers, &seq[start..end], strand))
         .unwrap_or_else(|| best_effort_oligo(&seq[start..end], strand));
 
     Some(Primer {
@@ -184,10 +196,51 @@ fn map_primer(f: &GbFeature, seq: &[u8]) -> Option<Primer> {
     })
 }
 
-/// Reconstruct an oligo from the template footprint it binds, for a foreign
-/// import with no `/seqforge_primer` note: a forward primer *is* the top-strand
-/// footprint; a reverse primer is its reverse-complement. `region` is already
-/// upper-cased.
+/// Recover the full oligo from a SnapGene-style `/note`.
+///
+/// SnapGene and Benchling write `primer_bind` notes as `;`-delimited
+/// `key: value` pairs, one of which is the authored oligo:
+///
+/// ```text
+/// /note="color: black; sequence: aggcgtctaaccagtcacagtc; added: 2020-11-14"
+/// ```
+///
+/// The value is accepted **only when it is consistent with the binding**: its
+/// 3'-most `region.len()` bases must be exactly what anneals there. A note that
+/// fails that test is stale, belongs to a different record, or is describing a
+/// different template — adopting it would silently replace a correct reagent
+/// with a wrong one, which is worse than the truncation it is meant to fix. An
+/// oligo shorter than the footprint is rejected for the same reason.
+fn note_oligo(
+    qualifiers: &BTreeMap<String, Option<String>>,
+    region: &[u8],
+    strand: Strand,
+) -> Option<String> {
+    let expected = best_effort_oligo(region, strand);
+    qualifiers
+        .iter()
+        .filter(|(k, _)| k.as_str() == "note")
+        .filter_map(|(_, v)| v.as_deref())
+        .flat_map(|note| note.split(';'))
+        .filter_map(|field| {
+            let (key, value) = field.split_once(':')?;
+            key.trim().eq_ignore_ascii_case("sequence").then_some(value)
+        })
+        .map(|value| {
+            value
+                .bytes()
+                .filter(|b| !b.is_ascii_whitespace())
+                .map(|b| b.to_ascii_uppercase())
+                .collect::<Vec<u8>>()
+        })
+        .filter(|oligo| !oligo.is_empty() && oligo.iter().all(u8::is_ascii_alphabetic))
+        .find(|oligo| oligo.len() >= expected.len() && oligo.ends_with(expected.as_bytes()))
+        .map(|oligo| String::from_utf8_lossy(&oligo).into_owned())
+}
+
+/// Reconstruct an oligo from the template footprint it binds, for an import with
+/// no usable sequence note: a forward primer *is* the top-strand footprint; a
+/// reverse primer is its reverse-complement. `region` is already upper-cased.
 fn best_effort_oligo(region: &[u8], strand: Strand) -> String {
     let bytes = match strand {
         Strand::Reverse => crate::reverse_complement(region),
@@ -429,6 +482,44 @@ fn primer_to_gb(p: &Primer) -> Option<GbFeature> {
         sequence: p.sequence.clone(),
     }) {
         qualifiers.push((Cow::Borrowed(PRIMER_KEY), Some(json)));
+    }
+
+    // Also emit the interoperable form, but **only when there is a tail to
+    // lose**. `/seqforge_primer` is ours and nothing else reads it, so a tailed
+    // primer written here would still be truncated the moment the file is opened
+    // in SnapGene or Benchling — the same loss `note_oligo` undoes on the way in.
+    // An untailed primer needs no note: reconstruction from the footprint
+    // recovers it exactly, so leave the file's own wording alone.
+    //
+    // The field is appended to any existing `/note` rather than written as a
+    // second one, because `Primer::qualifiers` is keyed by name — a second
+    // `/note` would overwrite the record's own description on reload. That also
+    // happens to be SnapGene's own format: `;`-delimited `key: value` fields.
+    let tail_len = p
+        .binding
+        .map(|b| p.sequence.len().saturating_sub(b.len))
+        .unwrap_or(0);
+    if tail_len > 0 {
+        let field = format!("sequence: {}", p.sequence);
+        match qualifiers.iter_mut().find(|(k, _)| k == "note") {
+            Some((_, value)) => {
+                let has_sequence = value.as_deref().is_some_and(|note| {
+                    note.split(';').any(|f| {
+                        f.split_once(':')
+                            .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case("sequence"))
+                    })
+                });
+                if !has_sequence {
+                    *value = Some(match value.take() {
+                        Some(existing) if !existing.trim().is_empty() => {
+                            format!("{existing}; {field}")
+                        }
+                        _ => field,
+                    });
+                }
+            }
+            None => qualifiers.push((Cow::Borrowed("note"), Some(field))),
+        }
     }
 
     Some(GbFeature {

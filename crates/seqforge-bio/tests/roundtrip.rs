@@ -8,6 +8,7 @@ use seqforge_core::{
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -19,14 +20,18 @@ fn fixture(name: &str) -> PathBuf {
 struct TempOut(PathBuf);
 
 impl TempOut {
+    /// A temp path unique to this call.
+    ///
+    /// The clock is **not** a unique id — `SystemTime::now()` can return the
+    /// same value for consecutive calls — and two tests can share a `tag`
+    /// (`pUC19` is used twice), so a timestamped name let parallel tests collide
+    /// on one path. A monotonic counter is unique by construction.
     fn new(tag: &str, ext: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         p.push(format!(
-            "seqforge_rt_{tag}_{}_{nanos}.{ext}",
+            "seqforge_rt_{tag}_{}_{n}.{ext}",
             std::process::id()
         ));
         TempOut(p)
@@ -40,6 +45,15 @@ impl Drop for TempOut {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// Two `TempOut`s must never share a path, even with the same tag — `pUC19` is
+/// used by two tests that run in parallel.
+#[test]
+fn temp_out_paths_are_unique_per_call() {
+    let a = TempOut::new("pUC19", "gb");
+    let b = TempOut::new("pUC19", "gb");
+    assert_ne!(a.path(), b.path());
 }
 
 fn shell(doc: Document) -> (Buffer, Annotations) {
@@ -441,4 +455,203 @@ fn detached_primer_is_skipped_on_write() {
         "only the attached primer is written back"
     );
     assert_eq!(doc2.primers[0].name, "attached");
+}
+
+/// A tailed primer must survive a trip through a *foreign* tool too, so the
+/// interoperable note is written alongside `/seqforge_primer` — and appended to
+/// the record's own description rather than replacing it.
+#[test]
+fn tailed_primer_gains_an_interoperable_sequence_note() {
+    let buf = Buffer::new(
+        "interop".into(),
+        None,
+        b"AAAACGTACGTAAAA".to_vec(),
+        Topology::Linear,
+    );
+    let mut ann = Annotations::new(vec![]);
+    let mut qualifiers = BTreeMap::new();
+    qualifiers.insert("note".to_string(), Some("cloning primer".to_string()));
+    ann.add_primer(Primer {
+        id: Default::default(),
+        name: "tailed".into(),
+        sequence: "GGGGGCGTACGT".into(),
+        binding: Some(seqforge_core::Span::from_range(4..10)),
+        strand: Strand::Forward,
+        qualifiers,
+    });
+
+    let out = TempOut::new("interop", "gb");
+    save(&buf, &ann, out.path()).expect("save");
+    let text = std::fs::read_to_string(out.path()).unwrap();
+    let flat: String = text
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains("sequence: GGGGGCGTACGT"),
+        "no interoperable note written:\n{text}"
+    );
+    assert!(
+        flat.contains("cloning primer"),
+        "the record's own note must not be replaced:\n{text}"
+    );
+
+    // And it still reloads as the same primer, twice over (idempotent).
+    let doc2 = load(out.path()).expect("reload");
+    assert_eq!(doc2.primers[0].sequence, "GGGGGCGTACGT");
+    let (buf2, ann2) = shell(doc2);
+    let out2 = TempOut::new("interop2", "gb");
+    save(&buf2, &ann2, out2.path()).expect("save again");
+    let doc3 = load(out2.path()).expect("reload again");
+    assert_eq!(doc3.primers[0].sequence, "GGGGGCGTACGT");
+    assert_eq!(
+        doc3.primers[0].qualifiers,
+        ann2.primers().next().unwrap().qualifiers,
+        "a second round trip must not keep appending"
+    );
+}
+
+/// An untailed primer needs no note — reconstruction recovers it exactly, so the
+/// file's own wording is left alone.
+#[test]
+fn untailed_primer_gets_no_extra_note() {
+    let buf = Buffer::new(
+        "plain".into(),
+        None,
+        b"AAAACGTACGTAAAA".to_vec(),
+        Topology::Linear,
+    );
+    let mut ann = Annotations::new(vec![]);
+    ann.add_primer(Primer {
+        id: Default::default(),
+        name: "plain".into(),
+        sequence: "CGTACG".into(),
+        binding: Some(seqforge_core::Span::from_range(4..10)),
+        strand: Strand::Forward,
+        qualifiers: BTreeMap::new(),
+    });
+    let out = TempOut::new("plain", "gb");
+    save(&buf, &ann, out.path()).expect("save");
+    let text = std::fs::read_to_string(out.path()).unwrap();
+    assert!(!text.contains("sequence:"), "unexpected note:\n{text}");
+}
+
+// ── Foreign (SnapGene / Benchling) primer notes ────────────────────────────────
+
+/// Write a minimal GenBank with one `primer_bind` carrying a foreign-style note.
+fn foreign_primer_file(tag: &str, seq: &str, location: &str, note: &str) -> TempOut {
+    let out = TempOut::new(tag, "gb");
+    let wrapped: String = seq
+        .as_bytes()
+        .chunks(60)
+        .enumerate()
+        .map(|(i, chunk)| {
+            format!(
+                "{:>9} {}\n",
+                i * 60 + 1,
+                String::from_utf8_lossy(chunk).to_lowercase()
+            )
+        })
+        .collect();
+    std::fs::write(
+        out.path(),
+        format!(
+            "LOCUS       foreign  {} bp    DNA     linear   UNK 01-JAN-1980\n\
+             FEATURES             Location/Qualifiers\n\
+             \x20    primer_bind     {location}\n\
+             \x20                    /label=P1\n\
+             \x20                    /note=\"{note}\"\n\
+             ORIGIN\n{wrapped}//\n",
+            seq.len()
+        ),
+    )
+    .unwrap();
+    out
+}
+
+/// A cloning primer's 5' tail has no template coordinates, so reconstructing the
+/// oligo from the footprint truncates it. SnapGene records the full oligo in the
+/// note; honouring it recovers the reagent instead of a truncation.
+#[test]
+fn snapgene_sequence_note_recovers_a_tailed_primer() {
+    // template[5..25] is the annealed region; the oligo adds an 8 nt BsaI tail.
+    let template = "TTTTTGGCATTACGCAGGATCCAAGTTTTT";
+    let anneal = &template[5..25];
+    let oligo = format!("GGTCTCAG{anneal}");
+    let out = foreign_primer_file(
+        "snapgene_tail",
+        template,
+        "6..25",
+        &format!("color: black; sequence: {oligo}; added: 2020-11-14"),
+    );
+
+    let doc = load(out.path()).expect("load");
+    assert_eq!(doc.primers.len(), 1);
+    let p = &doc.primers[0];
+    assert_eq!(p.sequence, oligo, "the full tailed oligo must be recovered");
+    assert_eq!(
+        p.binding.unwrap(),
+        seqforge_core::Span::from_range(5..25),
+        "the binding stays the annealed footprint"
+    );
+    assert_eq!(p.sequence.len() - p.binding.unwrap().len, 8, "tail length");
+}
+
+/// A reverse record's note holds the oligo as authored (bottom-strand sense), so
+/// the consistency check compares against the footprint's reverse complement.
+#[test]
+fn snapgene_sequence_note_recovers_a_tailed_reverse_primer() {
+    let template = "TTTTTGGCATTACGCAGGATCCAAGTTTTT";
+    // revcomp(template[5..25]) plus an 8 nt tail.
+    let anneal = "CTTGGATCCTGCGTAATGCC";
+    let oligo = format!("GGTCTCAG{anneal}");
+    let out = foreign_primer_file(
+        "snapgene_tail_rev",
+        template,
+        "complement(6..25)",
+        &format!("sequence: {oligo}"),
+    );
+
+    let doc = load(out.path()).expect("load");
+    let p = &doc.primers[0];
+    assert_eq!(p.sequence, oligo, "reverse oligo recovered verbatim");
+    assert_eq!(p.strand, Strand::Reverse);
+    assert_eq!(p.sequence.len() - p.binding.unwrap().len, 8);
+}
+
+/// A note that does not agree with what actually anneals is stale, or belongs to
+/// another record. Adopting it would swap a correct reagent for a wrong one, so
+/// the best-effort reconstruction wins instead.
+#[test]
+fn inconsistent_sequence_note_is_rejected() {
+    let template = "TTTTTGGCATTACGCAGGATCCAAGTTTTT";
+    let out = foreign_primer_file(
+        "snapgene_stale",
+        template,
+        "6..25",
+        "color: black; sequence: GGTCTCAGACGTACGTACGTACGTACGT",
+    );
+
+    let doc = load(out.path()).expect("load");
+    let p = &doc.primers[0];
+    assert_eq!(
+        p.sequence, "GGCATTACGCAGGATCCAAG",
+        "a note that doesn't match the footprint must not be trusted"
+    );
+}
+
+/// No sequence note at all — the pre-existing behaviour is unchanged.
+#[test]
+fn primer_without_a_sequence_note_still_falls_back() {
+    let template = "TTTTTGGCATTACGCAGGATCCAAGTTTTT";
+    let out = foreign_primer_file(
+        "snapgene_none",
+        template,
+        "6..25",
+        "color: #75c6a9; direction: RIGHT",
+    );
+
+    let doc = load(out.path()).expect("load");
+    assert_eq!(doc.primers[0].sequence, "GGCATTACGCAGGATCCAAG");
 }

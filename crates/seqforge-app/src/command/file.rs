@@ -675,6 +675,7 @@ pub(super) fn apply_install_cli(
 mod phase15_tests {
     use super::*;
     use seqforge_core::{CutSite, Document, SearchHit};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Minimal `BioOps` that loads real files via `seqforge_bio` and no-ops the
     /// scan methods (unused by the save/close/revert paths under test).
@@ -710,14 +711,34 @@ mod phase15_tests {
         }
     }
 
+    /// A temp FASTA at a path unique to this call.
+    ///
+    /// The clock is **not** a unique id: `SystemTime::now()` can return the same
+    /// value for consecutive calls (measured here — 0 ns apart), and these tests
+    /// run in parallel, so a timestamped name let two of them land on one path
+    /// and one `fs::write` truncate the file the other was opening. Process id
+    /// plus a monotonic counter is unique by construction.
     fn temp_fasta(seq: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("seqforge_ph15_{nanos}.fasta"));
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("seqforge_ph15_{}_{n}.fasta", std::process::id()));
         std::fs::write(&p, format!(">test\n{seq}\n")).unwrap();
         p
+    }
+
+    /// The helper's whole job is a path no parallel test can collide with.
+    #[test]
+    fn temp_fasta_paths_are_unique_per_call() {
+        let a = temp_fasta("ACGT");
+        let b = temp_fasta("ACGT");
+        assert_ne!(a, b, "two calls must not share a path");
+        // And both must still be readable — a collision truncates one mid-read,
+        // which is exactly the flake this guards.
+        assert!(std::fs::read_to_string(&a).unwrap().contains("ACGT"));
+        assert!(std::fs::read_to_string(&b).unwrap().contains("ACGT"));
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
     }
 
     /// Open `path` into a fresh headless state, returning the active view id.

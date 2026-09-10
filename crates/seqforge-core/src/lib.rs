@@ -23,7 +23,7 @@ pub mod transport;
 
 pub use commands::{
     BioOps, DispatchError, DocInfo, EnzymeOp, FileCommand, PrimerInfo, PrimerSiteInfo, PrimerState,
-    ViewerRequest, ViewerResponse, dispatch, dispatch_file, rescan_if_stale,
+    ProductInfo, ViewerRequest, ViewerResponse, dispatch, dispatch_file, rescan_if_stale,
 };
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,

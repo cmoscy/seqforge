@@ -213,6 +213,14 @@ impl Annotations {
         ann
     }
 
+    /// Take the features and primers back out, ids and all — the inverse of
+    /// [`Annotations::from_parts`] for callers that hold the annotation layer
+    /// only to run a whole-molecule transform over it (rotate, mirror) and then
+    /// hand the pieces back to whatever owns them.
+    pub fn into_parts(self) -> (Vec<Feature>, Vec<Primer>) {
+        (self.features, self.primers)
+    }
+
     /// Mint the next session-scoped id. Ids start at 1, so `FeatureId(0)` (the
     /// `#[serde(skip)]` default) is always an unminted placeholder.
     fn mint(&mut self) -> FeatureId {

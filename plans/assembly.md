@@ -22,6 +22,39 @@
 > `assemble --dry-run` (optional fidelity % / matrix overlay). Fidelity scoring
 > is NEB Viewer–aligned (matrix-first; see [`fidelity.md`](fidelity.md)). Gibson /
 > homology join and GetSet-style overhang design remain later phases.
+>
+> **A1.2 — products materialize (landed).** Products were computable but not
+> keepable outside the GUI: the CLI printed lengths and dropped the bytes, and
+> `RunRecipe` was an `AppCommand` with no `ViewerRequest`, so the socket could
+> not reach it. Closed by:
+>
+> - `assembly::export` — `write_product(s)` (the one place a product becomes a
+>   file, called by *both* shells) + the `--combos` selector grammar.
+> - `NamedProduct` carries `combo_index` + `parts`, so a product joins back to
+>   the combo the dry-run reported without re-expanding the recipe.
+> - Combo-aware naming: `name_template` resolves `{roles}`/`{n}`/`{i}`/`{binN}`
+>   against the combo's own sources, so a library gets provenance-bearing names
+>   instead of `a+b+c #7`.
+> - `ViewerRequest::RunRecipe { recipe, combos, out, format, name_template }`
+>   + `ViewerResponse::Products` — the parity fix; `seqforge run-recipe` and the
+>   workbench's **Run → folder…** button share `run_and_materialize`.
+> - The `MAX_MATERIALIZED` cap now bounds **tabs only**, never the write loop.
+>
+> **A1.3 — origin + name composition (landed).** Two gaps that only show up in
+> batch: a product opened at whichever restriction cut the first bin contributed,
+> and `set-origin` was viewer-only and index-only, so there was no way to say
+> "put all 31 of these at the vector's `Start`". Closed by `assemble --origin
+> <label|index>` and `ViewerRequest::RunRecipe { origin }`, both delegating to the
+> already-pure `seqforge_core::rotate_origin`, plus `set-origin --feature` for the
+> live-document path; an ambiguous or missing label is an error, never a guess.
+> Naming gained a `{binN/K}` field selector so a level-2 product composes its name
+> from its level-1 inputs' variable block instead of nesting their whole stems.
+>
+> **Deferred — multi-record FASTA.** `fasta::load` reads one record per file and
+> now *errors* on a second `>` (it previously concatenated every following line,
+> header text included, into one corrupt molecule). Real support means
+> `path#RecordName` source addressing through `SourceRef` — worth doing when a
+> workflow needs it; splitting the file is the workaround until then.
 
 ## Goal
 

@@ -76,6 +76,20 @@ seqforge primers list plasmid.gb
 seqforge primers find plasmid.gb GCGTAC
 ```
 
+`primers find` seeds on the oligo's 3' end and extends, so a **cloning primer
+finds its site**: the reported footprint is the annealed region and the report
+carries the 5' tail (restriction site, overhang, homology arm) and the anneal Tm
+separately. A tail also survives loading — SeqForge reads the `sequence: …` note
+SnapGene and Benchling write, and emits it alongside its own — which is what lets
+a tailed primer be used as a PCR fragment source:
+
+```bash
+# One fragment, amplified off a plasmid with its restriction sites added by the
+# primer tails — the same thing you would do with DpnI at the bench.
+seqforge assemble 'template.gb@pcr:6H8-VH-1F..6H8-VH-1R' \
+  --method ligate --topology linear --name-template H1 --out build/pcr/
+```
+
 **Viewer commands** (require a running SeqForge window):
 
 ```bash
@@ -112,6 +126,52 @@ seqforge digest plasmid.gb --enzymes EcoRI,BamHI
 seqforge assemble vector.gb@EcoRI..PstI insert.gb@EcoRI..PstI --method ligate --dry-run
 seqforge assemble parts/*.gb@BsaI..BsaI --method golden-gate --dry-run --fidelity-dataset bsai
 ```
+
+Drop `--dry-run` to build, and `--out` to keep the products:
+
+```bash
+# A combinatorial Golden Gate: each bin is a glob, so all-to-all expands to
+# one product per source combination — written as GenBank, named from the
+# parts that went in.
+seqforge assemble \
+  'vector.gb@BsaI@401..BsaI@314' 'parts/pos1/*.gb' 'parts/pos2/*.gb' \
+  --method golden-gate --enzymes BsaI \
+  --out build/ --name-template 'lib-{bin1}-{bin2}'
+
+# Build every combo but one (indices match the --dry-run combo list):
+seqforge assemble recipe.json --combos '0-31,!12' --out build/
+```
+
+`--name-template` takes brace-delimited tokens — `roles`, `n` (combo index),
+`i` (ordinal), and `bin0`…`binN` (the file stem that bin contributed, optionally
+truncated as `bin1:6` or reduced to one `_`-separated field as `bin1/1`). It sets
+both the product name and the filename. The field selector is what makes
+hierarchical assembly compose: a level-2 product named from level-1 inputs takes
+the part that varies (`6H8_VH-PVP_pGGa` → `VH-PVP`) rather than nesting whole
+stems.
+
+`--origin` rotates each circular product so a named landmark becomes position 1:
+
+```bash
+seqforge assemble ... --origin Start        # a feature label (must be unique)
+seqforge assemble ... --origin 0            # or a 0-based index
+```
+
+Without it a product opens wherever the first bin's restriction cut fell, which
+is arbitrary — with it, a whole combinatorial library opens in the same frame.
+The same landmark works on an open document: `seqforge set-origin --feature Start`
+(the GUI equivalent is **Set Origin at cursor**).
+
+With a viewer running, the same run can go through the GUI's buffers instead —
+`RunRecipe` opens each product as a tab *and* writes it:
+
+```bash
+seqforge assemble parts/*.gb --method golden-gate --enzymes BsaI --emit-recipe r.json
+seqforge run-recipe r.json --combos '!0' --out build/
+```
+
+The workbench's **Run → folder…** button is the same code path. In both faces
+the tab cap applies to *tabs only* — every product is still written to disk.
 
 When the GUI is running, it sets `SEQFORGE_SOCKET` in the embedded terminal's environment. Any `seqforge` viewer command executed there — or in any shell that has `SEQFORGE_SOCKET` set — routes to the live viewer. If the variable is absent, viewer commands exit with a clear error.
 

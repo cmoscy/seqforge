@@ -242,9 +242,41 @@ pub(super) fn apply_reverse_complement(
 pub(super) fn apply_set_origin(
     state: &mut AppState,
     view: Option<ViewId>,
-    index: usize,
+    index: Option<usize>,
+    feature: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(state, view)?;
+    // A label is resolved against this buffer's own features; `resolve_origin`
+    // rejects a label that matches none or several rather than guessing.
+    let index = match (index, feature) {
+        (Some(i), _) => i,
+        (None, Some(label)) => {
+            let bid = state
+                .workspace
+                .view(vid)
+                .map(|v| v.buffer_id)
+                .ok_or_else(|| DispatchError::InvalidInput(format!("no view {vid}")))?;
+            let len = state
+                .workspace
+                .buffers
+                .get(bid)
+                .and_then(|b| b.read().ok().map(|b| b.text.len()))
+                .ok_or_else(|| DispatchError::InvalidInput("buffer unavailable".into()))?;
+            let features: Vec<seqforge_core::Feature> = state
+                .workspace
+                .buffers
+                .annotations(bid)
+                .map(|a| a.iter().cloned().collect())
+                .unwrap_or_default();
+            seqforge_bio::resolve_origin(&seqforge_bio::OriginSpec::Feature(label), &features, len)
+                .map_err(DispatchError::InvalidInput)?
+        }
+        (None, None) => {
+            return Err(DispatchError::InvalidInput(
+                "set-origin needs an index or --feature".into(),
+            ));
+        }
+    };
     state.workspace.set_origin(vid, index)?;
     edited(buffer_len(state, vid))
 }
@@ -973,7 +1005,7 @@ mod tests {
         apply_circularize(&mut s, None, None).unwrap();
         assert!(is_circular(&mut s), "circularize flips topology");
 
-        apply_set_origin(&mut s, None, 4).unwrap();
+        apply_set_origin(&mut s, None, Some(4), None).unwrap();
         assert_eq!(
             text(&mut s),
             b"CCCCGGGGTTTTAAAA",

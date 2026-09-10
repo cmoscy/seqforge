@@ -155,6 +155,36 @@ pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
     let sites_json: Vec<_> = sites
         .iter()
         .map(|s| {
+            // The footprint is the annealed region, so anything the oligo has
+            // 5' of it is a tail — a restriction site, an overhang, a homology
+            // arm. Report it explicitly: for a cloning primer the tail is the
+            // functional part, and it is invisible from the span alone.
+            // The footprint is the annealed span, so the tail is exactly what
+            // the oligo has left over — read it straight off, not from a
+            // decomposition, which would clamp an origin-crossing span to the
+            // sequence end and over-report the tail.
+            let tail_len = oligo.len().saturating_sub(s.span.len);
+            let tail = oligo[..tail_len].to_string();
+
+            // Tm needs a contiguous template region; extend past the origin for
+            // a wrapping site so the duplex is the real one.
+            let end = s.span.start + s.span.len;
+            let extended;
+            let (tm_template, tm_range) = if end > doc.sequence.len() {
+                let overhang = end - doc.sequence.len();
+                extended = doc
+                    .sequence
+                    .iter()
+                    .chain(&doc.sequence[..overhang.min(doc.sequence.len())])
+                    .copied()
+                    .collect::<Vec<_>>();
+                (&extended[..], s.span.start..end)
+            } else {
+                (&doc.sequence[..], s.span.start..end)
+            };
+            let tm = seqforge_bio::anneal_tm(oligo, &tm_range, s.strand, tm_template)
+                .ok()
+                .map(|t| (t * 10.0).round() / 10.0);
             serde_json::json!({
                 // Wrap-aware footprint as {start, len} (P5b: a site crossing the
                 // origin is one wrapping span, not an end > len overflow).
@@ -163,6 +193,10 @@ pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
                 "strand": s.strand,
                 "mismatches": s.mismatches,
                 "three_prime_match": s.three_prime_match,
+                "anneal_len": s.span.len,
+                "tail": tail,
+                "tail_len": tail_len,
+                "anneal_tm": tm,
             })
         })
         .collect();
@@ -222,23 +256,55 @@ pub fn run_digest(path: &Path, enzymes: &[String], circular_override: bool) -> a
 }
 
 /// Assemble a product from a recipe (Assembly A1) — the **local** CLI face of
+/// Everything `assemble` was invoked with. A struct rather than a dozen
+/// positional arguments so adding a flag stays a one-line change at each end.
+pub struct AssembleOpts<'a> {
+    pub inputs: &'a [String],
+    pub method: &'a str,
+    pub topology: &'a str,
+    pub default_enzymes: Option<&'a str>,
+    pub expand: &'a str,
+    pub emit_recipe: Option<&'a Path>,
+    pub dry_run: bool,
+    pub fidelity_dataset: Option<&'a str>,
+    pub fidelity_matrix: bool,
+    /// Directory to write products into (`--out`).
+    pub out: Option<&'a Path>,
+    /// Product format when `out` is set.
+    pub format: &'a str,
+    /// Product-name template (see `seqforge_bio::assembly::naming`).
+    pub name_template: Option<&'a str>,
+    /// Combo selector (see [`seqforge_bio::parse_combo_spec`]).
+    pub combos: Option<&'a str>,
+    /// Rotate each circular product to this feature label or index.
+    pub origin: Option<&'a str>,
+}
+
 /// `assemble`. Accepts either a single `recipe.json` or inline bin tokens
 /// (`SOURCE[@FROM..TO]`), runs the shared `seqforge_bio` engine over the
-/// filesystem, and prints the products. Both faces build the same `Recipe`
-/// (parity with the GUI, which runs the identical `seqforge_bio::run`).
-#[allow(clippy::too_many_arguments)]
-pub fn run_assemble(
-    inputs: &[String],
-    method: &str,
-    topology: &str,
-    default_enzymes: Option<&str>,
-    expand: &str,
-    emit_recipe: Option<&Path>,
-    dry_run: bool,
-    fidelity_dataset: Option<&str>,
-    fidelity_matrix: bool,
-) -> anyhow::Result<()> {
+/// filesystem, and prints the products — writing them to `--out` when asked.
+/// Both faces build the same `Recipe` (parity with the GUI, which runs the
+/// identical `seqforge_bio::run`) and both write through
+/// `seqforge_bio::write_products`.
+pub fn run_assemble(opts: AssembleOpts<'_>) -> anyhow::Result<()> {
     use seqforge_core::{Expand, JoinKind, Recipe, TopologyIntent};
+
+    let AssembleOpts {
+        inputs,
+        method,
+        topology,
+        default_enzymes,
+        expand,
+        emit_recipe,
+        dry_run,
+        fidelity_dataset,
+        fidelity_matrix,
+        out,
+        format,
+        name_template,
+        combos,
+        origin,
+    } = opts;
 
     // Build the recipe: a lone `*.json` loads; otherwise each input is a bin.
     let recipe = if inputs.len() == 1 && inputs[0].ends_with(".json") {
@@ -283,6 +349,11 @@ pub fn run_assemble(
             name_template: None,
         }
     };
+    let mut recipe = recipe;
+    if let Some(t) = name_template {
+        recipe.name_template = Some(t.to_string());
+    }
+    let recipe = recipe;
 
     if let Some(path) = emit_recipe {
         std::fs::write(path, serde_json::to_string_pretty(&recipe)?)
@@ -392,12 +463,47 @@ pub fn run_assemble(
     if fidelity_matrix {
         anyhow::bail!("--fidelity-matrix only applies with --dry-run --fidelity-dataset");
     }
+    let format = seqforge_bio::ProductFormat::parse(format)
+        .ok_or_else(|| anyhow::anyhow!("unknown --format {format:?} (supports: genbank, fasta)"))?;
 
-    let result = seqforge_bio::run(&recipe, &seqforge_bio::FileResolver);
+    // `--combos` narrows the run to selected indices. Resolving the selector
+    // needs the combo count, which only the expansion knows — so enumerate
+    // first, then run just the chosen ones.
+    let result = match combos {
+        None => seqforge_bio::run(&recipe, &seqforge_bio::FileResolver),
+        Some(spec) => {
+            let (summaries, _) =
+                seqforge_bio::enumerate_combos(&recipe, &seqforge_bio::FileResolver, None);
+            let indices = seqforge_bio::parse_combo_spec(spec, summaries.len())
+                .map_err(|e| anyhow::anyhow!("--combos: {e}"))?;
+            seqforge_bio::run_indices(&recipe, &seqforge_bio::FileResolver, &indices)
+        }
+    };
+
+    // Rotate before naming/export so the buffer, the file, and every reported
+    // coordinate agree on where position 0 is.
+    let mut result = result;
+    if let Some(spec) = origin {
+        let spec: seqforge_bio::OriginSpec = spec.parse().unwrap_or_else(|e| match e {});
+        seqforge_bio::set_origins(&mut result.products, &spec)
+            .map_err(|e| anyhow::anyhow!("--origin: {e}"))?;
+    }
+    let result = result;
+
+    let paths = match out {
+        Some(dir) => seqforge_bio::write_products(&result.products, dir, format)
+            .with_context(|| format!("write products to {}", dir.display()))?
+            .into_iter()
+            .map(Some)
+            .collect(),
+        None => vec![None; result.products.len()],
+    };
+
     let products: Vec<_> = result
         .products
         .iter()
-        .map(|p| {
+        .zip(&paths)
+        .map(|(p, path)| {
             let info = p.fragment.to_info(0);
             serde_json::json!({
                 "name": p.name,
@@ -405,6 +511,12 @@ pub fn run_assemble(
                 "topology": info.topology,
                 "left": info.left,
                 "right": info.right,
+                "combo_index": p.combo_index,
+                "parts": p.parts.iter().map(|c| serde_json::json!({
+                    "source": c.source_name,
+                    "length": c.length,
+                })).collect::<Vec<_>>(),
+                "path": path,
             })
         })
         .collect();

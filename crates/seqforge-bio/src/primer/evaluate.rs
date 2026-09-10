@@ -49,6 +49,20 @@ pub fn anneal_tm(
     if oligo.len() < 2 || start >= end {
         return Err(TmError("sequence too short".to_string()));
     }
+    // 3'-anchored, matching `decompose_primer`: only the bases inside the
+    // footprint anneal, so a cloning primer's 5' tail is excluded from the
+    // duplex. Without this, any tailed primer yields a length mismatch against
+    // its template partner and no Tm at all.
+    let oligo: String = {
+        let footprint = end - start;
+        match oligo.len().checked_sub(footprint) {
+            Some(tail_len) if tail_len > 0 => oligo[tail_len..].to_string(),
+            _ => oligo,
+        }
+    };
+    if oligo.len() < 2 {
+        return Err(TmError("sequence too short".to_string()));
+    }
     let region: String = template[start..end]
         .iter()
         .map(|&b| b.to_ascii_uppercase() as char)
@@ -143,9 +157,12 @@ fn primer_info(
         find_primer_binding_sites(&primer.sequence, template, circular, settings)
             .into_iter()
             .map(|s| {
+                // One predicate for "is this the stored priming event", shared
+                // with `classify_attachment` — a second copy here would let the
+                // site list disagree with the state it is supposed to explain.
                 let attached = primer
                     .binding
-                    .is_some_and(|b| b == s.span && s.strand == primer.strand);
+                    .is_some_and(|b| super::anneal::same_site(&s, b, primer.strand));
                 // Linear range into the template for the thermo engine (the
                 // documented linear-engine `Range` survivor).
                 let binding = s.span.start..s.span.start + s.span.len;
@@ -167,6 +184,17 @@ fn primer_info(
         binding: primer.binding,
         strand: primer.strand,
         len: primer.sequence.len(),
+        // Taken straight off the oligo rather than from `decompose_primer`,
+        // which clamps to the template end and would over-report the tail for a
+        // binding that crosses the origin. The footprint is the annealed span by
+        // definition, so whatever the oligo has beyond it is the tail.
+        tail: primer
+            .binding
+            .map(|b| {
+                let tail_len = primer.sequence.len().saturating_sub(b.len);
+                primer.sequence[..tail_len].to_string()
+            })
+            .unwrap_or_default(),
         tm: qc.qc.tm.ok(),
         gc: qc.qc.gc,
         hairpin_dg: qc.qc.hairpin_dg.ok(),
@@ -240,6 +268,38 @@ mod tests {
         let out = primer_qc_with_anneal(&primer, T);
         assert!(out.anneal_tm.is_some());
         assert!(out.anneal_tm.unwrap().is_ok());
+    }
+
+    /// The site list must agree with the state it is meant to explain: a longer
+    /// anneal at the stored 3' anchor is *the* attached site, not an off-target.
+    /// Regression for the PCR-product case, where the product contains the
+    /// primer's own tail so the oligo pairs over its whole length.
+    #[test]
+    fn a_longer_anneal_at_the_stored_anchor_is_marked_attached() {
+        let anneal = "GGCATTACGCAGGATCCAAG";
+        let product = format!("TTTTT{anneal}");
+        let primer = Primer {
+            id: PrimerId(1),
+            name: "tailed".into(),
+            sequence: product.clone(), // oligo == tail + anneal
+            binding: Some(seqforge_core::Span::from_range(5..25)),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+        let infos = primer_infos(product.as_bytes(), &[&primer], false);
+        let info = &infos[0];
+        assert_eq!(info.state, PrimerState::Confirmed);
+        assert_eq!(info.off_targets, 0, "sites: {:?}", info.sites);
+        assert!(
+            info.sites.iter().any(|s| s.attached && s.span.len == 25),
+            "the full-length site should be the attached one: {:?}",
+            info.sites
+        );
+        assert_eq!(
+            info.tail.len(),
+            5,
+            "tail still reads from the stored binding"
+        );
     }
 
     #[test]
