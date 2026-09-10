@@ -1,0 +1,10 @@
+[package]
+name = "seqforge-session"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+seqforge-core = { path = "../seqforge-core" }
+seqforge-bio = { path = "../seqforge-bio" }
+serde = { workspace = true }

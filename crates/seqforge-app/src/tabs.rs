@@ -7,7 +7,7 @@ use crate::command::{AppCommand, PendingCommand};
 use crate::config::Config;
 use crate::focus::{FocusScope, FocusState};
 use crate::overlay::{self, OverlayStack};
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 /// A leaf in the **center** egui_dock tree.
 ///
@@ -54,7 +54,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                 let name = self.workspace.view(*vid).and_then(|v| {
                     let arc = self.workspace.buffers.get(v.buffer_id)?;
                     let buf = arc.read().ok()?;
-                    Some(crate::workspace::display_name(&buf))
+                    Some(seqforge_session::display_name(&buf))
                 });
                 // Focus cue is egui_dock's native tab styling: `Style::from_egui`
                 // colors the focused leaf's tab with `strong_text_color()` (white)

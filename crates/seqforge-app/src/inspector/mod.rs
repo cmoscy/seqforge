@@ -28,7 +28,7 @@ use seqforge_core::{
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Theme;
 use crate::viewer::PrimerDisplay;
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 mod cutsite;
 mod feature;

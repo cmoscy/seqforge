@@ -19,7 +19,7 @@ use super::row::{
 use super::{InspectorState, InspectorTab};
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Theme;
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 /// The enzyme catalog (name + Type IIs / overhang-length projection), built once.
 /// The app doesn't link `seqforge-restriction`; this reaches enzyme geometry

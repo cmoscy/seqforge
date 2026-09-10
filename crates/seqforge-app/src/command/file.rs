@@ -83,7 +83,7 @@ pub(super) fn apply_open_file<B: BioOps>(
         state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
             arc.read()
                 .ok()
-                .map(|b| (crate::workspace::display_name(&b), b.len()))
+                .map(|b| (seqforge_session::display_name(&b), b.len()))
         })
     }) {
         state.events.emit(AppEvent::DocOpened { name, len });
@@ -118,7 +118,7 @@ pub(super) fn apply_new(
         state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
             arc.read()
                 .ok()
-                .map(|b| (crate::workspace::display_name(&b), b.len()))
+                .map(|b| (seqforge_session::display_name(&b), b.len()))
         })
     }) {
         state.events.emit(AppEvent::DocOpened { name, len });
@@ -217,7 +217,7 @@ pub(super) fn apply_pcr(
         state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
             arc.read()
                 .ok()
-                .map(|b| (crate::workspace::display_name(&b), b.len()))
+                .map(|b| (seqforge_session::display_name(&b), b.len()))
         })
     }) {
         state.events.emit(AppEvent::DocOpened { name, len });
@@ -417,7 +417,7 @@ pub(super) fn save_buffer(
             .workspace
             .with_buffer(vid, |_, buf, _| buf.loaded_hash)?;
         if let Some(loaded) = loaded {
-            if let Some(disk) = crate::workspace::hash_file_bytes(path) {
+            if let Some(disk) = seqforge_session::hash_file_bytes(path) {
                 if disk != loaded {
                     push_save_conflict(state, vid, path);
                     return Err(DispatchError::SaveConflict(path.display().to_string()));
@@ -432,7 +432,7 @@ pub(super) fn save_buffer(
             buf.dirty = false;
             // Re-baseline the on-disk hash to what we just wrote, so a later
             // save doesn't spuriously flag our own write as an external change.
-            buf.loaded_hash = crate::workspace::hash_file_bytes(path);
+            buf.loaded_hash = seqforge_session::hash_file_bytes(path);
         }
         r
     })?;
@@ -483,7 +483,7 @@ pub(super) fn save_buffer_id(
             .and_then(|arc| arc.read().ok().map(|b| b.loaded_hash))
             .flatten();
         if let Some(loaded) = loaded {
-            if let Some(disk) = crate::workspace::hash_file_bytes(&path) {
+            if let Some(disk) = seqforge_session::hash_file_bytes(&path) {
                 if disk != loaded {
                     state.toasts.warning(format!(
                         "\"{}\" changed on disk — open the sequence and Save to resolve",
@@ -510,7 +510,7 @@ pub(super) fn save_buffer_id(
     match seqforge_bio::save(&buf, &ann, &path) {
         Ok(()) => {
             buf.dirty = false;
-            buf.loaded_hash = crate::workspace::hash_file_bytes(&path);
+            buf.loaded_hash = seqforge_session::hash_file_bytes(&path);
             state.toasts.success(format!("Saved {}", path.display()));
             Ok(())
         }

@@ -10,7 +10,7 @@ use crate::workspace::{Workspace, display_name};
 /// A [`SourceResolver`] over the app's [`Workspace`]. Borrows immutably, so build
 /// it, run the assembly, and drop it *before* mutating the workspace to
 /// materialize products.
-pub(crate) struct WorkspaceResolver<'a> {
+pub struct WorkspaceResolver<'a> {
     pub ws: &'a Workspace,
 }
 

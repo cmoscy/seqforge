@@ -5,6 +5,7 @@ members = [
     "crates/seqforge-bio",
     "crates/seqforge-cli",
     "crates/seqforge-restriction",
+    "crates/seqforge-session",
     "crates/seqforge-thermo",
     "crates/seqforge-fidelity",
 ]

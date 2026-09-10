@@ -20,7 +20,6 @@ mod tabs;
 mod terminal;
 mod ui_icon;
 mod viewer;
-mod workspace;
 
 use clap::Parser;
 

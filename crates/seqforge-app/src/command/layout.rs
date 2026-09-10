@@ -106,7 +106,7 @@ fn doc_info(state: &AppState, vid: ViewId, index: usize, active: bool) -> Option
     let buf = arc.read().ok()?;
     Some(DocInfo {
         index,
-        name: crate::workspace::display_name(&buf),
+        name: seqforge_session::display_name(&buf),
         path: buf.source_path.clone(),
         dirty: buf.dirty,
         active,

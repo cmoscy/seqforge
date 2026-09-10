@@ -12,13 +12,13 @@ use seqforge_core::{
     TopologyIntent, default_role,
 };
 
-use crate::assembly::resolver::WorkspaceResolver;
 use crate::command::assembly::RecipeOp;
 use crate::command::{AppCommand, PendingCommand};
 use crate::ui_icon::{
     phosphor_icon, phosphor_icon_button, phosphor_icon_colored, phosphor_labeled,
 };
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
+use seqforge_session::WorkspaceResolver;
 
 /// Session cache for per-row prepare previews (not durable).
 type PreviewCache = HashMap<PreviewKey, PreviewEntry>;
@@ -63,7 +63,7 @@ pub(crate) fn show(
         .filter_map(|v| {
             let arc = workspace.buffers.get(v.buffer_id)?;
             let guard = arc.read().ok()?;
-            Some((v.buffer_id, crate::workspace::display_name(&guard)))
+            Some((v.buffer_id, seqforge_session::display_name(&guard)))
         })
         .collect();
 

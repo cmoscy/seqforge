@@ -36,7 +36,7 @@ use seqforge_core::Selection;
 use serde::{Deserialize, Serialize};
 
 use crate::tabs::Tab;
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 // ── Persisted session ────────────────────────────────────────────────────────
 

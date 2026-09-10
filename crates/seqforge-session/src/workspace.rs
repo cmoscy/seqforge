@@ -61,7 +61,7 @@ enum SelUpdate {
 /// the guard then can't fire). `DefaultHasher` is fine: the value only ever
 /// lives in memory and is compared within a single session, so cross-version
 /// hash stability is irrelevant.
-pub(crate) fn hash_file_bytes(path: &Path) -> Option<u64> {
+pub fn hash_file_bytes(path: &Path) -> Option<u64> {
     use std::hash::{Hash, Hasher};
     let bytes = std::fs::read(path).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

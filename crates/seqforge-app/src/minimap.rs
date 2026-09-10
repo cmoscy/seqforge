@@ -19,7 +19,7 @@ use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::{Config, MinimapSettings};
 use crate::viewer::FeatureVisibility;
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 // ── Cached geometry ───────────────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ impl MiniMap {
                 cursor_pos: view.selection.text_range().map(|s| s.anchor).unwrap_or(0),
                 selection: view.selection.text_range(),
                 selected_feature: view.selection.selected_feature(),
-                display_name: crate::workspace::display_name(buf),
+                display_name: seqforge_session::display_name(buf),
                 visible_range: view.visible_range,
             })
             .ok();

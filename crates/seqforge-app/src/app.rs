@@ -22,7 +22,7 @@ use crate::persistence::{self, PersistedSession};
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
-use crate::workspace::Workspace;
+use seqforge_session::Workspace;
 
 pub(crate) const MAX_RECENT: usize = 10;
 /// eframe storage key for the [`PersistedSession`] blob. Stage 2.5e
@@ -933,7 +933,7 @@ impl SeqForgeApp {
             .workspace
             .view(view_id)
             .and_then(|v| self.state.workspace.buffers.get(v.buffer_id))
-            .and_then(|arc| arc.read().ok().map(|b| crate::workspace::display_name(&b)))
+            .and_then(|arc| arc.read().ok().map(|b| seqforge_session::display_name(&b)))
             .unwrap_or_else(|| "Untitled".to_string())
     }
 }
@@ -971,7 +971,7 @@ impl SeqForgeApp {
                 .get(v.buffer_id)
                 .and_then(|arc| {
                     let b = arc.read().ok()?;
-                    let name = crate::workspace::display_name(&b);
+                    let name = seqforge_session::display_name(&b);
                     let star = if b.dirty { "*" } else { "" };
                     Some(format!("{star}{name} — SeqForge"))
                 })

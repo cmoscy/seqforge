@@ -631,7 +631,7 @@ impl SeqViewCache {
     }
 
     /// Drop caches whose view is gone. Cheap; call after closing a view.
-    pub fn retain_open(&mut self, ws: &crate::workspace::Workspace) {
+    pub fn retain_open(&mut self, ws: &seqforge_session::Workspace) {
         self.0.retain(|id, _| ws.view(*id).is_some());
     }
 }

@@ -13,9 +13,9 @@ use seqforge_core::{
 
 use super::{layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
-use crate::assembly::resolver::WorkspaceResolver;
 use crate::focus::FocusScope;
 use crate::overlay::Overlay;
+use seqforge_session::WorkspaceResolver;
 
 /// Above this many products, materialization is capped (with a warning) so a
 /// large combinatorial run can't flood the workspace with tabs.
@@ -493,7 +493,7 @@ enum Preflight {
     },
 }
 
-fn preflight_recipe_export(recipe: &Recipe, workspace: &crate::workspace::Workspace) -> Preflight {
+fn preflight_recipe_export(recipe: &Recipe, workspace: &seqforge_session::Workspace) -> Preflight {
     let mut dirty_names = Vec::new();
     let mut dirty_buffers = Vec::new();
     for bin in &recipe.bins {
@@ -510,11 +510,11 @@ fn preflight_recipe_export(recipe: &Recipe, workspace: &crate::workspace::Worksp
             if buf.source_path.is_none() {
                 return Preflight::Scratch(format!(
                     "Cannot save recipe: \"{}\" is unsaved — save the sequence first",
-                    crate::workspace::display_name(&buf)
+                    seqforge_session::display_name(&buf)
                 ));
             }
             if buf.dirty {
-                dirty_names.push(crate::workspace::display_name(&buf));
+                dirty_names.push(seqforge_session::display_name(&buf));
                 dirty_buffers.push(*bid);
             }
         }
@@ -559,7 +559,7 @@ pub(super) fn apply_load_recipe(
 /// Aborts if any buffer is unsaved (no `source_path`).
 fn normalize_recipe_for_export(
     recipe: &Recipe,
-    workspace: &crate::workspace::Workspace,
+    workspace: &seqforge_session::Workspace,
 ) -> Result<Recipe, String> {
     use std::hash::{Hash, Hasher};
 
@@ -576,7 +576,7 @@ fn normalize_recipe_for_export(
                     let Some(path) = buf.source_path.clone() else {
                         return Err(format!(
                             "Cannot save recipe: \"{}\" is unsaved — save the sequence first",
-                            crate::workspace::display_name(&buf)
+                            seqforge_session::display_name(&buf)
                         ));
                     };
                     if source.pin.is_none() {
@@ -588,7 +588,7 @@ fn normalize_recipe_for_export(
                 }
                 SourceRef::Path(p) => {
                     if source.pin.is_none() {
-                        source.pin = crate::workspace::hash_file_bytes(p);
+                        source.pin = seqforge_session::hash_file_bytes(p);
                     }
                 }
             }
@@ -600,7 +600,7 @@ fn normalize_recipe_for_export(
 /// Prefer live `Buffer` handles when a path source is already open in the workspace.
 fn rematerialize_recipe_buffers(
     mut recipe: Recipe,
-    workspace: &crate::workspace::Workspace,
+    workspace: &seqforge_session::Workspace,
 ) -> Recipe {
     for bin in &mut recipe.bins {
         for source in &mut bin.sources {

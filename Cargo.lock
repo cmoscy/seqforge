@@ -3651,6 +3651,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "seqforge-bio",
  "seqforge-core",
+ "seqforge-session",
  "serde",
  "serde_json",
  "toml",
@@ -3701,6 +3702,15 @@ version = "0.1.0"
 [[package]]
 name = "seqforge-restriction"
 version = "0.1.0"
+
+[[package]]
+name = "seqforge-session"
+version = "0.1.0"
+dependencies = [
+ "seqforge-bio",
+ "seqforge-core",
+ "serde",
+]
 
 [[package]]
 name = "seqforge-thermo"
