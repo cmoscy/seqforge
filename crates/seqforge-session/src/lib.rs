@@ -23,11 +23,13 @@
 //! per-view render cache, dock layout, overlays — stays in `seqforge-app`.
 
 pub mod bases;
+pub mod bio;
 pub mod edit;
 pub mod host;
 pub mod resolver;
 pub mod workspace;
 
+pub use bio::Bio;
 pub use host::{Host, Level, NullHost};
 pub use resolver::WorkspaceResolver;
 pub use workspace::{BufferStore, Workspace, display_name, hash_file_bytes};

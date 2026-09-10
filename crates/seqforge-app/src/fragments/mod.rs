@@ -2,39 +2,16 @@
 //! (Restriction Tier 2).
 //!
 //! The list is **virtual**: recomputed on demand from the source buffer, never
-//! materialized (ROADMAP decision 25). `command::file::apply_digest` uses
-//! [`compute`] for the CLI/agent response; the `ViewKind::Fragments` renderer
-//! calls the same fn, so the two projections cannot drift. Nothing here reaches
+//! materialized (ROADMAP decision 25). The projection itself is
+//! [`seqforge_bio::digest_projection`] — shared with the CLI so the two faces
+//! cannot drift; this module is only the renderer. Nothing here reaches
 //! into the sequence-canvas `Track` stack — it is its own simple list, the shape
 //! the assembly-track recipe picker will reuse at multi-source scale.
 
+use seqforge_core::ViewId;
 use seqforge_core::commands::{EndInfo, FragmentInfo};
-use seqforge_core::{Annotations, Buffer, MethylContext, ViewId};
 
 use crate::command::{AppCommand, PendingCommand};
-
-/// Digest `buf` under an enzyme `query` + methylation context. Returns the
-/// fragment projection, any methylation warnings, and the **canonical**
-/// enzyme-name string (stored on the Fragments view so a re-run is identical).
-pub(crate) fn compute(
-    buf: &Buffer,
-    ann: &Annotations,
-    query: &str,
-    methyl: &MethylContext,
-) -> (Vec<FragmentInfo>, Vec<String>, String) {
-    let circular = buf.is_circular();
-    let parsed = seqforge_bio::parse_enzyme_query(query);
-    let names = seqforge_bio::resolve_query_names(&parsed, &buf.text, circular);
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (frags, warnings) =
-        seqforge_bio::digest_fragments(&buf.text, ann, &refs, circular, &buf.name, methyl);
-    let infos = frags
-        .iter()
-        .enumerate()
-        .map(|(i, f)| f.to_info(i))
-        .collect();
-    (infos, warnings, names.join(" "))
-}
 
 /// Render the read-only fragment list for a `ViewKind::Fragments` tab.
 pub(crate) fn show(

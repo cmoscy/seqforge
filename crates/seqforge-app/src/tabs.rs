@@ -159,7 +159,7 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                     // have moved under them since the last scan) and drop stale
                     // search highlights before painting. No-op when fresh; scans
                     // only when the version stamp lags (≈ once per commit).
-                    seqforge_core::rescan_if_stale(view, buf, &crate::app::AppBio);
+                    seqforge_core::rescan_if_stale(view, buf, &seqforge_session::Bio);
                     match view.kind {
                         seqforge_core::ViewKind::TextView => {
                             seq_view.show(
@@ -178,8 +178,14 @@ impl egui_dock::TabViewer for TabViewer<'_> {
                             // demand from the source buffer (nothing materialized).
                             let query = view.fragments_query.clone().unwrap_or_default();
                             let methyl = view.methylation;
-                            let (infos, warnings, _) =
-                                crate::fragments::compute(buf, ann, &query, &methyl);
+                            let (infos, warnings, _) = seqforge_bio::digest_projection(
+                                &buf.text,
+                                &buf.name,
+                                buf.is_circular(),
+                                ann,
+                                &query,
+                                &methyl,
+                            );
                             crate::fragments::show(
                                 ui,
                                 view.id,

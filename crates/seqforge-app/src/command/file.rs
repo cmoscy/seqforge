@@ -246,7 +246,14 @@ pub(super) fn apply_digest(
     let (source_buffer, canonical, infos, warnings) =
         state.workspace.with_buffer(vid, |v, buf, ann| {
             let methyl = v.methylation;
-            let (infos, warnings, canonical) = crate::fragments::compute(buf, ann, &query, &methyl);
+            let (infos, warnings, canonical) = seqforge_bio::digest_projection(
+                &buf.text,
+                &buf.name,
+                buf.is_circular(),
+                ann,
+                &query,
+                &methyl,
+            );
             (v.buffer_id, canonical, infos, warnings)
         })?;
 
@@ -290,12 +297,14 @@ pub(super) fn apply_export_fragment(
     let built = state.workspace.with_buffer(source_view, |v, buf, ann| {
         let query = v.fragments_query.clone().unwrap_or_default();
         let methyl = v.methylation;
-        let circular = buf.is_circular();
-        let parsed = seqforge_bio::parse_enzyme_query(&query);
-        let names = seqforge_bio::resolve_query_names(&parsed, &buf.text, circular);
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (frags, _) =
-            seqforge_bio::digest_fragments(&buf.text, ann, &refs, circular, &buf.name, &methyl);
+        let (frags, _, _) = seqforge_bio::digest_resolved(
+            &buf.text,
+            &buf.name,
+            buf.is_circular(),
+            ann,
+            &query,
+            &methyl,
+        );
         let frag = frags
             .into_iter()
             .nth(index)

@@ -3682,6 +3682,7 @@ dependencies = [
  "clap",
  "seqforge-bio",
  "seqforge-core",
+ "seqforge-session",
  "serde_json",
 ]
 

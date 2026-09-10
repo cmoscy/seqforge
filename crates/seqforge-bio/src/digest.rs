@@ -11,6 +11,7 @@
 //! Fragments are **virtual values** — nothing is materialized to a buffer here
 //! (ROADMAP decision 25).
 
+use seqforge_core::commands::FragmentInfo;
 use seqforge_core::document::{Lineage, LineageOp};
 use seqforge_core::{
     Annotations, End, Fragment, MethylContext, OverhangSide, PartialPolicy, Span, Topology,
@@ -95,6 +96,53 @@ fn to_topology(t: FragmentTopology) -> Topology {
         FragmentTopology::Linear => Topology::Linear,
         FragmentTopology::Circular => Topology::Circular,
     }
+}
+
+/// Resolve an enzyme `query` against `seq`, then digest. Returns the fragments,
+/// any methylation warnings, and the **canonical** enzyme-name string (stored on
+/// a Fragments view so a re-run is identical).
+///
+/// This is the shared middle of every digest path. Three callers had copied it
+/// inline — the viewer, `seqforge digest`, and fragment export — and they drifted
+/// on methylation, on the `circular` override, and on enzyme-query
+/// normalization (ROADMAP decision 27).
+///
+/// `circular` is a parameter rather than read off a `Buffer`, because the
+/// callers legitimately disagree: the viewer takes the document's topology,
+/// while `seqforge digest --circular` overrides it. Passing it in is what lets
+/// one function serve both without a mode flag.
+pub fn digest_resolved(
+    seq: &[u8],
+    name: &str,
+    circular: bool,
+    ann: &Annotations,
+    query: &str,
+    methyl: &MethylContext,
+) -> (Vec<Fragment>, Vec<String>, String) {
+    let parsed = crate::parse_enzyme_query(query);
+    let names = crate::resolve_query_names(&parsed, seq, circular);
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (frags, warnings) = digest_fragments(seq, ann, &refs, circular, name, methyl);
+    (frags, warnings, names.join(" "))
+}
+
+/// [`digest_resolved`] projected to the serializable [`FragmentInfo`] shape that
+/// both the Fragments view and the CLI/socket response render.
+pub fn digest_projection(
+    seq: &[u8],
+    name: &str,
+    circular: bool,
+    ann: &Annotations,
+    query: &str,
+    methyl: &MethylContext,
+) -> (Vec<FragmentInfo>, Vec<String>, String) {
+    let (frags, warnings, canonical) = digest_resolved(seq, name, circular, ann, query, methyl);
+    let infos = frags
+        .iter()
+        .enumerate()
+        .map(|(i, f)| f.to_info(i))
+        .collect();
+    (infos, warnings, canonical)
 }
 
 #[cfg(test)]
@@ -182,6 +230,72 @@ mod tests {
         let (cut, _) = digest_fragments(text, &ann, &["MboI"], false, "src", &MethylContext::NONE);
         assert!(blocked.len() < cut.len());
         assert!(warns.iter().any(|w| w.contains("blocked")));
+    }
+
+    // ── The shared projection (ROADMAP decision 27) ───────────────────────
+    //
+    // These pin the two arguments that used to be hardcoded differently by each
+    // of the three inline copies. They are the properties that make one
+    // implementation safe to share.
+
+    /// The viewer passed the view's authored methylation; `seqforge digest`
+    /// passed `MethylContext::default()` unconditionally. Same file, two
+    /// answers, no signal to the user. The context is now a parameter that
+    /// demonstrably reaches the digest.
+    #[test]
+    fn projection_honours_the_methylation_argument() {
+        let text = b"AAAAGATCAAAA";
+        let ann = Annotations::default();
+
+        let (blocked, warns, _) =
+            digest_projection(text, "src", false, &ann, "MboI", &MethylContext::default());
+        let (cut, _, _) = digest_projection(text, "src", false, &ann, "MboI", &MethylContext::NONE);
+
+        assert!(
+            blocked.len() < cut.len(),
+            "Dam-blocked MboI must yield fewer fragments through the projection"
+        );
+        assert!(warns.iter().any(|w| w.contains("blocked")));
+    }
+
+    /// `circular` is the caller's decision, not a property read off a buffer:
+    /// the viewer takes the document's topology, `seqforge digest --circular`
+    /// overrides it. The override was inexpressible over the socket.
+    #[test]
+    fn circular_is_the_callers_decision() {
+        let text = b"AAAGAATTCTTTGAATTCAAA";
+        let ann = Annotations::default();
+
+        let (linear, _, _) =
+            digest_projection(text, "src", false, &ann, "EcoRI", &MethylContext::NONE);
+        let (circular, _, _) =
+            digest_projection(text, "src", true, &ann, "EcoRI", &MethylContext::NONE);
+
+        // Two cuts: linear gives 3 pieces, circular gives 2.
+        assert_eq!(linear.len(), 3);
+        assert_eq!(circular.len(), 2);
+    }
+
+    /// The projection is exactly `digest_resolved` plus the `FragmentInfo`
+    /// mapping — so the fragment-export path (which needs `Fragment`, not
+    /// `FragmentInfo`) and the list path cannot diverge.
+    #[test]
+    fn projection_is_resolved_plus_the_info_mapping() {
+        let text = b"AAAGAATTCTTTGAATTCAAA";
+        let ann = Annotations::default();
+
+        let (frags, warns_a, canon_a) =
+            digest_resolved(text, "src", false, &ann, "EcoRI", &MethylContext::NONE);
+        let (infos, warns_b, canon_b) =
+            digest_projection(text, "src", false, &ann, "EcoRI", &MethylContext::NONE);
+
+        assert_eq!(frags.len(), infos.len());
+        assert_eq!(warns_a, warns_b);
+        assert_eq!(canon_a, canon_b);
+        assert_eq!(
+            canon_a, "EcoRI",
+            "canonical name string is what a re-run replays"
+        );
     }
 
     #[test]

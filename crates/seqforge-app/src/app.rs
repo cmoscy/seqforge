@@ -3,8 +3,8 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, Style};
 use seqforge_core::{
-    BioOps, CutSite, DispatchError, Document, FeatureKind, SearchHit, Selection, ViewId,
-    ViewSelection, ViewerRequest, ViewerResponse,
+    BioOps, DispatchError, FeatureKind, Selection, ViewId, ViewSelection, ViewerRequest,
+    ViewerResponse,
 };
 
 use std::sync::Arc;
@@ -57,56 +57,6 @@ fn selection_qc(region: &[u8]) -> Option<(f64, Option<f64>)> {
         None
     };
     Some((gc, tm))
-}
-
-// ── AppBio ────────────────────────────────────────────────────────────────────
-
-/// The GUI's `BioOps` implementation — a ZST forwarding to `seqforge_bio` free
-/// functions. `pub(crate)` so the paint path (`tabs.rs`) can construct one to
-/// freshen a view's derived results before reading them (`rescan_if_stale`).
-pub(crate) struct AppBio;
-
-impl BioOps for AppBio {
-    fn load(&self, path: &std::path::Path) -> Result<Document, String> {
-        seqforge_bio::load(path).map_err(|e| e.to_string())
-    }
-
-    fn find_matches(
-        &self,
-        seq: &[u8],
-        pattern: &[u8],
-        mismatches: u8,
-        circular: bool,
-    ) -> Vec<SearchHit> {
-        seqforge_bio::find_iupac_matches(seq, pattern, mismatches, circular)
-    }
-
-    fn find_cut_sites(&self, seq: &[u8], enzymes: &[&str], circular: bool) -> Vec<CutSite> {
-        seqforge_bio::find_cut_sites(seq, enzymes, circular)
-    }
-
-    fn resolve_enzyme_names(&self, seq: &[u8], query: &str, circular: bool) -> Vec<String> {
-        let parsed = seqforge_bio::parse_enzyme_query(query);
-        seqforge_bio::resolve_query_names(&parsed, seq, circular)
-    }
-
-    fn primer_infos(
-        &self,
-        seq: &[u8],
-        primers: &[&seqforge_core::Primer],
-        circular: bool,
-    ) -> Vec<seqforge_core::PrimerInfo> {
-        seqforge_bio::primer_infos(seq, primers, circular)
-    }
-
-    fn methyl_states_for_sites(
-        &self,
-        sites: &[CutSite],
-        seq: &[u8],
-        methylation: &seqforge_core::MethylContext,
-    ) -> Vec<seqforge_core::MethylState> {
-        seqforge_bio::methyl_states_for_sites(sites, seq, methylation)
-    }
 }
 
 // ── AppState ──────────────────────────────────────────────────────────────────
@@ -398,7 +348,7 @@ impl SeqForgeApp {
             .storage
             .and_then(|s| eframe::get_value::<PersistedSession>(s, SESSION_KEY))
         {
-            restore_session(&mut state, session, &AppBio);
+            restore_session(&mut state, session, &seqforge_session::Bio);
         }
 
         // ── PTY environment + socket listener (Unix only) ─────────────────────
@@ -1077,7 +1027,7 @@ impl eframe::App for SeqForgeApp {
         // the remaining visible views. No-op when already fresh.
         if let Some(vid) = self.state.workspace.active_view {
             let _ = self.state.workspace.with_view_buffer(vid, |view, buf, _| {
-                seqforge_core::rescan_if_stale(view, buf, &AppBio);
+                seqforge_core::rescan_if_stale(view, buf, &seqforge_session::Bio);
             });
         }
 
@@ -2038,7 +1988,7 @@ impl eframe::App for SeqForgeApp {
         // lifecycle ordering predictable.
         let cmds: Vec<PendingCommand> = self.state.pending_commands.drain(..).collect();
         for (cmd, resp_tx) in cmds {
-            let result = command::apply(cmd, &mut self.state, &AppBio);
+            let result = command::apply(cmd, &mut self.state, &seqforge_session::Bio);
             if let Err(e) = &result {
                 eprintln!("[apply error] {e}");
                 // A SaveConflict already raised the Overwrite/Reload/Cancel modal

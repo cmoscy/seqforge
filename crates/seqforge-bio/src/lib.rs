@@ -24,7 +24,7 @@ pub use assembly::{
     ResolvedSource, SourceResolver, enumerate_combos, expand_glob, first_combo_fidelity_matrix,
     preview_bin, preview_digest_candidates, probe_recipe, run, run_indices,
 };
-pub use digest::digest_fragments;
+pub use digest::{digest_fragments, digest_projection, digest_resolved};
 pub use dna::{complement, reverse_complement};
 pub use seqforge_fidelity::{
     Dataset as FidelityDataset, SubsetMatrix as FidelitySubsetMatrix, dataset_for_enzyme,

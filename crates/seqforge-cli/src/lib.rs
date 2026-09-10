@@ -227,23 +227,17 @@ pub fn run_digest(path: &Path, enzymes: &[String], circular_override: bool) -> a
     // occurrence are `parse_enzyme_query`'s job, not ours (it normalizes them
     // for both presets and name lists).
     let query = enzymes.join(" ");
-    let parsed = seqforge_bio::parse_enzyme_query(&query);
-    let names = seqforge_bio::resolve_query_names(&parsed, &doc.sequence, circular);
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
-    let (frags, warnings) = seqforge_bio::digest_fragments(
+    // One implementation, shared with the viewer — see `digest_resolved`.
+    let (infos, warnings, names) = seqforge_bio::digest_projection(
         &doc.sequence,
-        &ann,
-        &refs,
-        circular,
         &doc.name,
+        circular,
+        &ann,
+        &query,
         &seqforge_core::MethylContext::default(),
     );
-    let infos: Vec<_> = frags
-        .iter()
-        .enumerate()
-        .map(|(i, f)| f.to_info(i))
-        .collect();
+    let names: Vec<String> = names.split_whitespace().map(str::to_string).collect();
 
     let out = serde_json::json!({
         "kind": "digest",
