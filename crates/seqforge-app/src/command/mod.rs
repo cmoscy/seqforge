@@ -624,37 +624,43 @@ fn open_config_file(
 
 // ── Public dispatcher ────────────────────────────────────────────────────────
 
-/// Open a request's `Path` target into the workspace and rewrite the target to
-/// name the resulting view.
+/// Reject a `path` target before dispatch.
 ///
-/// This is the single place a file becomes a document. `Workspace::open_path`
-/// dedupes by path, so targeting a file the GUI already has open reuses its
-/// buffer (and its undo history) rather than loading a second copy.
+/// `--in` means *headless*: it resolves in the calling process against a
+/// workspace that lives for one request, and any view state the verb sets is
+/// scoped to that request. That is the rule the CLI already implements —
+/// `DocSource::of` routes every path-targeted request to `run_on_file` and
+/// never forwards it — so a `path` arriving here came from a hand-written
+/// JSON-RPC payload and is a category error: it asks the session to act on a
+/// document the session does not have.
 ///
-/// A `View` or `Active` target passes through untouched; an ambiguous target
-/// (both `--view` and `--in`) is rejected here rather than downstream, where
-/// silently preferring one would be a wrong answer.
-fn resolve_path_target<B: BioOps>(
-    cmd: &mut AppCommand,
-    state: &mut AppState,
-    bio: &B,
-) -> Result<(), DispatchError> {
+/// Resolving it *into* the session was worse than refusing it. The previous
+/// implementation called `Workspace::open_path`, which dedupes the buffer but
+/// calls `add_view` unconditionally, so every such request minted a `View` that
+/// no dock tab ever referenced — never rendered, never cached, never closed —
+/// and stole `active_view` until the dock-focus mirror reverted it a frame
+/// later. Refusing the target removes that path rather than teaching it to
+/// place tabs, and keeps the invariant exact: the session only ever sees
+/// `Active` or `View`.
+///
+/// To act on a file in the session, `open` it first, then target the view.
+fn reject_path_target(cmd: &mut AppCommand) -> Result<(), DispatchError> {
     let AppCommand::Viewer(req) = cmd else {
         return Ok(());
     };
     let Some(target) = req.target_mut() else {
         return Ok(());
     };
+    // `kind()` also rejects an ambiguous target (both `--view` and `--in`) here
+    // rather than downstream, where silently preferring one would be a wrong
+    // answer.
     match target.kind()? {
         seqforge_core::TargetKind::Active | seqforge_core::TargetKind::View(_) => Ok(()),
-        seqforge_core::TargetKind::Path(path) => {
-            let vid = state
-                .workspace
-                .open_path(path, bio)
-                .map_err(DispatchError::InvalidInput)?;
-            *target = seqforge_core::Target::view(vid);
-            Ok(())
-        }
+        seqforge_core::TargetKind::Path(_) => Err(DispatchError::InvalidInput(
+            "a file target (`--in`) runs locally and cannot address this session; \
+             use `--view`, or `open` the file first"
+                .to_string(),
+        )),
     }
 }
 
@@ -663,11 +669,11 @@ pub fn apply<B: BioOps>(
     state: &mut AppState,
     bio: &B,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    // Collapse a `Path` target into the view it opens, once, before dispatch.
-    // Every arm below then reads `target.view` and cannot tell how the document
-    // was addressed (ROADMAP decision 27).
+    // A `Path` target cannot address this session — refuse it once, before
+    // dispatch, so every arm below reads `target.view` and cannot be handed a
+    // document the workspace does not own (ROADMAP decision 27).
     let mut cmd = cmd;
-    resolve_path_target(&mut cmd, state, bio)?;
+    reject_path_target(&mut cmd)?;
 
     use AppCommand::*;
     match cmd {
@@ -1078,5 +1084,118 @@ pub fn apply<B: BioOps>(
                 Ok(Some(resp))
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod path_target_tests {
+    //! `--in` is headless by definition, so a `path` target must never reach
+    //! the session. The regression this guards: resolving it here called
+    //! `Workspace::open_path`, which dedupes the buffer but adds a `View`
+    //! unconditionally — minting a view no dock tab referenced, so it was never
+    //! rendered, never cached, and never closed.
+
+    use super::*;
+    use seqforge_core::{Primer, Target, ViewerRequest};
+
+    struct TestBio;
+    impl BioOps for TestBio {
+        fn load(&self, path: &std::path::Path) -> Result<seqforge_core::Document, String> {
+            seqforge_bio::load(path).map_err(|e| e.to_string())
+        }
+        fn find_matches(
+            &self,
+            _: &[u8],
+            _: &[u8],
+            _: u8,
+            _: bool,
+        ) -> Vec<seqforge_core::SearchHit> {
+            vec![]
+        }
+        fn find_cut_sites(&self, _: &[u8], _: &[&str], _: bool) -> Vec<seqforge_core::CutSite> {
+            vec![]
+        }
+        fn resolve_enzyme_names(&self, _: &[u8], _: &str, _: bool) -> Vec<String> {
+            vec![]
+        }
+        fn primer_infos(&self, _: &[u8], _: &[&Primer], _: bool) -> Vec<seqforge_core::PrimerInfo> {
+            vec![]
+        }
+        fn methyl_states_for_sites(
+            &self,
+            sites: &[seqforge_core::CutSite],
+            _: &[u8],
+            _: &seqforge_core::MethylContext,
+        ) -> Vec<seqforge_core::MethylState> {
+            vec![seqforge_core::MethylState::Cuttable; sites.len()]
+        }
+    }
+
+    fn fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../seqforge-bio/tests/fixtures/pUC19.gbk")
+    }
+
+    #[test]
+    fn a_path_target_is_refused_and_mints_no_view() {
+        let mut state = AppState::default();
+        let before = state.workspace.views.len();
+
+        let err = apply(
+            AppCommand::Viewer(ViewerRequest::ListFeatures {
+                target: Target::path(fixture()),
+            }),
+            &mut state,
+            &TestBio,
+        )
+        .expect_err("a file target cannot address the session");
+
+        assert!(
+            err.to_string().contains("runs locally"),
+            "should say why, got: {err}"
+        );
+        assert_eq!(
+            state.workspace.views.len(),
+            before,
+            "refusing the target must not open a view"
+        );
+    }
+
+    /// The same file addressed by view still works — the route the rule points
+    /// callers to ("`open` the file first, then target the view").
+    #[test]
+    fn the_same_document_addressed_by_view_succeeds() {
+        let mut state = AppState::default();
+        let vid = state
+            .workspace
+            .open_path(&fixture(), &TestBio)
+            .expect("fixture opens");
+        state.workspace.focus_view(vid);
+
+        let resp = apply(
+            AppCommand::Viewer(ViewerRequest::ListFeatures {
+                target: Target::view(vid),
+            }),
+            &mut state,
+            &TestBio,
+        )
+        .expect("a view target resolves");
+        assert!(matches!(resp, Some(ViewerResponse::Features { .. })));
+    }
+
+    /// An ambiguous target is still rejected, and still before dispatch.
+    #[test]
+    fn both_view_and_path_is_still_ambiguous() {
+        let mut state = AppState::default();
+        let mut target = Target::path(fixture());
+        target.view = Some(seqforge_core::ViewId(1));
+
+        let err = apply(
+            AppCommand::Viewer(ViewerRequest::ListFeatures { target }),
+            &mut state,
+            &TestBio,
+        )
+        .expect_err("both set is ambiguous");
+        assert_eq!(state.workspace.views.len(), 0, "{err}");
     }
 }

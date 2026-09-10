@@ -1991,6 +1991,16 @@ impl eframe::App for SeqForgeApp {
         // chaining into another) wait for the next frame, which keeps the
         // lifecycle ordering predictable.
         let cmds: Vec<PendingCommand> = self.state.pending_commands.drain(..).collect();
+        // Anything applied below mutates state the UI tree for *this* frame has
+        // already been described from, so the result cannot appear until another
+        // frame runs. eframe is reactive (`NativeOptions::default()`), so one
+        // must be asked for: `socket.rs` requests a repaint when a request
+        // *arrives*, which wakes the frame that applies it, but nothing
+        // scheduled the frame that would show it. The caret-blink timer
+        // (`viewer/mod.rs`, inside `if focused`) masked this whenever a sequence
+        // pane held focus; with focus on the Terminal or Inspector the canvas
+        // sat stale until the next user input.
+        let applied_any = !cmds.is_empty();
         for (cmd, resp_tx) in cmds {
             let result = command::apply(cmd, &mut self.state, &seqforge_session::Bio);
             if let Err(e) = &result {
@@ -2009,6 +2019,11 @@ impl eframe::App for SeqForgeApp {
                 let wire = result.map(|opt| opt.unwrap_or(ViewerResponse::Ok));
                 let _ = tx.send(wire);
             }
+        }
+
+        // Guarantee the frame that renders what we just applied.
+        if applied_any {
+            ctx.request_repaint();
         }
 
         // ── Toast notifications ───────────────────────────────────────────────
