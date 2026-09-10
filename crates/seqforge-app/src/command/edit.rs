@@ -111,7 +111,7 @@ pub(super) fn apply_save_as(
 mod tests {
     use std::ops::Range;
 
-    use seqforge_core::{PrimerId, Strand};
+    use seqforge_core::{PrimerId, Strand, Target};
 
     use crate::command::StagedEdit;
     use crate::focus::FocusScope;
@@ -549,7 +549,7 @@ mod tests {
             AppCommand::Viewer(ViewerRequest::Copy {
                 start: 2,
                 end: 8,
-                view: None,
+                target: Target::active(),
             }),
             &mut s,
             &LoadBio,
@@ -558,7 +558,7 @@ mod tests {
         crate::command::apply(
             AppCommand::Viewer(ViewerRequest::Paste {
                 pos: 12,
-                view: None,
+                target: Target::active(),
             }),
             &mut s,
             &LoadBio,
@@ -1645,16 +1645,21 @@ mod tests {
         use seqforge_core::{Selection, ViewerRequest};
 
         let mut s = state_with(b"ATGC");
-        let undo = AppCommand::Viewer(ViewerRequest::Undo { view: None });
+        let undo = AppCommand::Viewer(ViewerRequest::Undo {
+            target: Target::active(),
+        });
         let save = AppCommand::Viewer(ViewerRequest::Save {
             force: false,
-            view: None,
+            target: Target::active(),
         });
-        let paste = AppCommand::Viewer(ViewerRequest::Paste { pos: 0, view: None });
+        let paste = AppCommand::Viewer(ViewerRequest::Paste {
+            pos: 0,
+            target: Target::active(),
+        });
         let cut = AppCommand::Viewer(ViewerRequest::Cut {
             start: 0,
             end: 0,
-            view: None,
+            target: Target::active(),
         });
 
         // Fresh buffer: no history, not dirty, empty clipboard, no range.

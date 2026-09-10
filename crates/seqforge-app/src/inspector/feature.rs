@@ -4,7 +4,7 @@
 //! `begin_feature_edit`) constructs them by struct literal; the methods and free
 //! functions stay private to this module.
 
-use seqforge_core::{FeatureId, FeatureKind, Span, Strand, ViewerRequest};
+use seqforge_core::{FeatureId, FeatureKind, Span, Strand, Target, ViewerRequest};
 
 use super::InspectorState;
 use super::row::{
@@ -68,7 +68,7 @@ impl FeatureDraft {
     fn to_delete_request(&self) -> ViewerRequest {
         ViewerRequest::RemoveFeature {
             id: self.id,
-            view: None,
+            target: Target::active(),
         }
     }
 
@@ -88,7 +88,7 @@ impl FeatureDraft {
             strand: Some(self.strand.clone()),
             start: Some(self.start),
             end: Some(self.end),
-            view: None,
+            target: Target::active(),
         }
     }
 }
@@ -373,7 +373,7 @@ mod tests {
                 strand,
                 start,
                 end,
-                view,
+                target,
             } => {
                 assert_eq!(id, FeatureId(7));
                 assert_eq!(kind.as_deref(), Some("CDS"));
@@ -381,7 +381,7 @@ mod tests {
                 assert_eq!(strand.as_deref(), Some("-"));
                 assert_eq!(start, Some(10));
                 assert_eq!(end, Some(40));
-                assert_eq!(view, None); // always the active view
+                assert_eq!(target, Target::active()); // always the active view
             }
             other => panic!("expected UpdateFeature, got {other:?}"),
         }

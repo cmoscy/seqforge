@@ -20,6 +20,86 @@ fn default_methyl_dcm() -> bool {
 
 // ── File commands ─────────────────────────────────────────────────────────────
 
+// ── Document target ───────────────────────────────────────────────────────────
+
+/// Which document a request addresses.
+///
+/// Every verb operates on exactly one document, and there are three ways to say
+/// which: the session's active view (the default, and the only one that existed
+/// before), a specific open view, or a file on disk. Routing follows this —
+/// a request naming only a path can run in the calling process, one naming
+/// session state must reach the session that owns it (ROADMAP decision 27).
+///
+/// Two `Option`s rather than an enum because `clap` cannot flatten an enum into
+/// a subcommand's arguments. The illegal state (both set) is rejected by `clap`
+/// via `conflicts_with` on the command line and by [`Target::kind`] on the wire,
+/// so it cannot reach a handler either way.
+///
+/// Flattened in both derives, so `{"method":"goto","view":3}` is unchanged on
+/// the wire and `--in` is purely additive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
+pub struct Target {
+    /// Operate on this open document (a `ViewId` from `buffers`).
+    #[arg(long)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ViewId>,
+    /// Operate on this file instead of a session document. The file is opened
+    /// into the workspace; in a GUI that reuses an already-open buffer.
+    #[arg(long = "in", value_name = "PATH", conflicts_with = "view")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+/// The resolved form of a [`Target`] — what the two `Option`s actually mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetKind<'a> {
+    Active,
+    View(ViewId),
+    Path(&'a std::path::Path),
+}
+
+impl Target {
+    /// Address the session's active view.
+    pub fn active() -> Self {
+        Self::default()
+    }
+
+    /// Address a specific open view.
+    pub fn view(id: ViewId) -> Self {
+        Self {
+            view: Some(id),
+            path: None,
+        }
+    }
+
+    /// Address a file on disk.
+    pub fn path(p: impl Into<PathBuf>) -> Self {
+        Self {
+            view: None,
+            path: Some(p.into()),
+        }
+    }
+
+    /// What this target means. Errors if both fields are set — `clap` prevents
+    /// that on the command line, but a hand-written socket payload could carry
+    /// both, and silently preferring one would be a wrong answer.
+    pub fn kind(&self) -> Result<TargetKind<'_>, DispatchError> {
+        match (self.view, &self.path) {
+            (Some(_), Some(_)) => Err(DispatchError::InvalidInput(
+                "a request names both --view and --in; they are mutually exclusive".into(),
+            )),
+            (Some(v), None) => Ok(TargetKind::View(v)),
+            (None, Some(p)) => Ok(TargetKind::Path(p)),
+            (None, None) => Ok(TargetKind::Active),
+        }
+    }
+
+    /// Whether this target can be served without a running session.
+    pub fn is_path(&self) -> bool {
+        self.view.is_none() && self.path.is_some()
+    }
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -101,9 +181,9 @@ pub enum ViewerRequest {
     #[command(name = "goto")]
     GoTo {
         position: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Search for a sequence pattern (IUPAC; forward + reverse complement).
     Find {
@@ -111,9 +191,9 @@ pub enum ViewerRequest {
         #[arg(short, long, default_value = "0")]
         #[serde(default)]
         mismatches: u8,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Show restriction cut sites. `query` is a free-text expression accepted
     /// by `seqforge_bio::parse_enzyme_query`: a preset keyword (`unique`,
@@ -128,9 +208,9 @@ pub enum ViewerRequest {
         #[arg(long, value_enum, default_value_t = EnzymeOp::Set)]
         #[serde(default)]
         op: EnzymeOp,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
         /// Dam methylation active on this molecule (default: on — standard *E. coli* prep).
         #[arg(long, default_value_t = true)]
         #[serde(default = "default_methyl_dam")]
@@ -157,9 +237,9 @@ pub enum ViewerRequest {
     Insert {
         pos: usize,
         bases: String,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     // The linear edit-command boundary (`plans/span.md` P5d): `Delete` /
     // `Replace` / `ReverseComplement` / `Cut` / `Copy` take `start, end` — these
@@ -173,50 +253,50 @@ pub enum ViewerRequest {
     Delete {
         start: usize,
         end: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Replace the bases in `[start, end)` with new bases.
     Replace {
         start: usize,
         end: usize,
         bases: String,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Reverse-complement the bases in `[start, end)` in place.
     #[command(visible_alias = "rc")]
     ReverseComplement {
         start: usize,
         end: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Cut (copy then delete) the bases in `[start, end)`.
     Cut {
         start: usize,
         end: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Copy the bases in `[start, end)` to the clipboard.
     Copy {
         start: usize,
         end: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Paste the clipboard contents at a position (0-based).
     Paste {
         pos: usize,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Create a new empty in-memory buffer (not backed by a file) and open it.
     New {
@@ -244,9 +324,9 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feature: Option<String>,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Linearize a **circular** molecule, cutting at `at` (default: position 0).
     /// A feature straddling the cut is truncated + fuzzy-marked.
@@ -254,9 +334,9 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<usize>,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Circularize a **linear** molecule (join the ends); `origin` optionally
     /// rotates the new circle so that base becomes position 0.
@@ -264,9 +344,9 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<usize>,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Add a feature over the half-open range `[start, end)`.
     AddFeature {
@@ -281,32 +361,32 @@ pub enum ViewerRequest {
         #[arg(long, default_value = "+")]
         #[serde(default = "default_strand")]
         strand: String,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// List the features on the active buffer (id, kind, label, range, strand).
     /// Ids are session-scoped — use them for `remove-feature`/`rename-feature`.
     ListFeatures {
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// List the primers on the active buffer with derived attachment state + QC
     /// (Tm/GC/self-structure ΔG). Ids are session-scoped. Backs the Inspector
     /// Primers tab and the CLI `primers list` via one shared projection.
     ListPrimers {
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Remove the feature with the given id (from `list-features`).
     RemoveFeature {
         #[arg(long)]
         id: FeatureId,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Rename the feature with the given id (from `list-features`).
     RenameFeature {
@@ -314,9 +394,9 @@ pub enum ViewerRequest {
         id: FeatureId,
         #[arg(long)]
         label: String,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Edit a feature's geometry/type in place: only the fields you pass change.
     /// Addressed by id (from `list-features`); validates `start < end <= len`.
@@ -342,9 +422,9 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end: Option<usize>,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Add a primer (authored oligo). `sequence` is the full oligo 5'→3' (5' tail
     /// included). `name` is optional — omitted, it falls back to
@@ -369,9 +449,9 @@ pub enum ViewerRequest {
         #[arg(long, default_value = "+")]
         #[serde(default = "default_strand")]
         strand: String,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Edit a primer in place: only the fields you pass change. Addressed by id
     /// (from `list-primers`). Passing both `start` and `end` re-sets the binding
@@ -404,9 +484,9 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         detach: bool,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Re-anchor a primer to the current template: scan for its best binding site
     /// and write it back (footprint + strand). Turns a Drifted/Detached primer
@@ -415,9 +495,9 @@ pub enum ViewerRequest {
     RescanPrimer {
         #[arg(long)]
         id: PrimerId,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Compose a restriction-enzyme site onto a primer's 5' tail (Phase 2.2a).
     /// Prepends `flank + recognition (+ spacer + overhang for Type IIs)` to the
@@ -440,17 +520,17 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         flank: Option<String>,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Remove the primer with the given id (from `list-primers`).
     RemovePrimer {
         #[arg(long)]
         id: PrimerId,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Amplify between two attached primers (Primers Phase 3.1). Produces a new
     /// **linear** product buffer inheriting the template's annotations: features
@@ -472,9 +552,9 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         /// The **template** view (defaults to the active view).
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Digest the active buffer with one or more enzymes (Restriction Tier 2).
     /// Opens a read-only **Fragments** view over the source — a projection of
@@ -493,9 +573,9 @@ pub enum ViewerRequest {
         #[arg(default_value = "")]
         query: String,
         /// The **source** view to digest (defaults to the active view).
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Save the active buffer to its source path.
     Save {
@@ -504,16 +584,16 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Save the active buffer to a new path.
     SaveAs {
         path: PathBuf,
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Assemble a product from bins → the product(s).
     ///
@@ -599,15 +679,15 @@ pub enum ViewerRequest {
     },
     /// Undo the last edit on the active buffer.
     Undo {
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
     /// Redo the last undone edit on the active buffer.
     Redo {
-        #[arg(long)]
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        view: Option<ViewId>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
     },
 }
 
@@ -631,41 +711,88 @@ fn default_expand() -> String {
 }
 
 impl ViewerRequest {
-    /// Returns the explicit `view` target if the request carries one;
-    /// `None` for `Open` / `Close` (workspace-scoped) and for view-
-    /// scoped variants where the field was omitted.
-    pub fn target_view(&self) -> Option<ViewId> {
+    /// The request's document [`Target`], if it addresses one.
+    ///
+    /// `None` for workspace-scoped variants (`Open` / `Close` / `Buffers` /
+    /// `New` / `Assemble` / `Focus`), which name no single document. A `Some`
+    /// carrying a default `Target` means "the active view" — exactly what an
+    /// omitted `view` used to mean.
+    pub fn target(&self) -> Option<&Target> {
         match self {
-            ViewerRequest::GoTo { view, .. } => *view,
-            ViewerRequest::Find { view, .. } => *view,
-            ViewerRequest::Enzymes { view, .. } => *view,
-            ViewerRequest::Insert { view, .. } => *view,
-            ViewerRequest::Delete { view, .. } => *view,
-            ViewerRequest::Replace { view, .. } => *view,
-            ViewerRequest::ReverseComplement { view, .. } => *view,
-            ViewerRequest::Cut { view, .. } => *view,
-            ViewerRequest::Copy { view, .. } => *view,
-            ViewerRequest::Paste { view, .. } => *view,
-            ViewerRequest::AddFeature { view, .. } => *view,
-            ViewerRequest::ListFeatures { view, .. } => *view,
-            ViewerRequest::ListPrimers { view, .. } => *view,
-            ViewerRequest::RemoveFeature { view, .. } => *view,
-            ViewerRequest::RenameFeature { view, .. } => *view,
-            ViewerRequest::UpdateFeature { view, .. } => *view,
-            ViewerRequest::AddPrimer { view, .. } => *view,
-            ViewerRequest::UpdatePrimer { view, .. } => *view,
-            ViewerRequest::RescanPrimer { view, .. } => *view,
-            ViewerRequest::AddPrimerSite { view, .. } => *view,
-            ViewerRequest::RemovePrimer { view, .. } => *view,
-            ViewerRequest::Pcr { view, .. } => *view,
-            ViewerRequest::Digest { view, .. } => *view,
-            ViewerRequest::Save { view, .. } => *view,
-            ViewerRequest::SaveAs { view, .. } => *view,
-            ViewerRequest::Undo { view, .. } => *view,
-            ViewerRequest::Redo { view, .. } => *view,
-            ViewerRequest::SetOrigin { view, .. } => *view,
-            ViewerRequest::Linearize { view, .. } => *view,
-            ViewerRequest::Circularize { view, .. } => *view,
+            ViewerRequest::GoTo { target, .. } => Some(target),
+            ViewerRequest::Find { target, .. } => Some(target),
+            ViewerRequest::Enzymes { target, .. } => Some(target),
+            ViewerRequest::Insert { target, .. } => Some(target),
+            ViewerRequest::Delete { target, .. } => Some(target),
+            ViewerRequest::Replace { target, .. } => Some(target),
+            ViewerRequest::ReverseComplement { target, .. } => Some(target),
+            ViewerRequest::Cut { target, .. } => Some(target),
+            ViewerRequest::Copy { target, .. } => Some(target),
+            ViewerRequest::Paste { target, .. } => Some(target),
+            ViewerRequest::AddFeature { target, .. } => Some(target),
+            ViewerRequest::ListFeatures { target, .. } => Some(target),
+            ViewerRequest::ListPrimers { target, .. } => Some(target),
+            ViewerRequest::RemoveFeature { target, .. } => Some(target),
+            ViewerRequest::RenameFeature { target, .. } => Some(target),
+            ViewerRequest::UpdateFeature { target, .. } => Some(target),
+            ViewerRequest::AddPrimer { target, .. } => Some(target),
+            ViewerRequest::UpdatePrimer { target, .. } => Some(target),
+            ViewerRequest::RescanPrimer { target, .. } => Some(target),
+            ViewerRequest::AddPrimerSite { target, .. } => Some(target),
+            ViewerRequest::RemovePrimer { target, .. } => Some(target),
+            ViewerRequest::Pcr { target, .. } => Some(target),
+            ViewerRequest::Digest { target, .. } => Some(target),
+            ViewerRequest::Save { target, .. } => Some(target),
+            ViewerRequest::SaveAs { target, .. } => Some(target),
+            ViewerRequest::Undo { target, .. } => Some(target),
+            ViewerRequest::Redo { target, .. } => Some(target),
+            ViewerRequest::SetOrigin { target, .. } => Some(target),
+            ViewerRequest::Linearize { target, .. } => Some(target),
+            ViewerRequest::Circularize { target, .. } => Some(target),
+            ViewerRequest::Open { .. }
+            | ViewerRequest::Close
+            | ViewerRequest::Buffers
+            | ViewerRequest::New { .. } // creates its own view
+            | ViewerRequest::Assemble { .. } // creates its own view(s)
+            | ViewerRequest::Focus { .. } => None,
+        }
+    }
+
+    /// Mutable [`Self::target`], so a shell can collapse a `Path` target into
+    /// the view it opened before dispatch — after which nothing downstream can
+    /// tell how the document was addressed.
+    pub fn target_mut(&mut self) -> Option<&mut Target> {
+        match self {
+            ViewerRequest::GoTo { target, .. } => Some(target),
+            ViewerRequest::Find { target, .. } => Some(target),
+            ViewerRequest::Enzymes { target, .. } => Some(target),
+            ViewerRequest::Insert { target, .. } => Some(target),
+            ViewerRequest::Delete { target, .. } => Some(target),
+            ViewerRequest::Replace { target, .. } => Some(target),
+            ViewerRequest::ReverseComplement { target, .. } => Some(target),
+            ViewerRequest::Cut { target, .. } => Some(target),
+            ViewerRequest::Copy { target, .. } => Some(target),
+            ViewerRequest::Paste { target, .. } => Some(target),
+            ViewerRequest::AddFeature { target, .. } => Some(target),
+            ViewerRequest::ListFeatures { target, .. } => Some(target),
+            ViewerRequest::ListPrimers { target, .. } => Some(target),
+            ViewerRequest::RemoveFeature { target, .. } => Some(target),
+            ViewerRequest::RenameFeature { target, .. } => Some(target),
+            ViewerRequest::UpdateFeature { target, .. } => Some(target),
+            ViewerRequest::AddPrimer { target, .. } => Some(target),
+            ViewerRequest::UpdatePrimer { target, .. } => Some(target),
+            ViewerRequest::RescanPrimer { target, .. } => Some(target),
+            ViewerRequest::AddPrimerSite { target, .. } => Some(target),
+            ViewerRequest::RemovePrimer { target, .. } => Some(target),
+            ViewerRequest::Pcr { target, .. } => Some(target),
+            ViewerRequest::Digest { target, .. } => Some(target),
+            ViewerRequest::Save { target, .. } => Some(target),
+            ViewerRequest::SaveAs { target, .. } => Some(target),
+            ViewerRequest::Undo { target, .. } => Some(target),
+            ViewerRequest::Redo { target, .. } => Some(target),
+            ViewerRequest::SetOrigin { target, .. } => Some(target),
+            ViewerRequest::Linearize { target, .. } => Some(target),
+            ViewerRequest::Circularize { target, .. } => Some(target),
             ViewerRequest::Open { .. }
             | ViewerRequest::Close
             | ViewerRequest::Buffers
@@ -1061,7 +1188,10 @@ pub fn dispatch<B: BioOps>(
         // Note: `view` targeting is handled by the caller before this
         // function is invoked. `dispatch` always operates on whatever
         // (View, Buffer) was passed in.
-        ViewerRequest::GoTo { position, view: _ } => {
+        ViewerRequest::GoTo {
+            position,
+            target: _,
+        } => {
             let seq_len = buffer.len();
             if position == 0 || position > seq_len {
                 return Err(DispatchError::OutOfRange { position, seq_len });
@@ -1075,7 +1205,7 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::Find {
             pattern,
             mismatches,
-            view: _,
+            target: _,
         } => {
             if pattern.is_empty() {
                 // Empty pattern is a "clear search" affordance. Drop
@@ -1106,7 +1236,7 @@ pub fn dispatch<B: BioOps>(
 
         // Read-op: features are addressed by id, so surface the live id table
         // for CLI/agent callers. Rides `dispatch` (read-only, no history).
-        ViewerRequest::ListFeatures { view: _ } => {
+        ViewerRequest::ListFeatures { target: _ } => {
             let features = annotations
                 .iter()
                 .map(|f| FeatureInfo {
@@ -1125,7 +1255,7 @@ pub fn dispatch<B: BioOps>(
         // Read-op: derived primer projection (attachment state + QC), routed
         // through BioOps so core stays independent of seqforge-bio (mirrors
         // Enzymes → find_cut_sites). Shared shape with the CLI `primers list`.
-        ViewerRequest::ListPrimers { view: _ } => {
+        ViewerRequest::ListPrimers { target: _ } => {
             let circular = buffer.is_circular();
             let primers: Vec<&Primer> = annotations.primers().collect();
             let infos = bio.primer_infos(&buffer.text, &primers, circular);
@@ -1135,7 +1265,7 @@ pub fn dispatch<B: BioOps>(
         ViewerRequest::Enzymes {
             query,
             op,
-            view: _,
+            target: _,
             dam,
             dcm,
             cpg,
@@ -1319,18 +1449,16 @@ mod tests {
     fn viewer_request_serde_round_trip_goto() {
         let req = ViewerRequest::GoTo {
             position: 100,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"method":"goto","position":100}"#);
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            back,
-            ViewerRequest::GoTo {
-                position: 100,
-                view: None
-            }
-        ));
+        let ViewerRequest::GoTo { position, target } = back else {
+            panic!("wrong variant")
+        };
+        assert_eq!(position, 100);
+        assert_eq!(target, Target::active());
     }
 
     #[test]
@@ -1338,7 +1466,7 @@ mod tests {
         let req = ViewerRequest::Find {
             pattern: "ATGC".into(),
             mismatches: 2,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
@@ -1361,7 +1489,7 @@ mod tests {
         // on active view). Backwards compatible with pre-2.5d clients.
         let req = ViewerRequest::GoTo {
             position: 5,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -1374,12 +1502,12 @@ mod tests {
     fn viewer_request_view_field_round_trip() {
         let req = ViewerRequest::GoTo {
             position: 5,
-            view: Some(crate::ViewId(17)),
+            target: Target::view(crate::ViewId(17)),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"view\":17"));
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.target_view(), Some(crate::ViewId(17)));
+        assert_eq!(back.target().and_then(|t| t.view), Some(crate::ViewId(17)));
     }
 
     #[test]
@@ -1387,19 +1515,19 @@ mod tests {
         let r = ViewerRequest::Find {
             pattern: "AT".into(),
             mismatches: 0,
-            view: Some(crate::ViewId(42)),
+            target: Target::view(crate::ViewId(42)),
         };
-        assert_eq!(r.target_view(), Some(crate::ViewId(42)));
+        assert_eq!(r.target().and_then(|t| t.view), Some(crate::ViewId(42)));
     }
 
     #[test]
     fn target_view_workspace_scoped_variants_return_none() {
         let close = ViewerRequest::Close;
-        assert_eq!(close.target_view(), None);
+        assert_eq!(close.target().and_then(|t| t.view), None);
         let open = ViewerRequest::Open {
             path: std::path::PathBuf::from("/x"),
         };
-        assert_eq!(open.target_view(), None);
+        assert_eq!(open.target().and_then(|t| t.view), None);
     }
 
     #[test]
@@ -1426,7 +1554,7 @@ mod tests {
         let req = ViewerRequest::Enzymes {
             query: "EcoRI BamHI".into(),
             op: EnzymeOp::Set,
-            view: None,
+            target: Target::active(),
             dam: true,
             dcm: true,
             cpg: false,
@@ -1443,13 +1571,13 @@ mod tests {
         let req = ViewerRequest::Insert {
             pos: 10,
             bases: "ATG".into(),
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"method":"insert","pos":10,"bases":"ATG"}"#);
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
         assert!(
-            matches!(back, ViewerRequest::Insert { pos: 10, ref bases, view: None } if bases == "ATG")
+            matches!(back, ViewerRequest::Insert { pos: 10, ref bases, ref target } if bases == "ATG" && target == &Target::active())
         );
     }
 
@@ -1458,7 +1586,7 @@ mod tests {
         let req = ViewerRequest::Delete {
             start: 5,
             end: 9,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert_eq!(json, r#"{"method":"delete","start":5,"end":9}"#);
@@ -1468,8 +1596,8 @@ mod tests {
             ViewerRequest::Delete {
                 start: 5,
                 end: 9,
-                view: None
-            }
+                ref target
+            } if target == &Target::active()
         ));
     }
 
@@ -1478,7 +1606,7 @@ mod tests {
         let req = ViewerRequest::ReverseComplement {
             start: 0,
             end: 4,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         // snake_case method tag derived from the variant name.
@@ -1509,11 +1637,16 @@ mod tests {
     #[test]
     fn viewer_request_serde_round_trip_undo_save() {
         for (req, tag) in [
-            (ViewerRequest::Undo { view: None }, "undo"),
+            (
+                ViewerRequest::Undo {
+                    target: Target::active(),
+                },
+                "undo",
+            ),
             (
                 ViewerRequest::Save {
                     force: false,
-                    view: None,
+                    target: Target::active(),
                 },
                 "save",
             ),
@@ -1521,7 +1654,7 @@ mod tests {
             let json = serde_json::to_string(&req).unwrap();
             assert_eq!(json, format!(r#"{{"method":"{tag}"}}"#));
             let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.target_view(), None);
+            assert_eq!(back.target().and_then(|t| t.view), None);
         }
     }
 
@@ -1530,12 +1663,12 @@ mod tests {
         let req = ViewerRequest::Insert {
             pos: 3,
             bases: "C".into(),
-            view: Some(crate::ViewId(7)),
+            target: Target::view(crate::ViewId(7)),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"view\":7"));
         let back: ViewerRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.target_view(), Some(crate::ViewId(7)));
+        assert_eq!(back.target().and_then(|t| t.view), Some(crate::ViewId(7)));
     }
 
     #[test]
@@ -1543,7 +1676,7 @@ mod tests {
         let req = ViewerRequest::Enzymes {
             query: "unique".into(),
             op: EnzymeOp::Set,
-            view: None,
+            target: Target::active(),
             dam: true,
             dcm: true,
             cpg: false,
@@ -1569,7 +1702,7 @@ mod tests {
             &FakeBio::new(),
             ViewerRequest::GoTo {
                 position: 3,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap();
@@ -1590,7 +1723,7 @@ mod tests {
             &FakeBio::new(),
             ViewerRequest::GoTo {
                 position: 9,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap_err();
@@ -1621,7 +1754,9 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::ListFeatures { view: None },
+            ViewerRequest::ListFeatures {
+                target: Target::active(),
+            },
         )
         .unwrap();
         match resp {
@@ -1678,7 +1813,9 @@ mod tests {
             &buf,
             &mut ann,
             &FakeBio::new(),
-            ViewerRequest::ListPrimers { view: None },
+            ViewerRequest::ListPrimers {
+                target: Target::active(),
+            },
         )
         .unwrap();
         match resp {
@@ -1711,7 +1848,7 @@ mod tests {
             start: Some(0),
             end: Some(4),
             strand: "-".into(),
-            view: None,
+            target: Target::active(),
         };
         let back: ViewerRequest =
             serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
@@ -1735,7 +1872,7 @@ mod tests {
             start: None,
             end: Some(9),
             detach: false,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&upd).unwrap();
         assert!(json.contains(r#""method":"update_primer""#), "got {json}");
@@ -1761,7 +1898,7 @@ mod tests {
             start: None,
             end: None,
             detach: true,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&detach).unwrap();
         assert!(json.contains(r#""detach":true"#), "got {json}");
@@ -1775,7 +1912,7 @@ mod tests {
         // RescanPrimer round-trips.
         let rescan = ViewerRequest::RescanPrimer {
             id: PrimerId(5),
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&rescan).unwrap();
         assert!(json.contains(r#""method":"rescan_primer""#), "got {json}");
@@ -1794,7 +1931,7 @@ mod tests {
             enzyme: "BsaI".into(),
             overhang: Some("AATG".into()),
             flank: None,
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&site).unwrap();
         assert!(json.contains(r#""method":"add_primer_site""#), "got {json}");
@@ -1811,7 +1948,7 @@ mod tests {
 
         let rm = ViewerRequest::RemovePrimer {
             id: PrimerId(7),
-            view: None,
+            target: Target::active(),
         };
         let back: ViewerRequest =
             serde_json::from_str(&serde_json::to_string(&rm).unwrap()).unwrap();
@@ -1828,7 +1965,7 @@ mod tests {
     fn remove_feature_request_serde_round_trips_id() {
         let req = ViewerRequest::RemoveFeature {
             id: FeatureId(42),
-            view: None,
+            target: Target::active(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""id":42"#), "got {json}");
@@ -1852,7 +1989,7 @@ mod tests {
             &FakeBio::new(),
             ViewerRequest::GoTo {
                 position: 0,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap_err();
@@ -1871,7 +2008,7 @@ mod tests {
             ViewerRequest::Find {
                 pattern: "ATGC".into(),
                 mismatches: 1,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap();
@@ -1901,7 +2038,7 @@ mod tests {
             ViewerRequest::Enzymes {
                 query: String::new(),
                 op: EnzymeOp::Set,
-                view: None,
+                target: Target::active(),
                 dam: true,
                 dcm: true,
                 cpg: false,
@@ -1927,7 +2064,7 @@ mod tests {
                 ViewerRequest::Enzymes {
                     query: "EcoRI".into(),
                     op: EnzymeOp::Set,
-                    view: None,
+                    target: Target::active(),
                     dam,
                     dcm: false,
                     cpg: false,
@@ -1963,7 +2100,7 @@ mod tests {
             ViewerRequest::Enzymes {
                 query: query.into(),
                 op,
-                view: None,
+                target: Target::active(),
                 dam: true,
                 dcm: true,
                 cpg: false,
@@ -2011,7 +2148,7 @@ mod tests {
             ViewerRequest::Find {
                 pattern: "ATGC".into(),
                 mismatches: 0,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap();
@@ -2036,7 +2173,7 @@ mod tests {
             ViewerRequest::Enzymes {
                 query: query.into(),
                 op: EnzymeOp::Set,
-                view: None,
+                target: Target::active(),
                 dam: false,
                 dcm: false,
                 cpg: false,
@@ -2105,7 +2242,7 @@ mod tests {
             ViewerRequest::Find {
                 pattern: "ATGC".into(),
                 mismatches: 0,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap();
@@ -2151,7 +2288,7 @@ mod tests {
             ViewerRequest::Find {
                 pattern: "".into(),
                 mismatches: 0,
-                view: None,
+                target: Target::active(),
             },
         )
         .unwrap();
@@ -2165,5 +2302,78 @@ mod tests {
             resp,
             ViewerResponse::SearchResults { count: 0, .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    /// The wire shape is unchanged for the pre-existing form: `Target` is
+    /// flattened, so `view` still sits at the top level of the request object
+    /// and an omitted target still means "the active view".
+    #[test]
+    fn view_targeting_is_wire_compatible() {
+        let req: ViewerRequest =
+            serde_json::from_str(r#"{"method":"goto","position":42,"view":3}"#).unwrap();
+        match &req {
+            ViewerRequest::GoTo { position, target } => {
+                assert_eq!(*position, 42);
+                assert_eq!(target.kind().unwrap(), TargetKind::View(ViewId(3)));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""view":3"#), "round trip: {json}");
+        assert!(
+            !json.contains("path"),
+            "an unset path must not appear: {json}"
+        );
+    }
+
+    #[test]
+    fn an_omitted_target_is_the_active_view() {
+        let req: ViewerRequest = serde_json::from_str(r#"{"method":"goto","position":1}"#).unwrap();
+        let ViewerRequest::GoTo { target, .. } = &req else {
+            panic!("wrong variant")
+        };
+        assert_eq!(target.kind().unwrap(), TargetKind::Active);
+        // and it serializes back to the same minimal object
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"method":"goto","position":1}"#
+        );
+    }
+
+    /// The new arm: a file, addressable over the socket as well as the CLI.
+    #[test]
+    fn a_path_target_round_trips() {
+        let req = ViewerRequest::GoTo {
+            position: 7,
+            target: Target::path("/tmp/p.gb"),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ViewerRequest = serde_json::from_str(&json).unwrap();
+        let ViewerRequest::GoTo { target, .. } = &back else {
+            panic!("wrong variant")
+        };
+        assert_eq!(
+            target.kind().unwrap(),
+            TargetKind::Path(std::path::Path::new("/tmp/p.gb"))
+        );
+        assert!(target.is_path(), "runnable without a session");
+    }
+
+    /// `clap` rejects this on the command line, but a hand-written socket
+    /// payload can carry both. Preferring one silently would be a wrong answer.
+    #[test]
+    fn naming_both_a_view_and_a_path_is_an_error() {
+        let t = Target {
+            view: Some(ViewId(1)),
+            path: Some("/tmp/p.gb".into()),
+        };
+        let err = t.kind().unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+        assert!(!t.is_path(), "ambiguous targets are not locally runnable");
     }
 }

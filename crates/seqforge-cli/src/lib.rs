@@ -732,7 +732,7 @@ mod primer_tests {
 #[cfg(test)]
 mod routing_tests {
     use super::DocSource;
-    use seqforge_core::ViewerRequest;
+    use seqforge_core::{Target, ViewerRequest};
 
     fn assemble(inputs: &[&str]) -> ViewerRequest {
         ViewerRequest::Assemble {
@@ -783,7 +783,7 @@ mod routing_tests {
         assert_eq!(
             DocSource::of(&ViewerRequest::GoTo {
                 position: 10,
-                view: None
+                target: Target::active()
             }),
             DocSource::Session
         );

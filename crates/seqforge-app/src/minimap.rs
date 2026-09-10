@@ -13,7 +13,7 @@
 use std::f32::consts::{PI, TAU};
 
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
-use seqforge_core::{Annotations, BufferId, FeatureId, FeatureKind, Strand, ViewerRequest};
+use seqforge_core::{Annotations, BufferId, FeatureId, FeatureKind, Strand, Target, ViewerRequest};
 
 use crate::cache::Cache;
 use crate::command::{AppCommand, PendingCommand};
@@ -444,7 +444,7 @@ impl MiniMap {
                 cmds.push((
                     AppCommand::Viewer(ViewerRequest::GoTo {
                         position: seq_pos,
-                        view: None,
+                        target: Target::active(),
                     }),
                     None,
                 ));

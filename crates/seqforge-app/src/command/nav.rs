@@ -1,7 +1,7 @@
 //! Navigation, search, selection commands.
 
 use seqforge_core::{
-    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, ViewSelection,
+    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, Target, ViewSelection,
     ViewerRequest, ViewerResponse,
 };
 
@@ -89,7 +89,7 @@ pub(super) fn apply_submit_find<B: BioOps>(
         ViewerRequest::Find {
             pattern,
             mismatches,
-            view: None,
+            target: Target::active(),
         },
     )?;
     if let ViewerResponse::SearchResults { count, .. } = &resp {
@@ -127,7 +127,7 @@ pub(super) fn apply_enzyme_op<B: BioOps>(
         ViewerRequest::Enzymes {
             query,
             op,
-            view: None,
+            target: Target::active(),
             dam: methyl.dam,
             dcm: methyl.dcm,
             cpg: methyl.cpg,
@@ -172,7 +172,7 @@ pub(super) fn apply_submit_goto<B: BioOps>(
         bio,
         ViewerRequest::GoTo {
             position,
-            view: None,
+            target: Target::active(),
         },
     )?;
     emit_selection_diff(state, sel_before);

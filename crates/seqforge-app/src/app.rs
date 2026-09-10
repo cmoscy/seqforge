@@ -3,7 +3,7 @@ use std::sync::mpsc;
 
 use egui_dock::{DockArea, DockState, Style};
 use seqforge_core::{
-    BioOps, DispatchError, FeatureKind, Selection, ViewId, ViewSelection, ViewerRequest,
+    BioOps, DispatchError, FeatureKind, Selection, Target, ViewId, ViewSelection, ViewerRequest,
     ViewerResponse,
 };
 
@@ -719,7 +719,7 @@ impl SeqForgeApp {
                         &mut self.state,
                         AppCommand::Viewer(ViewerRequest::Save {
                             force: true,
-                            view: Some(view_id),
+                            target: Target::view(view_id),
                         }),
                     ),
                     ConflictChoice::Reload => enqueue(
@@ -864,7 +864,7 @@ impl SeqForgeApp {
                     &mut self.state,
                     AppCommand::Viewer(ViewerRequest::Save {
                         force: false,
-                        view: Some(view_id),
+                        target: Target::view(view_id),
                     }),
                 );
                 if has_path {
@@ -1214,7 +1214,7 @@ impl eframe::App for SeqForgeApp {
                     ui.separator();
                     let save_req = ViewerRequest::Save {
                         force: false,
-                        view: None,
+                        target: Target::active(),
                     };
                     let can_save =
                         command::is_enabled(&AppCommand::Viewer(save_req.clone()), &self.state);
@@ -1272,7 +1272,9 @@ impl eframe::App for SeqForgeApp {
                 });
                 ui.menu_button("Edit", |ui| {
                     // ── Undo / Redo ──
-                    let undo_req = ViewerRequest::Undo { view: None };
+                    let undo_req = ViewerRequest::Undo {
+                        target: Target::active(),
+                    };
                     let can_undo =
                         command::is_enabled(&AppCommand::Viewer(undo_req.clone()), &self.state);
                     if ui
@@ -1282,7 +1284,9 @@ impl eframe::App for SeqForgeApp {
                         menu_cmds.push(AppCommand::Viewer(undo_req));
                         ui.close_menu();
                     }
-                    let redo_req = ViewerRequest::Redo { view: None };
+                    let redo_req = ViewerRequest::Redo {
+                        target: Target::active(),
+                    };
                     let can_redo =
                         command::is_enabled(&AppCommand::Viewer(redo_req.clone()), &self.state);
                     if ui
@@ -1298,14 +1302,14 @@ impl eframe::App for SeqForgeApp {
                     let range_probe = ViewerRequest::Cut {
                         start: 0,
                         end: 0,
-                        view: None,
+                        target: Target::active(),
                     };
                     let has_range =
                         command::is_enabled(&AppCommand::Viewer(range_probe), &self.state);
                     let copy_probe = ViewerRequest::Copy {
                         start: 0,
                         end: 0,
-                        view: None,
+                        target: Target::active(),
                     };
                     let can_copy =
                         command::is_enabled(&AppCommand::Viewer(copy_probe), &self.state);
@@ -1331,7 +1335,7 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
                                 start,
                                 end,
-                                view: None,
+                                target: Target::active(),
                             }));
                         } else if self
                             .state
@@ -1343,14 +1347,14 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
                                 start: 0,
                                 end: 0,
-                                view: None,
+                                target: Target::active(),
                             }));
                         }
                         ui.close_menu();
                     }
                     let paste_req = ViewerRequest::Paste {
                         pos: paste_pos,
-                        view: None,
+                        target: Target::active(),
                     };
                     let can_paste =
                         command::is_enabled(&AppCommand::Viewer(paste_req.clone()), &self.state);
@@ -1388,7 +1392,7 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::ReverseComplement {
                                 start,
                                 end,
-                                view: None,
+                                target: Target::active(),
                             }));
                         }
                         ui.close_menu();
@@ -1409,7 +1413,7 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::ReverseComplement {
                                 start: 0,
                                 end: len,
-                                view: None,
+                                target: Target::active(),
                             }));
                             ui.close_menu();
                         }
@@ -1421,7 +1425,7 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::SetOrigin {
                                 index: Some(paste_pos),
                                 feature: None,
-                                view: None,
+                                target: Target::active(),
                             }));
                             ui.close_menu();
                         }
@@ -1431,7 +1435,7 @@ impl eframe::App for SeqForgeApp {
                         {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Linearize {
                                 at: Some(paste_pos),
-                                view: None,
+                                target: Target::active(),
                             }));
                             ui.close_menu();
                         }
@@ -1441,7 +1445,7 @@ impl eframe::App for SeqForgeApp {
                         {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Circularize {
                                 origin: None,
-                                view: None,
+                                target: Target::active(),
                             }));
                             ui.close_menu();
                         }

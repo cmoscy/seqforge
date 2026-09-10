@@ -19,7 +19,7 @@ use std::time::Duration;
 use egui::{Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use seqforge_core::{
     Annotations, Buffer, CutSite, CutSiteKey, DeleteIntent, FeatureId, FeatureKind, MethylState,
-    Selection, Strand, View, ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
+    Selection, Strand, Target, View, ViewId, ViewSelection, ViewerRequest, mutations::apply_splice,
 };
 
 use crate::clipboard::filter_bases as iupac_filter;
@@ -80,7 +80,7 @@ impl PendingEdit {
                 (!staged.is_empty()).then(|| ViewerRequest::Insert {
                     pos: *pos,
                     bases: staged.clone(),
-                    view: Some(view),
+                    target: Target::view(view),
                 })
             }
             PendingEdit::Replace { start, end, staged } => {
@@ -88,22 +88,22 @@ impl PendingEdit {
                     start: *start,
                     end: *end,
                     bases: staged.clone(),
-                    view: Some(view),
+                    target: Target::view(view),
                 })
             }
             PendingEdit::Delete { start, end } => (start < end).then_some(ViewerRequest::Delete {
                 start: *start,
                 end: *end,
-                view: Some(view),
+                target: Target::view(view),
             }),
             PendingEdit::Cut { start, end } => (start < end).then_some(ViewerRequest::Cut {
                 start: *start,
                 end: *end,
-                view: Some(view),
+                target: Target::view(view),
             }),
             PendingEdit::Paste { pos } => Some(ViewerRequest::Paste {
                 pos: *pos,
-                view: Some(view),
+                target: Target::view(view),
             }),
         }
     }
@@ -433,11 +433,15 @@ fn handle_keyboard(
     // Save / Save-As (⌘S / ⇧⌘S) are handled app-level in the KEYMAP so they
     // fire regardless of which pane holds focus (Phase 15 B3).
     if ui.input_mut(|i| i.consume_key(cmd, Key::Z)) {
-        direct = Some(AppCommand::Viewer(ViewerRequest::Undo { view: Some(vid) }));
+        direct = Some(AppCommand::Viewer(ViewerRequest::Undo {
+            target: Target::view(vid),
+        }));
     } else if ui.input_mut(|i| i.consume_key(cmd_shift, Key::Z))
         || ui.input_mut(|i| i.consume_key(cmd, Key::Y))
     {
-        direct = Some(AppCommand::Viewer(ViewerRequest::Redo { view: Some(vid) }));
+        direct = Some(AppCommand::Viewer(ViewerRequest::Redo {
+            target: Target::view(vid),
+        }));
     }
     if let Some(c) = direct {
         *pending = None;
@@ -480,7 +484,7 @@ fn handle_keyboard(
                 ViewerRequest::Copy {
                     start,
                     end,
-                    view: Some(vid),
+                    target: Target::view(vid),
                 },
             );
         } else if view.selection.selected_primer().is_some() {
@@ -494,7 +498,7 @@ fn handle_keyboard(
                 ViewerRequest::Copy {
                     start: 0,
                     end: 0,
-                    view: Some(vid),
+                    target: Target::view(vid),
                 },
             );
         }
@@ -1313,7 +1317,7 @@ impl SequenceView {
                                     kind: "CDS".to_string(),
                                     label: "ORF".to_string(),
                                     strand: strand_flag(orf.strand).to_string(),
-                                    view: None,
+                                    target: Target::active(),
                                 }),
                                 None,
                             ));

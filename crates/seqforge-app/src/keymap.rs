@@ -24,6 +24,7 @@
 //! constants on [`crate::focus::KeyContext`] for the canonical set.
 
 use egui::{Key, Modifiers};
+use seqforge_core::Target;
 
 use crate::app::AppState;
 use crate::command::{self, AppCommand};
@@ -76,7 +77,7 @@ pub const KEYMAP: &[Binding] = &[
         command: || {
             AppCommand::Viewer(seqforge_core::ViewerRequest::Save {
                 force: false,
-                view: None,
+                target: Target::active(),
             })
         },
     },

@@ -592,10 +592,10 @@ pub(super) fn dispatch_active<B: BioOps>(
     bio: &B,
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
-    if let Some(target) = req.target_view() {
+    if let Some(vid) = req.target().and_then(|t| t.view) {
         return state
             .workspace
-            .with_buffer(target, |view, buf, ann| dispatch(view, buf, ann, bio, req))
+            .with_buffer(vid, |view, buf, ann| dispatch(view, buf, ann, bio, req))
             .and_then(|inner| inner);
     }
     state
@@ -624,11 +624,51 @@ fn open_config_file(
 
 // ── Public dispatcher ────────────────────────────────────────────────────────
 
+/// Open a request's `Path` target into the workspace and rewrite the target to
+/// name the resulting view.
+///
+/// This is the single place a file becomes a document. `Workspace::open_path`
+/// dedupes by path, so targeting a file the GUI already has open reuses its
+/// buffer (and its undo history) rather than loading a second copy.
+///
+/// A `View` or `Active` target passes through untouched; an ambiguous target
+/// (both `--view` and `--in`) is rejected here rather than downstream, where
+/// silently preferring one would be a wrong answer.
+fn resolve_path_target<B: BioOps>(
+    cmd: &mut AppCommand,
+    state: &mut AppState,
+    bio: &B,
+) -> Result<(), DispatchError> {
+    let AppCommand::Viewer(req) = cmd else {
+        return Ok(());
+    };
+    let Some(target) = req.target_mut() else {
+        return Ok(());
+    };
+    match target.kind()? {
+        seqforge_core::TargetKind::Active | seqforge_core::TargetKind::View(_) => Ok(()),
+        seqforge_core::TargetKind::Path(path) => {
+            let vid = state
+                .workspace
+                .open_path(path, bio)
+                .map_err(DispatchError::InvalidInput)?;
+            *target = seqforge_core::Target::view(vid);
+            Ok(())
+        }
+    }
+}
+
 pub fn apply<B: BioOps>(
     cmd: AppCommand,
     state: &mut AppState,
     bio: &B,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
+    // Collapse a `Path` target into the view it opens, once, before dispatch.
+    // Every arm below then reads `target.view` and cannot tell how the document
+    // was addressed (ROADMAP decision 27).
+    let mut cmd = cmd;
+    resolve_path_target(&mut cmd, state, bio)?;
+
     use AppCommand::*;
     match cmd {
         // ── File / document ─────────────────────────────────────────
@@ -840,34 +880,34 @@ pub fn apply<B: BioOps>(
             // ── Editor write-ops → command/edit.rs (Phase 11 write path) ──
             // Intercepted here, never reaching `dispatch_active`/`core::dispatch`
             // (which read-lock); see commands.rs `dispatch` doc + editor.md §4.
-            ViewerRequest::Insert { pos, bases, view } => {
-                sedit::apply_insert(&mut state.workspace, view, pos, bases)
+            ViewerRequest::Insert { pos, bases, target } => {
+                sedit::apply_insert(&mut state.workspace, target.view, pos, bases)
             }
-            ViewerRequest::Delete { start, end, view } => {
-                sedit::apply_delete(&mut state.workspace, view, start, end)
+            ViewerRequest::Delete { start, end, target } => {
+                sedit::apply_delete(&mut state.workspace, target.view, start, end)
             }
             ViewerRequest::Replace {
                 start,
                 end,
                 bases,
-                view,
-            } => sedit::apply_replace(&mut state.workspace, view, start, end, bases),
-            ViewerRequest::ReverseComplement { start, end, view } => {
-                sedit::apply_reverse_complement(&mut state.workspace, view, start, end)
+                target,
+            } => sedit::apply_replace(&mut state.workspace, target.view, start, end, bases),
+            ViewerRequest::ReverseComplement { start, end, target } => {
+                sedit::apply_reverse_complement(&mut state.workspace, target.view, start, end)
             }
             // Clipboard ops reach the OS pasteboard, so they take a `Host`
             // alongside the workspace — disjoint borrows of `AppState`.
-            ViewerRequest::Cut { start, end, view } => {
+            ViewerRequest::Cut { start, end, target } => {
                 let (ws, mut host) = state.session();
-                sedit::apply_cut(ws, &mut host, view, start, end)
+                sedit::apply_cut(ws, &mut host, target.view, start, end)
             }
-            ViewerRequest::Copy { start, end, view } => {
+            ViewerRequest::Copy { start, end, target } => {
                 let (ws, mut host) = state.session();
-                sedit::apply_copy(ws, &mut host, view, start, end)
+                sedit::apply_copy(ws, &mut host, target.view, start, end)
             }
-            ViewerRequest::Paste { pos, view } => {
+            ViewerRequest::Paste { pos, target } => {
                 let (ws, mut host) = state.session();
-                sedit::apply_paste(ws, &mut host, view, pos)
+                sedit::apply_paste(ws, &mut host, target.view, pos)
             }
             ViewerRequest::AddFeature {
                 start,
@@ -875,21 +915,21 @@ pub fn apply<B: BioOps>(
                 kind,
                 label,
                 strand,
-                view,
+                target,
             } => sedit::apply_add_feature(
                 &mut state.workspace,
-                view,
+                target.view,
                 start,
                 end,
                 kind,
                 label,
                 strand,
             ),
-            ViewerRequest::RemoveFeature { id, view } => {
-                sedit::apply_remove_feature(&mut state.workspace, view, id)
+            ViewerRequest::RemoveFeature { id, target } => {
+                sedit::apply_remove_feature(&mut state.workspace, target.view, id)
             }
-            ViewerRequest::RenameFeature { id, label, view } => {
-                sedit::apply_rename_feature(&mut state.workspace, view, id, label)
+            ViewerRequest::RenameFeature { id, label, target } => {
+                sedit::apply_rename_feature(&mut state.workspace, target.view, id, label)
             }
             ViewerRequest::UpdateFeature {
                 id,
@@ -898,10 +938,10 @@ pub fn apply<B: BioOps>(
                 strand,
                 start,
                 end,
-                view,
+                target,
             } => sedit::apply_update_feature(
                 &mut state.workspace,
-                view,
+                target.view,
                 id,
                 kind,
                 label,
@@ -915,10 +955,10 @@ pub fn apply<B: BioOps>(
                 start,
                 end,
                 strand,
-                view,
+                target,
             } => sedit::apply_add_primer(
                 &mut state.workspace,
-                view,
+                target.view,
                 name,
                 sequence,
                 start,
@@ -933,10 +973,10 @@ pub fn apply<B: BioOps>(
                 start,
                 end,
                 detach,
-                view,
+                target,
             } => sedit::apply_update_primer(
                 &mut state.workspace,
-                view,
+                target.view,
                 id,
                 name,
                 sequence,
@@ -945,37 +985,39 @@ pub fn apply<B: BioOps>(
                 end,
                 detach,
             ),
-            ViewerRequest::RescanPrimer { id, view } => {
-                sedit::apply_rescan_primer(&mut state.workspace, view, id)
+            ViewerRequest::RescanPrimer { id, target } => {
+                sedit::apply_rescan_primer(&mut state.workspace, target.view, id)
             }
             ViewerRequest::AddPrimerSite {
                 id,
                 enzyme,
                 overhang,
                 flank,
-                view,
+                target,
             } => sedit::apply_add_primer_site(
                 &mut state.workspace,
-                view,
+                target.view,
                 id,
                 enzyme,
                 overhang,
                 flank,
             ),
-            ViewerRequest::RemovePrimer { id, view } => {
-                sedit::apply_remove_primer(&mut state.workspace, view, id)
+            ViewerRequest::RemovePrimer { id, target } => {
+                sedit::apply_remove_primer(&mut state.workspace, target.view, id)
             }
             ViewerRequest::Pcr {
                 fwd,
                 rev,
                 name,
-                view,
-            } => file::apply_pcr(state, view, fwd, rev, name),
-            ViewerRequest::Digest { query, view } => file::apply_digest(state, view, query),
-            ViewerRequest::Save { force, view } => edit::apply_save(state, view, force),
-            ViewerRequest::SaveAs { path, view } => {
+                target,
+            } => file::apply_pcr(state, target.view, fwd, rev, name),
+            ViewerRequest::Digest { query, target } => {
+                file::apply_digest(state, target.view, query)
+            }
+            ViewerRequest::Save { force, target } => edit::apply_save(state, target.view, force),
+            ViewerRequest::SaveAs { path, target } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.
-                file::apply_save_document(state, view, path)
+                file::apply_save_document(state, target.view, path)
             }
             ViewerRequest::Assemble {
                 inputs,
@@ -1006,21 +1048,21 @@ pub fn apply<B: BioOps>(
                 combos,
                 origin,
             ),
-            ViewerRequest::Undo { view } => sedit::apply_undo(&mut state.workspace, view),
-            ViewerRequest::Redo { view } => sedit::apply_redo(&mut state.workspace, view),
+            ViewerRequest::Undo { target } => sedit::apply_undo(&mut state.workspace, target.view),
+            ViewerRequest::Redo { target } => sedit::apply_redo(&mut state.workspace, target.view),
 
             // ── Buffer lifecycle / topology ──
             ViewerRequest::New { circular, name } => file::apply_new(state, circular, name),
             ViewerRequest::SetOrigin {
                 index,
                 feature,
-                view,
-            } => sedit::apply_set_origin(&mut state.workspace, view, index, feature),
-            ViewerRequest::Linearize { at, view } => {
-                sedit::apply_linearize(&mut state.workspace, view, at)
+                target,
+            } => sedit::apply_set_origin(&mut state.workspace, target.view, index, feature),
+            ViewerRequest::Linearize { at, target } => {
+                sedit::apply_linearize(&mut state.workspace, target.view, at)
             }
-            ViewerRequest::Circularize { origin, view } => {
-                sedit::apply_circularize(&mut state.workspace, view, origin)
+            ViewerRequest::Circularize { origin, target } => {
+                sedit::apply_circularize(&mut state.workspace, target.view, origin)
             }
 
             // ── Read-scoped (GoTo/Find/Enzymes) → core::dispatch ──

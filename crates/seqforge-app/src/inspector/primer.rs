@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use seqforge_bio::EnzymeSpec;
 use seqforge_core::{
-    PrimerId, PrimerInfo, PrimerState, Span, Strand, ViewSelection, ViewerRequest,
+    PrimerId, PrimerInfo, PrimerState, Span, Strand, Target, ViewSelection, ViewerRequest,
 };
 
 use super::row::{
@@ -144,7 +144,7 @@ impl PrimerDraft {
                 start,
                 end,
                 detach: !self.attached,
-                view: None,
+                target: Target::active(),
             },
             None => ViewerRequest::AddPrimer {
                 name: Some(self.name.clone()),
@@ -152,15 +152,17 @@ impl PrimerDraft {
                 start,
                 end,
                 strand: self.strand.clone(),
-                view: None,
+                target: Target::active(),
             },
         }
     }
 
     /// The `RemovePrimer` verb (only meaningful for an existing primer).
     fn to_delete_request(&self) -> Option<ViewerRequest> {
-        self.id
-            .map(|id| ViewerRequest::RemovePrimer { id, view: None })
+        self.id.map(|id| ViewerRequest::RemovePrimer {
+            id,
+            target: Target::active(),
+        })
     }
 }
 
@@ -312,7 +314,7 @@ fn primer_viewer(
                                     start: Some(site.span.start),
                                     end: Some(site.span.start + site.span.len),
                                     detach: false,
-                                    view: None,
+                                    target: Target::active(),
                                 }),
                                 None,
                             ));
@@ -334,7 +336,7 @@ fn primer_viewer(
                     pending.push((
                         AppCommand::Viewer(ViewerRequest::RescanPrimer {
                             id: p.id,
-                            view: None,
+                            target: Target::active(),
                         }),
                         None,
                     ));
@@ -676,7 +678,7 @@ impl InspectorState {
                                 fwd,
                                 rev,
                                 name: None,
-                                view: None,
+                                target: Target::active(),
                             }),
                             None,
                         ));
@@ -807,7 +809,7 @@ mod tests {
                 start,
                 end,
                 detach,
-                view,
+                target,
             } => {
                 assert_eq!(id, PrimerId(4));
                 assert_eq!(name.as_deref(), Some("P1"));
@@ -815,7 +817,7 @@ mod tests {
                 assert_eq!(strand.as_deref(), Some("+"));
                 assert_eq!((start, end), (Some(2), Some(8)));
                 assert!(!detach, "an attached edit keeps the binding");
-                assert_eq!(view, None);
+                assert_eq!(target, Target::active());
             }
             other => panic!("expected UpdatePrimer, got {other:?}"),
         }

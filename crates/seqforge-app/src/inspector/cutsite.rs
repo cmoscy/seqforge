@@ -5,7 +5,7 @@
 //! only the enzyme-related `InspectorState` fields, so it
 //! extracts cleanly as a split `impl` block.
 
-use seqforge_core::{CutSite, CutSiteKey, MethylState};
+use seqforge_core::{CutSite, CutSiteKey, MethylState, Target};
 
 use super::InspectorState;
 use super::row::remove_button;
@@ -165,7 +165,7 @@ impl InspectorState {
                 pending.push((
                     AppCommand::Viewer(seqforge_core::ViewerRequest::Digest {
                         query: self.active_enzymes.join(" "),
-                        view: None,
+                        target: Target::active(),
                     }),
                     None,
                 ));
