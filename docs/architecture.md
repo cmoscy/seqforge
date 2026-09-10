@@ -24,10 +24,10 @@ flowchart TD
     cli --> sess
     app --> core
     cli --> core
-    app -.->|"impl BioOps (AppBio)"| bio
+    app -.-> bio
     cli -.-> bio
     sess --> core
-    sess --> bio
+    sess -->|"impl BioOps (Bio)"| bio
     bio --> core
     bio --> restr
     bio --> thermo
@@ -40,8 +40,10 @@ flowchart TD
 
 - **`seqforge-core` has no GUI and no bio dependency.** It defines the
   data model + typed command surface; it reaches sequence logic only
-  through the `BioOps` trait, implemented in `seqforge-app`/`-cli`. This
-  is what lets dispatch back a headless CLI, tests, or a future WASM
+  through the `BioOps` trait. The one production implementation is
+  `seqforge_session::Bio` — a ZST forwarding to `seqforge-bio` free
+  functions — so both shells share it instead of each carrying a copy.
+  This is what lets dispatch back a headless CLI, tests, or a future WASM
   worker unchanged.
 - **`seqforge-session` is the only home for write-path dispatch, and it is
   renderer-free.** Decision 9 forbids `core ──► bio`, so bio-derived edits must

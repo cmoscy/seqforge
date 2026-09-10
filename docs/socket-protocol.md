@@ -103,21 +103,52 @@ are silently skipped.
 Response: `{"kind":"cut_sites","count":N,"sites":[{...}]}`. Empty
 `enzymes` clears the cut-site overlay.
 
-## View targeting
+## Document targeting
 
-View-scoped methods (`goto`, `find`, `enzymes`) accept an optional
-`view: <ViewId>` parameter:
+Document-scoped methods carry a flattened **target**: two optional,
+mutually exclusive params, `view` and `path`. They are flattened into the
+params object, so they sit alongside the method's own fields rather than
+nested.
 
-- **Omitted (default)**: operates on the workspace's currently active
-  view (`workspace.active_view`). Equivalent to clicking that tab and
-  invoking the action by hotkey.
-- **Provided**: operates on the view with that id explicitly. Returns
-  `ViewNotFound` (error code `-32000`, message `view ViewId(N) not
-  found`) if the view has been closed since the agent enumerated it.
+| params | meaning |
+|---|---|
+| neither | the workspace's currently active view (`workspace.active_view`) |
+| `"view": <ViewId>` | that view explicitly |
+| `"path": "<file>"` | open that file and operate on it |
+
+```json
+{"method":"find","params":{"pattern":"GAATTC"}}                  // active view
+{"method":"find","params":{"pattern":"GAATTC","view":17}}        // explicit view
+{"method":"find","params":{"pattern":"GAATTC","path":"p.gb"}}    // a file
+```
+
+An omitted target serializes to nothing at all, so a request written
+against the pre-target protocol parses unchanged.
+
+- **`view` on a closed view** returns `ViewNotFound` (`-32000`, message
+  `view ViewId(N) not found`).
+- **`view` and `path` together** is rejected. The CLI's argument parser
+  catches it first (`--in` conflicts with `--view`); a caller that speaks
+  JSON-RPC directly gets a `DispatchError` from the target resolver.
+- **`path` on a write method** returns `Unimplemented` — writing through a
+  file target is not yet supported, and the file is left untouched.
+
+Which document a request names is part of what the request *means*, not
+transport configuration — unlike `SEQFORGE_SOCKET`, which only decides
+where the request is delivered. That is why it lives in `params`.
+
+### Id provenance
+
+`FeatureId` and `PrimerId` are **session-scoped** (decision 12). Ids
+returned by a `path`-targeted request name entries in a workspace that
+exists only for that one resolution, so they cannot address a document in
+the running session — and vice versa. An agent that reads with `path` and
+then writes with `view` must re-read ids from the session it is writing
+to. This is inherent to ids being minted at load, not a gap.
 
 Agents that operate across multiple open files should:
-1. Track view ids returned from prior interactions (or extracted from
-   future enumeration RPCs — not yet exposed).
+1. Track view ids returned from prior interactions, or enumerate with
+   `buffers`.
 2. Pass `view: <id>` explicitly to avoid races against user tab switches.
 3. Be prepared to handle `ViewNotFound` and re-enumerate.
 
@@ -206,11 +237,15 @@ $ seqforge enzymes EcoRI BamHI
 $ seqforge close
 ```
 
-View targeting:
+Document targeting:
 ```bash
-$ seqforge goto 1234 --view 17
+$ seqforge goto 1234 --view 17          # a tab in the running viewer
 $ seqforge find GAATTC --view 17
+$ seqforge find GAATTC --in plasmid.gb  # a file — no socket, no viewer
 ```
 
-File commands (`info`, `digest`, `annotate`) run locally without a
-socket — they read sequence files directly from disk.
+Routing follows the document. A request naming a `path` runs in the
+calling process against an ephemeral workspace; anything else is
+forwarded over the socket. So `info`, `digest`, `orfs`, `translate`,
+`primers`, and any read verb given `--in` need no viewer running, while
+the same verb without a target requires one.

@@ -858,7 +858,7 @@ pub enum ViewerResponse {
         fragments: Vec<FragmentInfo>,
         warnings: Vec<String>,
     },
-    /// `RunRecipe` — the assembled product(s), in run order.
+    /// `Assemble` — the assembled product(s), in run order.
     Products {
         products: Vec<ProductInfo>,
         warnings: Vec<String>,
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn target_view_extracts_explicit_id() {
+    fn target_extracts_explicit_view_id() {
         let r = ViewerRequest::Find {
             pattern: "AT".into(),
             mismatches: 0,
@@ -1526,7 +1526,7 @@ mod tests {
     }
 
     #[test]
-    fn target_view_workspace_scoped_variants_return_none() {
+    fn target_workspace_scoped_variants_return_none() {
         let close = ViewerRequest::Close;
         assert_eq!(close.target().and_then(|t| t.view), None);
         let open = ViewerRequest::Open {

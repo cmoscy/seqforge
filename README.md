@@ -63,18 +63,43 @@ so `seqforge` commands typed there route to the live window automatically (see
 
 ### CLI (standalone or from any terminal)
 
-The `seqforge` binary works with or without the GUI open.
+The `seqforge` binary works with or without the GUI open. What decides whether a
+verb needs a running window is **which document it addresses**, not which verb it
+is (ROADMAP decision 27).
 
-**File commands** (always local — no GUI needed):
+Most verbs take a document target:
+
+| target | meaning |
+|---|---|
+| `--in <path>` | open that file in this process. **No GUI needed.** |
+| `--view <n>` | a specific tab in the running SeqForge (ids come from `seqforge buffers`) |
+| *omitted* | the running SeqForge's active tab |
+
+The two flags conflict — `--in` with `--view` is rejected by the argument parser,
+and by the socket handler for callers that bypass it.
+
+**Reading a file needs nothing running:**
 
 ```bash
 seqforge info plasmid.gb
-seqforge tm GGGACCGCCT
 seqforge translate plasmid.gb --start 0 --end 30
 seqforge orfs plasmid.gb
 seqforge primers list plasmid.gb
 seqforge primers find plasmid.gb GCGTAC
+
+# Targeted reads — the same verbs the GUI uses, pointed at a file instead of a tab.
+seqforge list-features --in plasmid.gb
+seqforge list-primers  --in plasmid.gb
+seqforge find GAATTC   --in plasmid.gb
+seqforge enzymes unique --in plasmid.gb
+
+seqforge tm GGGACCGCCT                # the exception: addresses no document at all
 ```
+
+Ids in a `--in` result (`FeatureId`, `PrimerId`) are **scoped to that one
+invocation**. They name entries in a workspace that exists only for the length of
+the process, so an id read from a file cannot be passed as `--id` to a verb
+targeting a running session — mint it from that session instead (decision 12).
 
 `primers find` seeds on the oligo's 3' end and extends, so a **cloning primer
 finds its site**: the reported footprint is the annealed region and the report
@@ -90,12 +115,14 @@ seqforge assemble 'template.gb@pcr:6H8-VH-1F..6H8-VH-1R' \
   --method ligate --topology linear --name-template H1 --out build/pcr/
 ```
 
-**Viewer commands** (require a running SeqForge window):
+**Session verbs** — these are *about* the window, so they require one:
 
 ```bash
 seqforge open path/to/plasmid.gb
+seqforge buffers                      # list open tabs and their view ids
+seqforge close
 seqforge goto 500
-seqforge find ATGC
+seqforge find ATGC                    # drop --in to search the active tab
 seqforge enzymes "EcoRI BamHI"        # quote multi-enzyme queries — it's one argument
 seqforge enzymes "golden gate"        # preset: BsaI, BsmBI, BbsI, SapI
 seqforge enzymes --op add SpeI        # union into the active set (also: --op remove)
@@ -108,14 +135,24 @@ presets: `unique`, `unique+dual`, `non-cutters`, `type IIs`, `golden gate`,
 `moclo`, `all`, `none`. The same grammar is shared by the GUI Restriction Sites
 panel (`⌘E`, where no shell quoting applies) and the CLI.
 
-**Editor commands** (require a running window):
+**Write verbs** (require a running window). Every verb that mutates a sequence
+takes the same `--in`/`--view` target as the reads, but a file target is not yet
+implemented — `--in` on a write reports that clearly and leaves the file
+untouched, rather than half-editing it:
 
 ```bash
 seqforge insert 100 ATGC
 seqforge delete 100 110
 seqforge undo                         # also: redo
 seqforge save                         # also: save-as <path>
+
+seqforge insert 0 ATGC --in plasmid.gb
+# Error: `a write verb against a file target (it needs a session)` is not yet implemented
 ```
+
+`undo`/`redo` are session verbs by nature — history is per-buffer and lives only
+as long as the process, so "reverse the previous command" has no referent in a
+one-shot invocation.
 
 `goto` is **1-based**; edit ranges are **0-based**. Feature/primer editing and more verbs are wired the same way — run `seqforge --help` for the full list.
 
@@ -210,19 +247,20 @@ cargo build                        # first time: builds app + CLI
 cargo run -p seqforge-app          # subsequent runs: rebuilds only what changed
 ```
 
-The workspace has seven crates:
+The workspace has eight crates:
 
 | Crate | Role |
 |-------|------|
-| `seqforge-core` | data model, typed command surface, `dispatch` / `dispatch_file` — no GUI deps |
+| `seqforge-core` | data model, typed command surface, `dispatch` — no GUI deps |
 | `seqforge-bio` | I/O, DNA utilities, primers/thermo, assembly engine; wraps restriction + thermo |
 | `seqforge-restriction` | REBASE enzyme DB + scanner + presets. See [plans/restriction.md](plans/restriction.md) |
 | `seqforge-thermo` | Tm/GC/folding (vendored seqfold); via `seqforge-bio` — [docs/architecture.md](docs/architecture.md) |
 | `seqforge-fidelity` | overhang ligation fidelity (Potapov/Pryor via tatapov); assembly dry-run / join strip — [crate README](crates/seqforge-fidelity/README.md) |
+| `seqforge-session` | `Workspace` (buffers, views, per-buffer undo), the write path, and the `Host` seam. Headless — no egui |
 | `seqforge-app` | `eframe` + `egui_dock` + `egui_term` GUI shell |
 | `seqforge-cli` | Standalone `seqforge` binary |
 
-All user-visible actions go through `dispatch` or `dispatch_file` in `seqforge-core`. Menu clicks and CLI/socket invocations all parse to the same `ViewerRequest`/`FileCommand` enum and call the same dispatch path.
+All user-visible actions parse to one `ViewerRequest` and go through `dispatch` in `seqforge-core` (reads) or the `seqforge-session` write path (writes). Menu clicks, CLI invocations, and socket requests are three faces of the same value — they differ only in the document target they carry.
 
 ### Contributing
 

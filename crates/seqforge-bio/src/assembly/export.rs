@@ -5,7 +5,7 @@
 //! genuinely one code path rather than two implementations that agree today.
 //!
 //! Also holds the `--combos` selector grammar, shared by the CLI flag and the
-//! `RunRecipe` viewer request.
+//! `Assemble` viewer request.
 
 use std::path::{Path, PathBuf};
 
