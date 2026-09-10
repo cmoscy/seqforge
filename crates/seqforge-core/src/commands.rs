@@ -1179,10 +1179,15 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::Linearize { .. }
         | ViewerRequest::Circularize { .. }
         | ViewerRequest::Assemble { .. } => {
-            unreachable!(
-                "editor write-ops are workspace-scoped; the caller routes them \
-                 to command/edit.rs before invoking dispatch (see command::apply)"
-            )
+            // Write-ops are workspace-scoped: they mutate buffers, annotations
+            // and history, which this function does not own (it read-locks).
+            // The app routes them to `seqforge_session::edit` before ever
+            // getting here. This used to be `unreachable!` — an invariant of
+            // the one caller. Now that a headless shell can reach `dispatch`
+            // too, an unroutable request must be an error rather than a panic.
+            Err(DispatchError::Unimplemented(
+                "a write verb against a file target (it needs a session)",
+            ))
         }
 
         // Note: `view` targeting is handled by the caller before this

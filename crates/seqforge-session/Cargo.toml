@@ -8,3 +8,6 @@ publish = false
 seqforge-core = { path = "../seqforge-core" }
 seqforge-bio = { path = "../seqforge-bio" }
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

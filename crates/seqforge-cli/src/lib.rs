@@ -563,9 +563,46 @@ impl DocSource {
                     DocSource::Paths
                 }
             }
-            _ => DocSource::Session,
+            // Every other verb addresses one document, so its `Target` decides.
+            // `--in` names a file we can open here; `--view` and the default
+            // (the active view) name session state we cannot see.
+            other => match other.target() {
+                Some(t) if t.is_path() => DocSource::Paths,
+                _ => DocSource::Session,
+            },
         }
     }
+}
+
+/// Run a file-targeted request in this process, against a throwaway workspace.
+///
+/// The whole path is three steps because nothing here is new: `open_path` mints
+/// the buffer and a view, `core::dispatch` is already session-free (it takes
+/// `(&mut View, &Buffer, &mut Annotations, &B, req)`), and the response
+/// serializes to the same JSON the socket returns. The workspace — and with it
+/// the buffer's undo history — is dropped when the process exits, which is why
+/// `undo`/`redo` stay session verbs: there is no previous command to reverse.
+fn run_on_file(req: ViewerRequest) -> anyhow::Result<()> {
+    let path = req
+        .target()
+        .and_then(|t| t.path.clone())
+        .ok_or_else(|| anyhow::anyhow!("internal: routed a request with no file target"))?;
+
+    let bio = seqforge_session::Bio;
+    let mut ws = seqforge_session::Workspace::default();
+    let vid = ws
+        .open_path(&path, &bio)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
+
+    let resp = ws
+        .with_buffer(vid, |view, buf, ann| {
+            seqforge_core::dispatch(view, buf, ann, &bio, req)
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(())
 }
 
 /// Run a request here if its document is on disk; otherwise forward it to the
@@ -609,6 +646,7 @@ pub fn dispatch_cmd(req: ViewerRequest) -> anyhow::Result<()> {
             combos: combos.as_deref(),
             origin: origin.as_deref(),
         }),
+        (DocSource::Paths, req) => run_on_file(req),
         (_, req) => dispatch_viewer_cmd(req),
     }
 }
