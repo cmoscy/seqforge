@@ -242,7 +242,18 @@ flowchart LR
 
 The same `ViewerRequest` variants serve the GUI menu, the embedded
 terminal, and external agents — so any operation reachable in the UI has
-a CLI equivalent with structured output. Per-frame ordering (drain
+a CLI equivalent with structured output.
+
+> **This holds in one direction only, today.** The converse is false: the
+> CLI-local verbs (`assemble`, `digest`, `translate`, `orfs`, `primers`) are
+> hand-written `clap` subcommands with no serde and no socket face, so they are
+> unreachable from the GUI or an agent. Giving `assemble` a socket face
+> therefore took a *second* command (`ViewerRequest::RunRecipe`) rather than a
+> projection of the first. ROADMAP decision 27 records the fix: a
+> `seqforge-session` crate above `bio`, one command enum, and routing by
+> document source rather than by schema.
+
+Per-frame ordering (drain
 inputs → dispatch keys → render → apply) is detailed in
 [`focus-refactor.md`](focus-refactor.md) §2; this diagram shows the
 *convergence + crate boundary*, that one shows the *frame lifecycle*.

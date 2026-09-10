@@ -36,9 +36,19 @@
 >   against the combo's own sources, so a library gets provenance-bearing names
 >   instead of `a+b+c #7`.
 > - `ViewerRequest::RunRecipe { recipe, combos, out, format, name_template }`
->   + `ViewerResponse::Products` — the parity fix; `seqforge run-recipe` and the
->   workbench's **Run → folder…** button share `run_and_materialize`.
+>   + `ViewerResponse::Products` — `seqforge run-recipe` and the workbench's
+>   **Run → folder…** button share `run_and_materialize`.
 > - The `MAX_MATERIALIZED` cap now bounds **tabs only**, never the write loop.
+>
+> **This restored reach, but not by the mechanism decision 11 specifies.**
+> `RunRecipe` was first described here as "the parity fix" — true of the outcome,
+> wrong about the method. Decision 11 calls for *one* value projected to CLI and
+> JSON-RPC by clap+serde. What landed is *two* commands, the CLI-local `Assemble`
+> and the socket-only `RunRecipe`, sharing an engine call at the bottom but
+> nothing at the schema and kept in agreement by hand. That is a symptom of
+> `assemble` living in the CLI-local tier, which has no parity mechanism at all.
+> See ROADMAP decision 27; `RunRecipe` collapses back into `Assemble` when the
+> session layer lands.
 >
 > **A1.3 — origin + name composition (landed).** Two gaps that only show up in
 > batch: a product opened at whichever restriction cut the first bin contributed,
