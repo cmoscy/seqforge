@@ -166,23 +166,12 @@ pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
             let tail_len = oligo.len().saturating_sub(s.span.len);
             let tail = oligo[..tail_len].to_string();
 
-            // Tm needs a contiguous template region; extend past the origin for
-            // a wrapping site so the duplex is the real one.
-            let end = s.span.start + s.span.len;
-            let extended;
-            let (tm_template, tm_range) = if end > doc.sequence.len() {
-                let overhang = end - doc.sequence.len();
-                extended = doc
-                    .sequence
-                    .iter()
-                    .chain(&doc.sequence[..overhang.min(doc.sequence.len())])
-                    .copied()
-                    .collect::<Vec<_>>();
-                (&extended[..], s.span.start..end)
-            } else {
-                (&doc.sequence[..], s.span.start..end)
-            };
-            let tm = seqforge_bio::anneal_tm(oligo, &tm_range, s.strand, tm_template)
+            // Wrap-aware Tm: `anneal_tm_span` gathers an origin-crossing
+            // duplex through `Span::linear_pieces` instead of truncating at the
+            // origin. This used to be open-coded here, which is why this path
+            // was right and `primer_infos` (the Inspector / `primers list` /
+            // socket projection) was wrong.
+            let tm = seqforge_bio::anneal_tm_span(oligo, s.span, s.strand, &doc.sequence)
                 .ok()
                 .map(|t| (t * 10.0).round() / 10.0);
             serde_json::json!({

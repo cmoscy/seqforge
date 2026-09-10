@@ -3,7 +3,8 @@
 
 use std::ops::Range;
 
-use seqforge_core::{Primer, PrimerInfo, PrimerSiteInfo, PrimerState, Strand};
+use seqforge_core::span::Pieces;
+use seqforge_core::{Primer, PrimerInfo, PrimerSiteInfo, PrimerState, Span, Strand};
 use seqforge_thermo::{
     DEFAULT_FOLD_TEMP_C, FoldError, TmError, duplex_tm, gc, hairpin_dg, self_dimer_dg, tm,
 };
@@ -34,6 +35,38 @@ pub struct PrimerQcPlusAnneal {
 ///
 /// Feeds seqfold heteroduplex `tm` with the correct antiparallel template sense
 /// (the same orientation footgun [`super::decompose_primer`] guards).
+/// Anneal Tm for a binding [`Span`], which may wrap the origin of a circular
+/// template.
+///
+/// [`anneal_tm`] takes a linear `Range` and clamps it to the template, which is
+/// right for a linear region and silently wrong for a wrapping one: it scores
+/// only the bases before the origin, and the 3'-anchoring then trims the oligo
+/// to match, yielding a believable Tm for a much shorter duplex. Since
+/// `find_primer_binding_sites` reports a wrap-around hit as one wrapping `Span`,
+/// every origin-crossing primer on a plasmid hit that path.
+///
+/// Gathering through [`Span::linear_pieces`] — the codebase's lossless wrap
+/// projection — makes the duplex the real one, and makes the origin stop
+/// mattering to the answer.
+pub fn anneal_tm_span(
+    oligo: &str,
+    span: Span,
+    strand: Strand,
+    template: &[u8],
+) -> Result<f64, TmError> {
+    let pieces = span.linear_pieces(template.len());
+    // One run is the common case and needs no copy.
+    if let Pieces::One(r) = &pieces {
+        return anneal_tm(oligo, r, strand, template);
+    }
+    let region: Vec<u8> = pieces.iter().flat_map(|r| template[r].to_vec()).collect();
+    if region.is_empty() {
+        return Err(TmError("sequence too short".to_string()));
+    }
+    let n = region.len();
+    anneal_tm(oligo, &(0..n), strand, &region)
+}
+
 pub fn anneal_tm(
     oligo: &str,
     binding: &Range<usize>,
@@ -163,11 +196,10 @@ fn primer_info(
                 let attached = primer
                     .binding
                     .is_some_and(|b| super::anneal::same_site(&s, b, primer.strand));
-                // Linear range into the template for the thermo engine (the
-                // documented linear-engine `Range` survivor).
-                let binding = s.span.start..s.span.start + s.span.len;
                 PrimerSiteInfo {
-                    anneal_tm: anneal_tm(&primer.sequence, &binding, s.strand, template).ok(),
+                    // Wrap-aware: a site crossing the origin is scored over the
+                    // whole duplex, not truncated at the origin.
+                    anneal_tm: anneal_tm_span(&primer.sequence, s.span, s.strand, template).ok(),
                     span: s.span,
                     strand: s.strand,
                     mismatches: s.mismatches,
@@ -213,6 +245,113 @@ mod tests {
     use seqforge_core::{PrimerId, Span};
 
     const T: &[u8] = b"ATGCGTACCA";
+
+    /// The user-visible half of the same bug: `primer_infos` is the projection
+    /// behind the Inspector's Primers tab, `seqforge primers list`, and every
+    /// socket caller. On a circular plasmid it reported the clamped Tm — a
+    /// believable number for a duplex several bases shorter than the real one.
+    ///
+    /// Only `seqforge primers find` was right, because it open-coded the
+    /// origin extension. That copy is now gone; both go through
+    /// `anneal_tm_span`.
+    #[test]
+    fn primer_infos_reports_a_real_tm_for_an_origin_crossing_site() {
+        // 24 bp circular template, and an 12-mer footprint that starts 6 bases
+        // before the origin so it wraps.
+        let template: &[u8] = b"ATGCGTACCAGGTTACGCATGCAT";
+        let span = Span {
+            start: template.len() - 6,
+            len: 12,
+        };
+        let oligo: String = span
+            .linear_pieces(template.len())
+            .iter()
+            .flat_map(|r| template[r].to_vec())
+            .map(|b| b as char)
+            .collect();
+        assert_eq!(oligo.len(), 12, "the footprint wraps the origin");
+
+        let primer = Primer {
+            id: PrimerId(1),
+            name: "wraps".into(),
+            sequence: oligo.clone(),
+            binding: Some(span),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+
+        let infos = primer_infos(template, &[&primer], true);
+        let site = infos[0]
+            .sites
+            .iter()
+            .find(|s| s.span == span)
+            .expect("the wrapping site is found");
+
+        let tm = site.anneal_tm.expect("a wrapping site has a real duplex");
+
+        // It must equal the whole 12-mer duplex, not the 6-base prefix the
+        // clamp used to score.
+        let whole = anneal_tm(&oligo, &(0..12), Strand::Forward, oligo.as_bytes()).unwrap();
+        assert!(
+            (tm - whole).abs() < 0.01,
+            "projection disagrees with the real duplex: tm={tm}, whole={whole}"
+        );
+
+        let clamped = anneal_tm(
+            &oligo,
+            &(span.start..span.start + span.len),
+            Strand::Forward,
+            template,
+        )
+        .unwrap();
+        assert!(
+            (tm - clamped).abs() > 1.0,
+            "the old clamped answer should be visibly different: tm={tm}, clamped={clamped}"
+        );
+    }
+
+    /// A binding site that crosses the origin of a circular template must be
+    /// scored over the **whole** duplex, not the part before the origin.
+    ///
+    /// `anneal_tm` clamps `binding.end` to the template length, so a wrapping
+    /// span used to be truncated silently — and because the 3'-anchoring then
+    /// trims the oligo to that same short footprint, the result was a
+    /// plausible-looking Tm for a much shorter duplex rather than an error.
+    #[test]
+    fn origin_crossing_site_is_scored_over_the_whole_duplex() {
+        // 10 bp circular template; an 8-mer starting at 6 wraps: 4 before the
+        // origin, 4 after.
+        let span = Span { start: 6, len: 8 };
+
+        // Build the oligo from the template so the duplex is perfect.
+        let gathered: Vec<u8> = span
+            .linear_pieces(T.len())
+            .iter()
+            .flat_map(|r| T[r].to_vec())
+            .collect();
+        let oligo: String = gathered.iter().map(|&b| b as char).collect();
+        assert_eq!(oligo.len(), 8, "the wrapping footprint is 8 bases");
+
+        let wrapped = anneal_tm_span(&oligo, span, Strand::Forward, T)
+            .expect("a wrapping site has a real duplex");
+
+        // The same 8-mer scored against a linear template that already contains
+        // it contiguously must agree — the origin is not supposed to matter.
+        let linear: Vec<u8> = gathered.clone();
+        let straight = anneal_tm(&oligo, &(0..8), Strand::Forward, &linear).unwrap();
+
+        assert!(
+            (wrapped - straight).abs() < 0.01,
+            "origin crossing changed the answer: wrapped={wrapped}, straight={straight}"
+        );
+
+        // And it must differ from the truncated answer the old clamp produced.
+        let truncated = anneal_tm(&oligo, &(6..14), Strand::Forward, T).unwrap();
+        assert!(
+            (wrapped - truncated).abs() > 1.0,
+            "the clamped path should be visibly wrong: wrapped={wrapped}, truncated={truncated}"
+        );
+    }
 
     #[test]
     fn forward_anneal_tm_matches_perfect_duplex() {
