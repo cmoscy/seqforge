@@ -515,23 +515,63 @@ pub enum ViewerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ViewId>,
     },
-    /// Run an assembly recipe → materialize its product(s) as buffers, and
-    /// optionally write them straight to disk.
+    /// Assemble a product from bins → the product(s).
     ///
-    /// The GUI's **File → New Assembly… → Run** and this request are one code
-    /// path: both call `seqforge_bio::run_indices` and both export through
-    /// `seqforge_bio::write_products`. Without a running viewer, prefer the
-    /// local `seqforge assemble --out` — same engine, no socket needed.
-    RunRecipe {
-        /// A `recipe.json`, as written by `assemble --emit-recipe` or the
-        /// workbench's Save Recipe.
-        recipe: PathBuf,
-        /// Run only these combos: indices, `A-B` ranges, and `!` exclusions
-        /// (`0-31,!12`). Omitted → every combo whose ends are compatible.
+    /// One verb, two document sources (ROADMAP decision 27). `inputs` is either
+    /// a single `recipe.json` or a list of inline bin tokens
+    /// `SOURCE[@5′..3′]` — `pUC19.gb@EcoRI..PstI`, `parts/*.gb@BsaI..BsaI`,
+    /// `buffer:3@BsaI..BsaI`. Tokens naming only paths run locally in the
+    /// calling process; anything naming a `buffer:` handle needs a live session
+    /// and is forwarded to it. The GUI's **File → New Assembly… → Run** is the
+    /// same request: both call `seqforge_bio::run_indices` and export through
+    /// `seqforge_bio::write_products`.
+    Assemble {
+        /// Path/glob with optional `@5′..3′` (`EcoRI..PstI`, `BsaI..BsaI`,
+        /// `pcr:fwd..rev`, `as-is`), `buffer:<n>`, or a single `recipe.json`.
+        #[arg(value_name = "TOKEN")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<String>,
+        /// Join method: `ligate` | `golden-gate`.
+        ///
+        /// Serialized as `join`: the enum's own serde tag is `method` (the
+        /// JSON-RPC method name), so the field cannot share it. The CLI flag
+        /// stays `--method`.
+        #[arg(long, default_value = "ligate")]
+        #[serde(rename = "join", default = "default_join_method")]
+        method: String,
+        /// Intended topology: `circular` | `linear` | `any`.
+        #[arg(long, default_value = "circular")]
+        #[serde(default = "default_topology_intent")]
+        topology: String,
+        /// Default digest enzymes when a bin has no `@5′..3′`
+        /// (one enzyme → `E..E`; two → `E1..E2`).
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        combos: Option<String>,
-        /// Write each product into this directory as well as opening it.
+        enzymes: Option<String>,
+        /// Combination mode: `all-to-all` (Cartesian product; default) or
+        /// `zip` (positional 1:1; bins must share fragment count).
+        #[arg(long, default_value = "all-to-all")]
+        #[serde(default = "default_expand")]
+        expand: String,
+        /// Also write the resolved recipe as JSON to this path.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emit_recipe: Option<PathBuf>,
+        /// Report bins + combo count + join end-compatibility without products.
+        #[arg(long)]
+        #[serde(default)]
+        dry_run: bool,
+        /// Score each combo with a fidelity dataset (dry-run overlay only;
+        /// never written into recipe.json).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fidelity_dataset: Option<String>,
+        /// Include the RC-expanded subset ligation-frequency matrix on dry-run
+        /// JSON. Requires `--fidelity-dataset`.
+        #[arg(long)]
+        #[serde(default)]
+        fidelity_matrix: bool,
+        /// Write each product into this directory (created if absent).
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         out: Option<PathBuf>,
@@ -539,12 +579,18 @@ pub enum ViewerRequest {
         #[arg(long, default_value = "genbank")]
         #[serde(default = "default_product_format")]
         format: String,
-        /// Override the recipe's product-name template. Brace-delimited
-        /// tokens: `roles`, `n` (combo index), `i` (ordinal), `bin0`…`binN`
-        /// (optionally `bin1:6`) — e.g. `VH-{bin1}-{bin2}`.
+        /// Name each product from a template instead of `role+role #n`.
+        /// Brace-delimited tokens: `roles`, `n` (combo index), `i` (ordinal),
+        /// `bin0`…`binN` (optionally `bin1:6`, or `bin1/2` for one
+        /// `_`-separated field) — e.g. `VH-{bin1}-{bin2}`.
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name_template: Option<String>,
+        /// Run only these combos: indices, `A-B` ranges, and `!` exclusions
+        /// (`0-31,!12`). A bare exclusion means "all but these".
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        combos: Option<String>,
         /// Rotate each circular product so this point becomes position 1: a
         /// feature label (`Start`) or a 0-based index.
         #[arg(long)]
@@ -568,6 +614,20 @@ pub enum ViewerRequest {
 /// Serde default for `AddFeature.strand` (clap supplies it via `default_value`).
 fn default_strand() -> String {
     "+".to_string()
+}
+
+/// serde defaults for [`ViewerRequest::Assemble`] (clap supplies these via
+/// `default_value`; serde needs them for a socket payload that omits the field).
+fn default_join_method() -> String {
+    "ligate".to_string()
+}
+
+fn default_topology_intent() -> String {
+    "circular".to_string()
+}
+
+fn default_expand() -> String {
+    "all-to-all".to_string()
 }
 
 impl ViewerRequest {
@@ -610,7 +670,7 @@ impl ViewerRequest {
             | ViewerRequest::Close
             | ViewerRequest::Buffers
             | ViewerRequest::New { .. } // creates its own view
-            | ViewerRequest::RunRecipe { .. } // creates its own view(s)
+            | ViewerRequest::Assemble { .. } // creates its own view(s)
             | ViewerRequest::Focus { .. } => None,
         }
     }
@@ -695,7 +755,7 @@ pub struct ProductInfo {
     pub path: Option<PathBuf>,
 }
 
-/// serde default for [`ViewerRequest::RunRecipe::format`].
+/// serde default for [`ViewerRequest::Assemble::format`].
 fn default_product_format() -> String {
     "genbank".to_string()
 }
@@ -991,7 +1051,7 @@ pub fn dispatch<B: BioOps>(
         | ViewerRequest::SetOrigin { .. }
         | ViewerRequest::Linearize { .. }
         | ViewerRequest::Circularize { .. }
-        | ViewerRequest::RunRecipe { .. } => {
+        | ViewerRequest::Assemble { .. } => {
             unreachable!(
                 "editor write-ops are workspace-scoped; the caller routes them \
                  to command/edit.rs before invoking dispatch (see command::apply)"

@@ -40,21 +40,25 @@
 >   **Run → folder…** button share `run_and_materialize`.
 > - The `MAX_MATERIALIZED` cap now bounds **tabs only**, never the write loop.
 >
-> **This restored reach, but not by the mechanism decision 11 specifies.**
-> `RunRecipe` was first described here as "the parity fix" — true of the outcome,
-> wrong about the method. Decision 11 calls for *one* value projected to CLI and
-> JSON-RPC by clap+serde. What landed is *two* commands, the CLI-local `Assemble`
-> and the socket-only `RunRecipe`, sharing an engine call at the bottom but
-> nothing at the schema and kept in agreement by hand. That is a symptom of
-> `assemble` living in the CLI-local tier, which has no parity mechanism at all.
-> See ROADMAP decision 27; `RunRecipe` collapses back into `Assemble` when the
-> session layer lands.
+> **This restored reach, but not by the mechanism decision 11 specifies —
+> since fixed.** `RunRecipe` was first described here as "the parity fix": true
+> of the outcome, wrong about the method. Decision 11 calls for *one* value
+> projected to CLI and JSON-RPC by clap+serde, and what landed was *two*
+> commands — the CLI-local `Assemble` and the socket-only `RunRecipe` — sharing
+> an engine call at the bottom but nothing at the schema.
+>
+> **Collapsed under ROADMAP decision 27.** There is now one
+> `ViewerRequest::Assemble`, flattened into the CLI like every other verb, and
+> routing follows the *document* rather than the verb: `DocSource::of` sends
+> path-only requests to the local engine and anything naming `buffer:<n>` (or
+> the open workbench recipe) to the session that owns it. The bin-token grammar
+> moved to `seqforge_bio::tokens`, so both faces parse the same strings.
 >
 > **A1.3 — origin + name composition (landed).** Two gaps that only show up in
 > batch: a product opened at whichever restriction cut the first bin contributed,
 > and `set-origin` was viewer-only and index-only, so there was no way to say
 > "put all 31 of these at the vector's `Start`". Closed by `assemble --origin
-> <label|index>` and `ViewerRequest::RunRecipe { origin }`, both delegating to the
+> <label|index>` and `ViewerRequest::Assemble { origin }`, both delegating to the
 > already-pure `seqforge_core::rotate_origin`, plus `set-origin --feature` for the
 > live-document path; an ambiguous or missing label is an error, never a guess.
 > Naming gained a `{binN/K}` field selector so a level-2 product composes its name

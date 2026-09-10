@@ -198,34 +198,95 @@ pub(super) fn apply_run_recipe(
     run_and_materialize(state, &recipe, Selection::Indices(selection), None, None)
 }
 
-/// `ViewerRequest::RunRecipe` — the socket/CLI face of Run. Loads a recipe from
-/// disk, runs it, opens the products, and optionally writes them out.
+/// `ViewerRequest::Assemble` — the socket face of Run.
 ///
-/// This is deliberately the *same* body as the workbench Run below it: one
-/// engine call, one materialize loop, one export call. A GUI click and
-/// `seqforge run-recipe` differ only in where the recipe and the combo
-/// selection come from.
+/// One verb over two document sources (ROADMAP decision 27): `inputs` is a
+/// single `recipe.json`, or inline bin tokens parsed by the *same*
+/// `seqforge_bio::parse_bin_token` the command line uses. Path-only requests
+/// never arrive here — the CLI runs those in its own process — so what reaches
+/// this handler is the work that genuinely needs the session: `buffer:<n>`
+/// sources resolved against the open documents.
+///
+/// This is deliberately the same body as the workbench Run below it: one engine
+/// call, one materialize loop, one export call.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn apply_run_recipe_path(
+pub(super) fn apply_assemble(
     state: &mut AppState,
-    recipe_path: PathBuf,
-    combos: Option<String>,
+    inputs: Vec<String>,
+    method: String,
+    topology: String,
+    enzymes: Option<String>,
+    expand: String,
+    emit_recipe: Option<PathBuf>,
     out: Option<PathBuf>,
     format: String,
     name_template: Option<String>,
+    combos: Option<String>,
     origin: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let text = std::fs::read_to_string(&recipe_path).map_err(|e| {
-        DispatchError::InvalidInput(format!("read recipe {}: {e}", recipe_path.display()))
-    })?;
-    let mut recipe: Recipe = serde_json::from_str(&text).map_err(|e| {
-        DispatchError::InvalidInput(format!("parse recipe {}: {e}", recipe_path.display()))
-    })?;
+    let bad = DispatchError::InvalidInput;
+
+    let mut recipe: Recipe = if inputs.len() == 1 && inputs[0].ends_with(".json") {
+        let text = std::fs::read_to_string(&inputs[0])
+            .map_err(|e| bad(format!("read recipe {}: {e}", inputs[0])))?;
+        serde_json::from_str(&text).map_err(|e| bad(format!("parse recipe {}: {e}", inputs[0])))?
+    } else if inputs.is_empty() {
+        return Err(bad(
+            "no inputs — pass a recipe.json or bin tokens (SOURCE[@FROM..TO])".into(),
+        ));
+    } else {
+        let bins = inputs
+            .iter()
+            .map(|t| seqforge_bio::parse_bin_token(t, enzymes.as_deref()))
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(bad)?;
+        let join = match method.as_str() {
+            "ligate" => seqforge_core::JoinKind::Ligate,
+            "golden-gate" | "golden_gate" | "gg" => {
+                let enzyme = enzymes
+                    .as_deref()
+                    .map(seqforge_bio::normalize_enzymes)
+                    .and_then(|e| e.split_whitespace().next().map(str::to_string))
+                    .ok_or_else(
+                        || bad("--method golden-gate needs --enzymes (e.g. BsaI)".into()),
+                    )?;
+                seqforge_core::JoinKind::GoldenGate { enzyme }
+            }
+            other => {
+                return Err(bad(format!(
+                    "unknown method {other:?} (supports: ligate, golden-gate)"
+                )));
+            }
+        };
+        Recipe {
+            bins,
+            join,
+            intent: match topology.as_str() {
+                "linear" => seqforge_core::TopologyIntent::Linear,
+                "any" => seqforge_core::TopologyIntent::Any,
+                _ => seqforge_core::TopologyIntent::Circular,
+            },
+            expand: if expand == "zip" {
+                seqforge_core::Expand::Zip
+            } else {
+                seqforge_core::Expand::AllToAll
+            },
+            name_template: None,
+        }
+    };
+
     if let Some(t) = name_template {
         recipe.name_template = Some(t);
     }
+    if let Some(path) = &emit_recipe {
+        let json = serde_json::to_string_pretty(&recipe)
+            .map_err(|e| bad(format!("serialize recipe: {e}")))?;
+        std::fs::write(path, json)
+            .map_err(|e| bad(format!("write recipe {}: {e}", path.display())))?;
+    }
+
     let format = seqforge_bio::ProductFormat::parse(&format).ok_or_else(|| {
-        DispatchError::InvalidInput(format!(
+        bad(format!(
             "unknown product format {format:?} (supports: genbank, fasta)"
         ))
     })?;

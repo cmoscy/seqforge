@@ -977,20 +977,33 @@ pub fn apply<B: BioOps>(
                 // `SaveAs` with an explicit path is a direct write; no dialog.
                 file::apply_save_document(state, view, path)
             }
-            ViewerRequest::RunRecipe {
-                recipe,
-                combos,
+            ViewerRequest::Assemble {
+                inputs,
+                method,
+                topology,
+                enzymes,
+                expand,
+                emit_recipe,
+                dry_run: _,
+                fidelity_dataset: _,
+                fidelity_matrix: _,
                 out,
                 format,
                 name_template,
+                combos,
                 origin,
-            } => assembly::apply_run_recipe_path(
+            } => assembly::apply_assemble(
                 state,
-                recipe,
-                combos,
+                inputs,
+                method,
+                topology,
+                enzymes,
+                expand,
+                emit_recipe,
                 out,
                 format,
                 name_template,
+                combos,
                 origin,
             ),
             ViewerRequest::Undo { view } => sedit::apply_undo(&mut state.workspace, view),

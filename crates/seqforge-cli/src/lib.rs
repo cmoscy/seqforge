@@ -316,13 +316,15 @@ pub fn run_assemble(opts: AssembleOpts<'_>) -> anyhow::Result<()> {
     } else {
         let bins = inputs
             .iter()
-            .map(|t| parse_bin_token(t, default_enzymes))
+            .map(|t| {
+                seqforge_bio::parse_bin_token(t, default_enzymes).map_err(|e| anyhow::anyhow!(e))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let join = match method {
             "ligate" => JoinKind::Ligate,
             "golden-gate" | "golden_gate" | "gg" => {
                 let enzyme = default_enzymes
-                    .map(normalize_enzymes)
+                    .map(seqforge_bio::normalize_enzymes)
                     .and_then(|e| e.split_whitespace().next().map(str::to_string))
                     .ok_or_else(|| {
                         anyhow::anyhow!("--method golden-gate needs --enzymes (e.g. BsaI)")
@@ -533,160 +535,86 @@ pub fn run_assemble(opts: AssembleOpts<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse a bin token `SOURCE[@FROM..TO]` into a [`Bin`] (decision 26).
-///
-/// - `SOURCE` may be a **glob** (`parts/*.gb`) → every match becomes a source in
-///   the **same** bin (bulk, shared 5′→3′ prepare).
-/// - `@E1..E2` is the digest 5′→3′ walk (`EcoRI..PstI`, `BsaI..BsaI`, `EcoRI@410..BamHI`).
-/// - `@pcr:fwd..rev` / `@as-is` for PCR and pass-through.
-/// - Trailing `[5′..3′]` is a per-source span override (rare `@pos` exception).
-///
-/// Without `@…`, defaults to `Digest(E..E)` from `--enzymes` (GG sugar:
-/// bare path + `--enzymes BsaI` → `BsaI..BsaI`), else `AsIs`.
-fn parse_bin_token(
-    token: &str,
-    default_enzymes: Option<&str>,
-) -> anyhow::Result<seqforge_core::Bin> {
-    use seqforge_core::{Bin, Boundary, PrepareKind, Source, SourceRef, SpanEnds};
+// ── Routing: where does this command's document come from? ────────────────────
 
-    // Split off a trailing [span] (per-input override).
-    let (rest, span_override) = match (token.find('['), token.ends_with(']')) {
-        (Some(open), true) => {
-            let inner = &token[open + 1..token.len() - 1];
-            let span = inner
-                .parse::<SpanEnds>()
-                .map_err(|e| anyhow::anyhow!("bad span override in {token:?}: {e}"))?;
-            (&token[..open], Some(span))
-        }
-        _ => (token, None),
-    };
+/// Where a command's document comes from, and therefore who can run it
+/// (ROADMAP decision 27).
+///
+/// This is what replaced the old two-tier command split. "Needs a GUI" is not a
+/// property of the *verb* — every verb is `open a document, do something, maybe
+/// write a document` — it is a property of where the document lives. A request
+/// naming only file paths can run in this process; one naming a session buffer
+/// or the active view has to reach the session that owns it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DocSource {
+    /// Every input is a path on disk — runnable here, no socket required.
+    Paths,
+    /// At least one input names live session state (`buffer:<n>`, or an
+    /// implicit "the active view"). Must be forwarded.
+    Session,
+}
 
-    // Split off @prepare / @5′..3′.
-    let (source, prepare) = match rest.split_once('@') {
-        Some((src, spec)) => (src, parse_prepare(spec)?),
-        None => {
-            let prep = match default_enzymes {
-                Some(e) => {
-                    let names: Vec<String> = normalize_enzymes(e)
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect();
-                    match names.as_slice() {
-                        [] => PrepareKind::AsIs,
-                        [one] => PrepareKind::Digest {
-                            five_prime: Boundary::enzyme(one.clone()),
-                            three_prime: Boundary::enzyme(one.clone()),
-                        },
-                        [a, b, ..] => PrepareKind::Digest {
-                            five_prime: Boundary::enzyme(a.clone()),
-                            three_prime: Boundary::enzyme(b.clone()),
-                        },
-                    }
+impl DocSource {
+    /// Classify a request. Only `Assemble` can currently go either way; every
+    /// other `ViewerRequest` variant is view-scoped and therefore `Session`.
+    pub fn of(req: &ViewerRequest) -> Self {
+        match req {
+            ViewerRequest::Assemble { inputs, .. } => {
+                // No inputs at all means "the recipe open in the workbench".
+                if inputs.is_empty() || inputs.iter().any(|t| t.starts_with("buffer:")) {
+                    DocSource::Session
+                } else {
+                    DocSource::Paths
                 }
-                None => PrepareKind::AsIs,
-            };
-            (rest, prep)
+            }
+            _ => DocSource::Session,
         }
-    };
-    if source.is_empty() {
-        anyhow::bail!("empty source in bin token {token:?}");
-    }
-
-    // `buffer:<n>` names an open document in a running SeqForge rather than a
-    // file on disk — the other half of `SourceRef`, and the reason a recipe
-    // authored in the workbench round-trips through the CLI. Resolving one needs
-    // a session, so the local file resolver rejects it with that message; over
-    // the socket it resolves against the buffer store.
-    let sources: Vec<Source> = if let Some(handle) = source.strip_prefix("buffer:") {
-        let id: u64 = handle.trim().parse().map_err(|_| {
-            anyhow::anyhow!("bad buffer handle in {token:?}: expected `buffer:<n>`, got {handle:?}")
-        })?;
-        vec![Source {
-            ref_: SourceRef::Buffer(seqforge_core::BufferId(id)),
-            pin: None,
-            span: span_override.clone(),
-        }]
-    } else {
-        let paths = seqforge_bio::expand_glob(source);
-        if paths.is_empty() {
-            anyhow::bail!("no files match {source:?}");
-        }
-        paths
-            .into_iter()
-            .map(|p| Source {
-                ref_: SourceRef::Path(p),
-                pin: None,
-                span: span_override.clone(),
-            })
-            .collect()
-    };
-
-    Ok(Bin {
-        role: bin_role(source),
-        sources,
-        prepare,
-    })
-}
-
-/// A bin role from the source token: a glob → its parent directory name; a plain
-/// path → its file stem; `buffer:<n>` → `buffer<n>`.
-fn bin_role(source: &str) -> String {
-    if let Some(handle) = source.strip_prefix("buffer:") {
-        return format!("buffer{}", handle.trim());
-    }
-    if source.contains('*') {
-        Path::new(source)
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "bin".to_string())
-    } else {
-        Path::new(source)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| source.to_string())
     }
 }
 
-fn parse_prepare(spec: &str) -> anyhow::Result<seqforge_core::PrepareKind> {
-    use seqforge_core::{Boundary, PrepareKind, SpanEnds};
-    let spec = spec.trim();
-    if spec.eq_ignore_ascii_case("as-is") || spec.eq_ignore_ascii_case("asis") {
-        return Ok(PrepareKind::AsIs);
+/// Run a request here if its document is on disk; otherwise forward it to the
+/// running SeqForge over the socket.
+///
+/// One entry point for the whole verb surface — the CLI no longer decides
+/// local-vs-remote by which enum a command was declared in.
+pub fn dispatch_cmd(req: ViewerRequest) -> anyhow::Result<()> {
+    match (DocSource::of(&req), req) {
+        (
+            DocSource::Paths,
+            ViewerRequest::Assemble {
+                inputs,
+                method,
+                topology,
+                enzymes,
+                expand,
+                emit_recipe,
+                dry_run,
+                fidelity_dataset,
+                fidelity_matrix,
+                out,
+                format,
+                name_template,
+                combos,
+                origin,
+            },
+        ) => run_assemble(AssembleOpts {
+            inputs: &inputs,
+            method: &method,
+            topology: &topology,
+            default_enzymes: enzymes.as_deref(),
+            expand: &expand,
+            emit_recipe: emit_recipe.as_deref(),
+            dry_run,
+            fidelity_dataset: fidelity_dataset.as_deref(),
+            fidelity_matrix,
+            out: out.as_deref(),
+            format: &format,
+            name_template: name_template.as_deref(),
+            combos: combos.as_deref(),
+            origin: origin.as_deref(),
+        }),
+        (_, req) => dispatch_viewer_cmd(req),
     }
-    if let Some(pair) = spec.strip_prefix("pcr:") {
-        let span: SpanEnds = pair
-            .parse()
-            .map_err(|e| anyhow::anyhow!("pcr prepare needs fwd..rev, got {spec:?}: {e}"))?;
-        let (fwd, rev) = match (&span.five_prime, &span.three_prime) {
-            (
-                Boundary::EnzymeSite {
-                    enzyme: f,
-                    at: None,
-                },
-                Boundary::EnzymeSite {
-                    enzyme: r,
-                    at: None,
-                },
-            ) => (f.clone(), r.clone()),
-            _ => anyhow::bail!("pcr prepare needs primer names (fwd..rev), got {spec:?}"),
-        };
-        return Ok(PrepareKind::Pcr { fwd, rev });
-    }
-    // Optional legacy `digest:` prefix, then 5′..3′.
-    let span_text = spec.strip_prefix("digest:").unwrap_or(spec);
-    let span: SpanEnds = span_text
-        .parse()
-        .map_err(|e| anyhow::anyhow!("bad prepare {spec:?}: {e}"))?;
-    Ok(PrepareKind::Digest {
-        five_prime: span.five_prime,
-        three_prime: span.three_prime,
-    })
-}
-
-/// Enzyme lists accept `,`, `+`, or `/` separators; the query grammar wants whitespace.
-fn normalize_enzymes(list: &str) -> String {
-    list.replace([',', '+', '/'], " ")
 }
 
 // ── Viewer command socket dispatch ────────────────────────────────────────────
@@ -785,108 +713,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod assemble_tests {
-    use seqforge_core::{Bin, Boundary, PrepareKind, Source, SourceRef, SpanEnds};
-
-    /// Parity: the bin a CLI token parses to is byte-identical to the bin a GUI
-    /// would author, and it survives serde + the 5′→3′ Display/FromStr round-trip.
-    #[test]
-    fn cli_token_equals_gui_authored_bin() {
-        let bin = super::parse_bin_token("pUC19.gb@BamHI..EcoRI", None).unwrap();
-
-        let expected = Bin {
-            role: "pUC19".into(),
-            sources: vec![Source {
-                ref_: SourceRef::Path("pUC19.gb".into()),
-                pin: None,
-                span: None,
-            }],
-            prepare: PrepareKind::Digest {
-                five_prime: Boundary::enzyme("BamHI"),
-                three_prime: Boundary::enzyme("EcoRI"),
-            },
-        };
-        assert_eq!(bin, expected, "CLI token must equal the GUI-authored bin");
-
-        let json = serde_json::to_string(&bin).unwrap();
-        assert_eq!(serde_json::from_str::<Bin>(&json).unwrap(), bin);
-
-        let span = SpanEnds::new(Boundary::enzyme("BamHI"), Boundary::enzyme("EcoRI"));
-        assert_eq!(span.to_string(), "BamHI..EcoRI");
-        assert_eq!("BamHI..EcoRI".parse::<SpanEnds>().unwrap(), span);
-    }
-
-    /// A per-input `[5′..3′]` with an `@pos` occurrence rides each source.
-    /// The other half of `SourceRef`. `buffer:<n>` was documented in
-    /// plans/assembly.md but unimplemented, so the CLI could only ever name a
-    /// path — half a `core` type was GUI-only in practice (ROADMAP decision 27).
-    #[test]
-    fn buffer_token_parses_to_a_buffer_source() {
-        let bin = super::parse_bin_token("buffer:3@BsaI..BsaI", None).unwrap();
-        assert_eq!(bin.sources.len(), 1);
-        assert_eq!(
-            bin.sources[0].ref_,
-            SourceRef::Buffer(seqforge_core::BufferId(3)),
-            "a buffer handle must not be mistaken for a path"
-        );
-        assert_eq!(bin.role, "buffer3");
-    }
-
-    /// Parity: the value survives the wire, so a recipe authored in the
-    /// workbench and one authored on the command line are the same document.
-    #[test]
-    fn buffer_source_round_trips_through_serde() {
-        let bin = super::parse_bin_token("buffer:7", None).unwrap();
-        let json = serde_json::to_string(&bin).unwrap();
-        assert!(json.contains("\"buffer\""), "serde tag: {json}");
-        let back: seqforge_core::Bin = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, bin);
-    }
-
-    #[test]
-    fn a_malformed_buffer_handle_is_an_error_not_a_path() {
-        let err = super::parse_bin_token("buffer:xyz", None).unwrap_err();
-        assert!(err.to_string().contains("bad buffer handle"), "{err}");
-    }
-
-    #[test]
-    fn per_input_span_override_is_carried_on_the_source() {
-        let bin = super::parse_bin_token("geneC.gb@EcoRI..BamHI[EcoRI@410..BamHI]", None).unwrap();
-        let span = bin.sources[0].span.as_ref().expect("span override");
-        assert_eq!(span.to_string(), "EcoRI@410..BamHI");
-    }
-
-    /// A glob source expands to N sources in **one** bin (bulk).
-    #[test]
-    fn glob_expands_to_n_sources_in_one_bin() {
-        let dir = std::env::temp_dir().join(format!("sf_glob_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for name in ["a.gb", "b.gb", "c.gb", "skip.txt"] {
-            std::fs::write(dir.join(name), b">x\nACGT\n").unwrap();
-        }
-        let pattern = format!("{}/*.gb", dir.display());
-        let bin = super::parse_bin_token(&format!("{pattern}@EcoRI..EcoRI"), None).unwrap();
-        assert_eq!(bin.sources.len(), 3, "3 .gb files, not the .txt");
-        let combos: usize = [bin.sources.len()].iter().product();
-        assert_eq!(combos, 3);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Bare path + `--enzymes BsaI` sugars to `Digest { BsaI..BsaI }`.
-    #[test]
-    fn golden_gate_bare_path_sugars_to_bsai_span() {
-        let bin = super::parse_bin_token("vector.gb", Some("BsaI")).unwrap();
-        assert_eq!(
-            bin.prepare,
-            PrepareKind::Digest {
-                five_prime: Boundary::enzyme("BsaI"),
-                three_prime: Boundary::enzyme("BsaI"),
-            }
-        );
-    }
-}
-
-#[cfg(test)]
 mod primer_tests {
     use std::path::PathBuf;
 
@@ -904,5 +730,66 @@ mod primer_tests {
     #[test]
     fn primers_find_runs_on_fixture() {
         assert!(super::run_primers_find(&puc19(), "GGGAAACGCCTGGTATCTTT").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::DocSource;
+    use seqforge_core::ViewerRequest;
+
+    fn assemble(inputs: &[&str]) -> ViewerRequest {
+        ViewerRequest::Assemble {
+            inputs: inputs.iter().map(|s| s.to_string()).collect(),
+            method: "ligate".into(),
+            topology: "circular".into(),
+            enzymes: None,
+            expand: "all-to-all".into(),
+            emit_recipe: None,
+            dry_run: false,
+            fidelity_dataset: None,
+            fidelity_matrix: false,
+            out: None,
+            format: "genbank".into(),
+            name_template: None,
+            combos: None,
+            origin: None,
+        }
+    }
+
+    /// The rule that replaced the two-tier command split: routing follows the
+    /// document, not the verb (ROADMAP decision 27).
+    #[test]
+    fn path_inputs_run_locally() {
+        assert_eq!(
+            DocSource::of(&assemble(&["a.gb", "parts/*.gb@BsaI..BsaI"])),
+            DocSource::Paths,
+            "nothing here needs a session, so no socket is required"
+        );
+    }
+
+    #[test]
+    fn a_buffer_input_needs_the_session_that_owns_it() {
+        assert_eq!(
+            DocSource::of(&assemble(&["a.gb", "buffer:3@BsaI..BsaI"])),
+            DocSource::Session,
+            "one live source is enough to make the whole request session-bound"
+        );
+    }
+
+    #[test]
+    fn no_inputs_means_the_open_workbench_recipe() {
+        assert_eq!(DocSource::of(&assemble(&[])), DocSource::Session);
+    }
+
+    #[test]
+    fn view_scoped_verbs_are_always_session_bound() {
+        assert_eq!(
+            DocSource::of(&ViewerRequest::GoTo {
+                position: 10,
+                view: None
+            }),
+            DocSource::Session
+        );
     }
 }

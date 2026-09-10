@@ -162,12 +162,16 @@ is arbitrary — with it, a whole combinatorial library opens in the same frame.
 The same landmark works on an open document: `seqforge set-origin --feature Start`
 (the GUI equivalent is **Set Origin at cursor**).
 
-With a viewer running, the same run can go through the GUI's buffers instead —
-`RunRecipe` opens each product as a tab *and* writes it:
+`assemble` is one verb over two document sources, and **routing follows the
+document, not the verb**. Inputs that are all paths run in this process — no
+viewer needed. Name a live document with `buffer:<n>`, or pass no inputs at all
+(meaning "the recipe open in the workbench"), and the same request is forwarded
+to the running SeqForge, which opens each product as a tab *and* writes it:
 
 ```bash
 seqforge assemble parts/*.gb --method golden-gate --enzymes BsaI --emit-recipe r.json
-seqforge run-recipe r.json --combos '!0' --out build/
+seqforge assemble r.json --combos '!0' --out build/     # local: r.json is a path
+seqforge assemble buffer:2@BsaI..BsaI insert.gb --out build/   # forwarded
 ```
 
 The workbench's **Run → folder…** button is the same code path. In both faces

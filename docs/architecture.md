@@ -14,21 +14,26 @@ heavy bio deps, and the restriction/thermo crates stay extractable.
 flowchart TD
     app["seqforge-app<br/><i>egui/eframe GUI</i>"]
     cli["seqforge-cli<br/><i>standalone tool</i>"]
+    sess["seqforge-session<br/><i>Workspace · write-path dispatch · Host</i><br/><b>headless: no egui</b>"]
     core["seqforge-core<br/><i>Buffer · Annotations · View<br/>ViewerRequest · dispatch · BioOps</i><br/><b>no GUI, no bio deps</b>"]
-    bio["seqforge-bio<br/><i>gb-io/FASTA parse · search<br/>impl BioOps</i>"]
+    bio["seqforge-bio<br/><i>gb-io/FASTA parse · search · assembly<br/>impl BioOps</i>"]
     restr["seqforge-restriction<br/><i>REBASE table · scanner · presets</i><br/><b>zero workspace deps</b>"]
     thermo["seqforge-thermo<br/><i>Tm · GC (· hairpin · dimer, later)</i><br/><b>pure, zero-dep</b>"]
 
+    app --> sess
+    cli --> sess
     app --> core
     cli --> core
     app -.->|"impl BioOps (AppBio)"| bio
     cli -.-> bio
+    sess --> core
+    sess --> bio
     bio --> core
     bio --> restr
     bio --> thermo
 
     classDef pure fill:#def,stroke:#06a,color:#000;
-    class core,restr,thermo pure;
+    class core,restr,thermo,sess pure;
 ```
 
 **Invariants the arrows encode:**
@@ -38,6 +43,14 @@ flowchart TD
   through the `BioOps` trait, implemented in `seqforge-app`/`-cli`. This
   is what lets dispatch back a headless CLI, tests, or a future WASM
   worker unchanged.
+- **`seqforge-session` is the only home for write-path dispatch, and it is
+  renderer-free.** Decision 9 forbids `core ──► bio`, so bio-derived edits must
+  live above `bio`; for a long time the only crate there was the GUI, which made
+  every workspace-touching verb GUI-only (ROADMAP decision 27). This crate is
+  that address. The invariant is mechanical: `cargo tree -p seqforge-session`
+  and `cargo tree -p seqforge-cli` contain no egui. What a GUI does and a
+  headless caller cannot — notify, reach the OS pasteboard — arrives through the
+  `Host` trait.
 - **`seqforge-restriction` is reachable only via `seqforge-bio`** (see
   "Restriction backend boundary" below) and carries no workspace deps —
   the constraint that keeps a crates.io extraction a one-file change.
@@ -244,14 +257,17 @@ The same `ViewerRequest` variants serve the GUI menu, the embedded
 terminal, and external agents — so any operation reachable in the UI has
 a CLI equivalent with structured output.
 
-> **This holds in one direction only, today.** The converse is false: the
-> CLI-local verbs (`assemble`, `digest`, `translate`, `orfs`, `primers`) are
-> hand-written `clap` subcommands with no serde and no socket face, so they are
-> unreachable from the GUI or an agent. Giving `assemble` a socket face
-> therefore took a *second* command (`ViewerRequest::RunRecipe`) rather than a
-> projection of the first. ROADMAP decision 27 records the fix: a
-> `seqforge-session` crate above `bio`, one command enum, and routing by
-> document source rather than by schema.
+> **Routing follows the document, not the verb** (ROADMAP decision 27).
+> `assemble` is a `ViewerRequest` like everything else; `DocSource::of` decides
+> where it runs. Inputs that are all paths execute in the calling process — no
+> socket, no GUI — while anything naming live session state (`buffer:<n>`, or
+> an implicit "the active view") is forwarded to the session that owns it. One
+> schema, two document sources.
+>
+> The remaining hand-written CLI-local verbs (`digest`, `translate`, `orfs`,
+> `primers`, `tm`) have not been folded in yet; they are read-only projections
+> over a file, so the asymmetry costs nothing today, but they are the next
+> candidates.
 
 Per-frame ordering (drain
 inputs → dispatch keys → render → apply) is detailed in

@@ -18,6 +18,7 @@ pub use assembly::export::{
 pub use assembly::join::{
     HarvestedOverhang, JoinProbe, JunctionReport, harvest_junction_overhangs, probe_join,
 };
+pub use assembly::tokens::{bin_role, normalize_enzymes, parse_bin_token, parse_prepare};
 pub use assembly::{
     AssemblyResult, ComboPart, ComboSummary, FileResolver, NamedProduct, RecipeJoinProbe,
     ResolvedSource, SourceResolver, enumerate_combos, expand_glob, first_combo_fidelity_matrix,

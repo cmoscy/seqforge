@@ -24,6 +24,12 @@ struct Cli {
 /// [`ViewerRequest`]** — its `clap::Subcommand` derive is the single source of
 /// truth shared with the socket wire format (serde). Adding a `ViewerRequest`
 /// variant gives it CLI + embedded-terminal reach with no second edit here.
+// `Cmd::Viewer` carries the whole flattened `ViewerRequest`, whose `Assemble`
+// variant is much larger than `Info { input }`. Boxing it is not an option:
+// `#[command(flatten)]` needs the enum inline to project its variants into
+// subcommands, and that projection is the single-source property decision 11
+// asks for. One short-lived value is parsed per process.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 enum Cmd {
     // ── File commands (always run locally; no GUI required) ───────────────────
@@ -39,75 +45,6 @@ enum Cmd {
         /// Treat the molecule as circular (overrides the file's topology).
         #[arg(long)]
         circular: bool,
-    },
-    /// Assemble a product from bins (Assembly A1) → prints the product(s).
-    ///
-    /// Pass a single `recipe.json`, or inline bin tokens
-    /// `SOURCE[@5′..3′]` (e.g. `pUC19.gb@EcoRI..PstI`, `parts/*.gb@BsaI..BsaI`).
-    /// The `E1..E2` walk is 5′→3′ of the excised fragment; swap sides of `..`
-    /// for the complementary walk. Join uses that prepared orientation (no
-    /// silent flips); both orientations → multiple sources or complementary bins.
-    Assemble {
-        /// Path/glob, optional `@5′..3′` (`EcoRI..PstI`, `BsaI..BsaI`,
-        /// `pcr:fwd..rev`, `as-is`), or a single `recipe.json`.
-        #[arg(value_name = "TOKEN")]
-        inputs: Vec<String>,
-        /// Join method: `ligate` | `golden-gate`.
-        #[arg(long, default_value = "ligate")]
-        method: String,
-        /// Intended topology: `circular` | `linear` | `any`.
-        #[arg(long, default_value = "circular")]
-        topology: String,
-        /// Default digest enzymes when a bin has no `@5′..3′`
-        /// (one enzyme → `E..E`; two → `E1..E2`).
-        #[arg(long)]
-        enzymes: Option<String>,
-        /// Combination mode: `all-to-all` (Cartesian product across bins; default)
-        /// or `zip` (positional 1:1 pairing; bins must share fragment count).
-        #[arg(long, default_value = "all-to-all")]
-        expand: String,
-        /// Also write the resolved recipe as JSON to this path.
-        #[arg(long)]
-        emit_recipe: Option<PathBuf>,
-        /// Report bins + combo count + join end-compatibility without products.
-        #[arg(long)]
-        dry_run: bool,
-        /// Score each combo with a fidelity dataset (dry-run overlay only;
-        /// never written into recipe.json). Ids: t4_25c_18h (default), t4_25c_01h,
-        /// t4_37c_18h, t4_37c_01h, bsai, bsmbi, esp3i, bbsi, sapi.
-        #[arg(long)]
-        fidelity_dataset: Option<String>,
-        /// Include the NEB-style RC-expanded subset ligation-frequency matrix
-        /// for the first compatible combo (else the first combo) on dry-run JSON.
-        /// Requires `--fidelity-dataset`.
-        #[arg(long)]
-        fidelity_matrix: bool,
-        /// Write each product into this directory (created if absent). Without
-        /// it, products are computed and reported but not saved.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Product file format when `--out` is given: `genbank` (default,
-        /// keeps features) or `fasta` (sequence only).
-        #[arg(long, default_value = "genbank")]
-        format: String,
-        /// Name each product from a template instead of `role+role #n`.
-        /// Brace-delimited tokens: `roles`, `n` (combo index), `i` (ordinal),
-        /// and `bin0`…`binN` (the file stem that bin contributed, optionally
-        /// truncated as `bin1:6`) — e.g. `VH-{bin1}-{bin2}`. Drives both the
-        /// product name and, with `--out`, the filename.
-        #[arg(long)]
-        name_template: Option<String>,
-        /// Run only these combos: comma-separated indices and `A-B` ranges,
-        /// with `!`-prefixed exclusions (`0-31,!12`). A bare exclusion means
-        /// "all but these". Indices match the `--dry-run` combo list.
-        #[arg(long)]
-        combos: Option<String>,
-        /// Rotate each circular product so this point becomes position 1: a
-        /// feature label (`Start`) or a 0-based index. A label must match
-        /// exactly one feature. Without it, a product opens wherever the first
-        /// bin's restriction cut happened to fall.
-        #[arg(long)]
-        origin: Option<String>,
     },
     /// Annotate a sequence file (post-MVP)
     Annotate {
@@ -205,43 +142,12 @@ fn main() -> anyhow::Result<()> {
             enzymes,
             circular,
         } => seqforge_cli::run_digest(&input, &enzymes, circular),
-        Cmd::Assemble {
-            inputs,
-            method,
-            topology,
-            enzymes,
-            expand,
-            emit_recipe,
-            dry_run,
-            fidelity_dataset,
-            fidelity_matrix,
-            out,
-            format,
-            name_template,
-            combos,
-            origin,
-        } => seqforge_cli::run_assemble(seqforge_cli::AssembleOpts {
-            inputs: &inputs,
-            method: &method,
-            topology: &topology,
-            default_enzymes: enzymes.as_deref(),
-            expand: &expand,
-            emit_recipe: emit_recipe.as_deref(),
-            dry_run,
-            fidelity_dataset: fidelity_dataset.as_deref(),
-            fidelity_matrix,
-            out: out.as_deref(),
-            format: &format,
-            name_template: name_template.as_deref(),
-            combos: combos.as_deref(),
-            origin: origin.as_deref(),
-        }),
         Cmd::Annotate { .. } => {
             anyhow::bail!("not yet implemented (post-MVP)")
         }
 
         // ── Viewer / editor commands (via JSON-RPC socket) ────────────────────
         // One arm for the whole forwarded surface — no per-variant mapping.
-        Cmd::Viewer(req) => seqforge_cli::dispatch_viewer_cmd(req),
+        Cmd::Viewer(req) => seqforge_cli::dispatch_cmd(req),
     }
 }

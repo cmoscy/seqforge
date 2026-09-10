@@ -17,6 +17,7 @@ mod select;
 pub mod discover;
 pub mod export;
 pub mod join;
+pub mod tokens;
 
 use std::path::{Path, PathBuf};
 
