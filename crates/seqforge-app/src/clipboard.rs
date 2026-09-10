@@ -17,40 +17,7 @@ use seqforge_core::SeqSlice;
 
 use crate::app::AppState;
 
-/// IUPAC nucleotide alphabet (DNA + ambiguity codes). Shared by the silent
-/// GUI filter and the strict CLI/agent parser.
-pub const IUPAC: &[u8] = b"ACGTURYSWKMBDHVN";
-
-/// Keep only IUPAC codes, upper-cased; drop everything else (whitespace, junk).
-/// Used for typed bases and plain-text OS paste.
-pub fn filter_bases(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| {
-            let u = c.to_ascii_uppercase();
-            (u.is_ascii() && IUPAC.contains(&(u as u8))).then_some(u)
-        })
-        .collect()
-}
-
-/// Uppercase, strip ASCII whitespace, validate IUPAC. Returns the clean bytes
-/// or an error naming the first offending character (CLI/agent path).
-pub fn parse_bases(s: &str) -> Result<Vec<u8>, seqforge_core::DispatchError> {
-    let mut out = Vec::with_capacity(s.len());
-    for ch in s.chars() {
-        if ch.is_ascii_whitespace() {
-            continue;
-        }
-        let up = ch.to_ascii_uppercase();
-        if up.is_ascii() && IUPAC.contains(&(up as u8)) {
-            out.push(up as u8);
-        } else {
-            return Err(seqforge_core::DispatchError::InvalidInput(format!(
-                "`{ch}` is not an IUPAC nucleotide code"
-            )));
-        }
-    }
-    Ok(out)
-}
+pub use seqforge_session::bases::filter_bases;
 
 /// Session clipboard: rich cache + ownership metadata for OS sync.
 #[derive(Debug, Clone)]
@@ -112,11 +79,6 @@ impl ClipboardState {
     pub fn memory_only(&self) -> bool {
         self.memory_only
     }
-}
-
-/// Write a slice into the cache and mirror bases onto the OS clipboard.
-pub fn set_slice(state: &mut AppState, slice: SeqSlice) {
-    set_slice_cache(&mut state.clipboard, slice);
 }
 
 /// Write into a [`ClipboardState`] directly (same as [`set_slice`]).
@@ -387,7 +349,7 @@ mod tests {
     #[test]
     fn set_slice_keeps_rich_while_generation_ours() {
         let mut s = state_gui();
-        set_slice(&mut s, rich_slice());
+        set_slice_cache(&mut s.clipboard, rich_slice());
         assert_eq!(s.clipboard.slice.as_ref().unwrap().features.len(), 1);
 
         sync_from_os(&mut s);
@@ -402,7 +364,7 @@ mod tests {
     #[test]
     fn foreign_copy_replaces_with_bytes_only() {
         let mut s = state_gui();
-        set_slice(&mut s, rich_slice());
+        set_slice_cache(&mut s.clipboard, rich_slice());
         test_os::foreign_write("GGCC");
 
         sync_from_os(&mut s);
@@ -417,7 +379,7 @@ mod tests {
     fn identical_text_foreign_copy_still_drops_rich() {
         // Generation bumps even when the sequence text matches — no collision.
         let mut s = state_gui();
-        set_slice(&mut s, rich_slice());
+        set_slice_cache(&mut s.clipboard, rich_slice());
         test_os::foreign_write("ATGC");
 
         sync_from_os(&mut s);
@@ -461,10 +423,40 @@ mod tests {
         assert_eq!(filter_bases("A1T-G zJ C"), "ATGC");
         assert_eq!(filter_bases("123"), "");
     }
+}
 
-    #[test]
-    fn parse_bases_rejects_non_iupac() {
-        assert!(parse_bases("ATGC").is_ok());
-        assert!(parse_bases("AT X").is_err());
+// ── Host bridge ───────────────────────────────────────────────────────────────
+
+/// The GUI's [`Host`](seqforge_session::Host): toasts for notification, the OS
+/// pasteboard for the clipboard.
+///
+/// It borrows `AppState`'s fields individually rather than holding the whole
+/// struct, so a handler can take `&mut Workspace` and `&mut dyn Host` at the
+/// same time — the same disjoint-borrow shape `TabViewer` already uses.
+pub struct AppHost<'a> {
+    pub toasts: &'a mut egui_notify::Toasts,
+    pub clipboard: &'a mut ClipboardState,
+}
+
+impl seqforge_session::Host for AppHost<'_> {
+    fn notify(&mut self, level: seqforge_session::Level, msg: String) {
+        use seqforge_session::Level;
+        match level {
+            Level::Info => self.toasts.info(msg),
+            Level::Success => self.toasts.success(msg),
+            Level::Warning => self.toasts.warning(msg),
+            Level::Error => self.toasts.error(msg),
+        };
+    }
+
+    fn clipboard_set(&mut self, slice: SeqSlice) {
+        set_slice_cache(self.clipboard, slice);
+    }
+
+    fn clipboard_get(&mut self) -> Option<SeqSlice> {
+        // The OS pasteboard is authoritative — reconcile before trusting the
+        // session cache, so a copy made in another app is pasteable here.
+        sync_with_plain_hint(self.clipboard, None);
+        self.clipboard.slice.clone()
     }
 }

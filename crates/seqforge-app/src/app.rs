@@ -224,6 +224,21 @@ pub struct AppState {
     pub(crate) show_minimap: bool,
 }
 
+impl AppState {
+    /// Split off the two borrows the headless write path needs: the workspace it
+    /// mutates, and a [`Host`](seqforge_session::Host) for the things it cannot
+    /// do itself. Disjoint fields, so both can be held at once.
+    pub fn session(&mut self) -> (&mut Workspace, crate::clipboard::AppHost<'_>) {
+        let AppState {
+            workspace,
+            toasts,
+            clipboard,
+            ..
+        } = self;
+        (workspace, crate::clipboard::AppHost { toasts, clipboard })
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         // Stub layout: SeqForgeApp::new populates the real splits via

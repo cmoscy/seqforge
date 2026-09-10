@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use egui_file_dialog::FileDialog;
 use seqforge_core::{BioOps, DispatchError, Topology, ViewId, ViewerResponse};
 
-use super::{active_selection, edit, emit_selection_diff, layout, snapshot_focus_for_overlay};
+use super::{active_selection, emit_selection_diff, layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
 use crate::cli_install;
 use crate::event::AppEvent;
@@ -140,7 +140,7 @@ pub(super) fn apply_pcr(
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     use seqforge_core::{Annotations, Orient, PartialPolicy, transport};
 
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
 
     struct Built {
         bytes: Vec<u8>,
@@ -240,7 +240,7 @@ pub(super) fn apply_digest(
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     use seqforge_core::ViewKind;
 
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
 
     // Read-only over the source: resolve enzymes + compute the projection.
     let (source_buffer, canonical, infos, warnings) =
@@ -580,7 +580,7 @@ pub(super) fn apply_open_revert_confirm(
     state: &mut AppState,
     view: Option<ViewId>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
     snapshot_focus_for_overlay(state);
     if let Some(tag) = state
         .overlays
@@ -598,7 +598,7 @@ pub(super) fn apply_revert(
     bio: &dyn BioOps,
     view: Option<ViewId>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
     let path = state
         .workspace
         .with_buffer(vid, |_, buf, _| buf.source_path.clone())?
@@ -618,7 +618,7 @@ pub(super) fn apply_save_document(
     view: Option<ViewId>,
     path: PathBuf,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
     // Save-As targets a user-chosen path — the guard is about the *original*
     // source; writing to a new/confirmed path is always intended, so force.
     save_buffer(state, vid, &path, true)?;
@@ -631,7 +631,7 @@ pub(super) fn apply_open_save_as(
     state: &mut AppState,
     view: Option<ViewId>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let vid = edit::resolve_target(state, view)?;
+    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
     let mut dialog = FileDialog::new();
     dialog.save_file();
     state.pending_save_as = Some(vid);

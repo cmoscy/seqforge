@@ -31,12 +31,14 @@ use seqforge_core::{
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
+use seqforge_session::edit as sedit;
 
 pub(crate) mod assembly;
 mod edit;
 pub(crate) mod file;
 mod layout;
 mod nav;
+mod stage;
 
 /// A queued command plus the optional one-shot channel that returns
 /// the dispatch result. `None` for menu/hotkey/bar-originated commands;
@@ -741,7 +743,7 @@ pub fn apply<B: BioOps>(
         } => nav::apply_open_translation(state, title, start, end, strand, frame),
 
         // ── In-canvas staging (menu) ────────────────────────────────
-        StageEdit(edit) => edit::apply_stage_edit(state, edit),
+        StageEdit(edit) => stage::apply_stage_edit(state, edit),
 
         // ── Tools ───────────────────────────────────────────────────
         InstallCli => file::apply_install_cli(state),
@@ -839,23 +841,34 @@ pub fn apply<B: BioOps>(
             // Intercepted here, never reaching `dispatch_active`/`core::dispatch`
             // (which read-lock); see commands.rs `dispatch` doc + editor.md §4.
             ViewerRequest::Insert { pos, bases, view } => {
-                edit::apply_insert(state, view, pos, bases)
+                sedit::apply_insert(&mut state.workspace, view, pos, bases)
             }
             ViewerRequest::Delete { start, end, view } => {
-                edit::apply_delete(state, view, start, end)
+                sedit::apply_delete(&mut state.workspace, view, start, end)
             }
             ViewerRequest::Replace {
                 start,
                 end,
                 bases,
                 view,
-            } => edit::apply_replace(state, view, start, end, bases),
+            } => sedit::apply_replace(&mut state.workspace, view, start, end, bases),
             ViewerRequest::ReverseComplement { start, end, view } => {
-                edit::apply_reverse_complement(state, view, start, end)
+                sedit::apply_reverse_complement(&mut state.workspace, view, start, end)
             }
-            ViewerRequest::Cut { start, end, view } => edit::apply_cut(state, view, start, end),
-            ViewerRequest::Copy { start, end, view } => edit::apply_copy(state, view, start, end),
-            ViewerRequest::Paste { pos, view } => edit::apply_paste(state, view, pos),
+            // Clipboard ops reach the OS pasteboard, so they take a `Host`
+            // alongside the workspace — disjoint borrows of `AppState`.
+            ViewerRequest::Cut { start, end, view } => {
+                let (ws, mut host) = state.session();
+                sedit::apply_cut(ws, &mut host, view, start, end)
+            }
+            ViewerRequest::Copy { start, end, view } => {
+                let (ws, mut host) = state.session();
+                sedit::apply_copy(ws, &mut host, view, start, end)
+            }
+            ViewerRequest::Paste { pos, view } => {
+                let (ws, mut host) = state.session();
+                sedit::apply_paste(ws, &mut host, view, pos)
+            }
             ViewerRequest::AddFeature {
                 start,
                 end,
@@ -863,12 +876,20 @@ pub fn apply<B: BioOps>(
                 label,
                 strand,
                 view,
-            } => edit::apply_add_feature(state, view, start, end, kind, label, strand),
+            } => sedit::apply_add_feature(
+                &mut state.workspace,
+                view,
+                start,
+                end,
+                kind,
+                label,
+                strand,
+            ),
             ViewerRequest::RemoveFeature { id, view } => {
-                edit::apply_remove_feature(state, view, id)
+                sedit::apply_remove_feature(&mut state.workspace, view, id)
             }
             ViewerRequest::RenameFeature { id, label, view } => {
-                edit::apply_rename_feature(state, view, id, label)
+                sedit::apply_rename_feature(&mut state.workspace, view, id, label)
             }
             ViewerRequest::UpdateFeature {
                 id,
@@ -878,7 +899,16 @@ pub fn apply<B: BioOps>(
                 start,
                 end,
                 view,
-            } => edit::apply_update_feature(state, view, id, kind, label, strand, start, end),
+            } => sedit::apply_update_feature(
+                &mut state.workspace,
+                view,
+                id,
+                kind,
+                label,
+                strand,
+                start,
+                end,
+            ),
             ViewerRequest::AddPrimer {
                 name,
                 sequence,
@@ -886,7 +916,15 @@ pub fn apply<B: BioOps>(
                 end,
                 strand,
                 view,
-            } => edit::apply_add_primer(state, view, name, sequence, start, end, strand),
+            } => sedit::apply_add_primer(
+                &mut state.workspace,
+                view,
+                name,
+                sequence,
+                start,
+                end,
+                strand,
+            ),
             ViewerRequest::UpdatePrimer {
                 id,
                 name,
@@ -896,18 +934,37 @@ pub fn apply<B: BioOps>(
                 end,
                 detach,
                 view,
-            } => edit::apply_update_primer(
-                state, view, id, name, sequence, strand, start, end, detach,
+            } => sedit::apply_update_primer(
+                &mut state.workspace,
+                view,
+                id,
+                name,
+                sequence,
+                strand,
+                start,
+                end,
+                detach,
             ),
-            ViewerRequest::RescanPrimer { id, view } => edit::apply_rescan_primer(state, view, id),
+            ViewerRequest::RescanPrimer { id, view } => {
+                sedit::apply_rescan_primer(&mut state.workspace, view, id)
+            }
             ViewerRequest::AddPrimerSite {
                 id,
                 enzyme,
                 overhang,
                 flank,
                 view,
-            } => edit::apply_add_primer_site(state, view, id, enzyme, overhang, flank),
-            ViewerRequest::RemovePrimer { id, view } => edit::apply_remove_primer(state, view, id),
+            } => sedit::apply_add_primer_site(
+                &mut state.workspace,
+                view,
+                id,
+                enzyme,
+                overhang,
+                flank,
+            ),
+            ViewerRequest::RemovePrimer { id, view } => {
+                sedit::apply_remove_primer(&mut state.workspace, view, id)
+            }
             ViewerRequest::Pcr {
                 fwd,
                 rev,
@@ -936,8 +993,8 @@ pub fn apply<B: BioOps>(
                 name_template,
                 origin,
             ),
-            ViewerRequest::Undo { view } => edit::apply_undo(state, view),
-            ViewerRequest::Redo { view } => edit::apply_redo(state, view),
+            ViewerRequest::Undo { view } => sedit::apply_undo(&mut state.workspace, view),
+            ViewerRequest::Redo { view } => sedit::apply_redo(&mut state.workspace, view),
 
             // ── Buffer lifecycle / topology ──
             ViewerRequest::New { circular, name } => file::apply_new(state, circular, name),
@@ -945,10 +1002,12 @@ pub fn apply<B: BioOps>(
                 index,
                 feature,
                 view,
-            } => edit::apply_set_origin(state, view, index, feature),
-            ViewerRequest::Linearize { at, view } => edit::apply_linearize(state, view, at),
+            } => sedit::apply_set_origin(&mut state.workspace, view, index, feature),
+            ViewerRequest::Linearize { at, view } => {
+                sedit::apply_linearize(&mut state.workspace, view, at)
+            }
             ViewerRequest::Circularize { origin, view } => {
-                edit::apply_circularize(state, view, origin)
+                sedit::apply_circularize(&mut state.workspace, view, origin)
             }
 
             // ── Read-scoped (GoTo/Find/Enzymes) → core::dispatch ──
