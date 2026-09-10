@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use seqforge_core::{Annotations, Strand, Topology, ViewerRequest};
+use seqforge_core::{Annotations, Strand, Topology, ViewerRequest, ViewerResponse};
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
@@ -563,7 +563,8 @@ impl DocSource {
     }
 }
 
-/// Run a file-targeted request in this process, against a throwaway workspace.
+/// Resolve a file-targeted request in this process, against a throwaway
+/// workspace, and return the response.
 ///
 /// The whole path is three steps because nothing here is new: `open_path` mints
 /// the buffer and a view, `core::dispatch` is already session-free (it takes
@@ -571,7 +572,13 @@ impl DocSource {
 /// serializes to the same JSON the socket returns. The workspace — and with it
 /// the buffer's undo history — is dropped when the process exits, which is why
 /// `undo`/`redo` stay session verbs: there is no previous command to reverse.
-fn run_on_file(req: ViewerRequest) -> anyhow::Result<()> {
+///
+/// Kept separate from printing so tests can assert that this path — the one
+/// that actually resolves a `Target::Path` — agrees with a session addressing
+/// the same document by `ViewId`. That is the parity property; comparing two
+/// `dispatch` calls cannot express it, because no `dispatch` arm reads its
+/// target.
+pub fn resolve_on_file(req: ViewerRequest) -> anyhow::Result<ViewerResponse> {
     let path = req
         .target()
         .and_then(|t| t.path.clone())
@@ -583,13 +590,16 @@ fn run_on_file(req: ViewerRequest) -> anyhow::Result<()> {
         .open_path(&path, &bio)
         .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
 
-    let resp = ws
-        .with_buffer(vid, |view, buf, ann| {
-            seqforge_core::dispatch(view, buf, ann, &bio, req)
-        })
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    ws.with_buffer(vid, |view, buf, ann| {
+        seqforge_core::dispatch(view, buf, ann, &bio, req)
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
 
+/// Run a file-targeted request in this process and print the response.
+fn run_on_file(req: ViewerRequest) -> anyhow::Result<()> {
+    let resp = resolve_on_file(req)?;
     println!("{}", serde_json::to_string_pretty(&resp)?);
     Ok(())
 }
@@ -814,5 +824,136 @@ mod routing_tests {
             }),
             DocSource::Session
         );
+    }
+}
+
+/// The parity property the document target actually buys: **the two resolution
+/// layers reach the same document**.
+///
+/// `resolve_on_file` opens a throwaway workspace from a `Target::Path`; a
+/// session already holds the document and addresses it by `ViewId`. Those are
+/// different code paths — `DocSource::of` routing, `open_path`, and the GUI's
+/// `resolve_path_target` all sit between a request and its buffer — and they
+/// are where a drift like the `digest` methylation bug would reappear.
+///
+/// This cannot be written inside `seqforge-session`: `dispatch` ignores the
+/// target it is given, so comparing two `dispatch` calls compares nothing.
+#[cfg(test)]
+mod target_parity_tests {
+    use seqforge_core::{Target, ViewerRequest, ViewerResponse};
+
+    fn fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../seqforge-bio/tests/fixtures/pUC19.gbk")
+    }
+
+    /// Resolve `req` both ways and return the two responses as JSON.
+    ///
+    /// `by_path` goes through the real CLI local runner. `by_view` stands in for
+    /// a running session: the document is already open, and the request names it
+    /// by id.
+    fn both_layers(mut req: ViewerRequest) -> (String, String) {
+        let path = fixture();
+
+        *req.target_mut().expect("verb carries a target") = Target::path(&path);
+        let by_path = super::resolve_on_file(req.clone()).expect("file target resolves");
+
+        let bio = seqforge_session::Bio;
+        let mut ws = seqforge_session::Workspace::default();
+        let vid = ws.open_path(&path, &bio).expect("fixture opens");
+        *req.target_mut().unwrap() = Target::view(vid);
+        let by_view = ws
+            .with_buffer(vid, |view, buf, ann| {
+                seqforge_core::dispatch(view, buf, ann, &bio, req)
+            })
+            .expect("view resolves")
+            .expect("dispatch succeeds");
+
+        (json(&by_path), json(&by_view))
+    }
+
+    fn json(r: &ViewerResponse) -> String {
+        serde_json::to_string(r).unwrap()
+    }
+
+    #[test]
+    fn list_features_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::ListFeatures {
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(a.contains("\"kind\":\"features\""), "{a}");
+    }
+
+    #[test]
+    fn find_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Find {
+            pattern: "GAATTC".into(),
+            mismatches: 0,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        // A fixture with no hits would make this vacuous.
+        assert!(!a.contains("\"count\":0"), "fixture must have a hit: {a}");
+    }
+
+    /// The enzyme chain is where the methylation drift lived: query resolution,
+    /// scan, and methylation verdicts all have to survive both layers.
+    #[test]
+    fn enzymes_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Enzymes {
+            query: "unique".into(),
+            op: Default::default(),
+            dam: true,
+            dcm: true,
+            cpg: false,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(!a.contains("\"count\":0"), "fixture must cut: {a}");
+    }
+
+    /// Methylation is a *parameter* on both layers now, not a hardcoded default
+    /// on one of them. Flipping it must move both answers, together — the
+    /// regression test for the drift decision 27 describes.
+    #[test]
+    fn methylation_is_honoured_by_both_resolution_layers() {
+        let on = |dam| ViewerRequest::Enzymes {
+            query: "all".into(),
+            op: Default::default(),
+            dam,
+            dcm: true,
+            cpg: false,
+            target: Target::active(),
+        };
+        let (dam_on_path, dam_on_view) = both_layers(on(true));
+        let (dam_off_path, dam_off_view) = both_layers(on(false));
+
+        assert_eq!(dam_on_path, dam_on_view);
+        assert_eq!(dam_off_path, dam_off_view);
+        assert_ne!(
+            dam_on_path, dam_off_path,
+            "Dam must change the verdicts, or this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn list_primers_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::ListPrimers {
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+    }
+
+    /// A write verb routed to a file must fail cleanly rather than half-apply.
+    #[test]
+    fn a_write_verb_against_a_file_is_refused() {
+        let err = super::resolve_on_file(ViewerRequest::Insert {
+            pos: 0,
+            bases: "ATGC".into(),
+            target: Target::path(fixture()),
+        })
+        .expect_err("writing through a file target is not implemented");
+        assert!(err.to_string().contains("write verb"), "{err}");
     }
 }

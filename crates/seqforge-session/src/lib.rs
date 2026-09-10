@@ -36,13 +36,17 @@ pub use workspace::{BufferStore, Workspace, display_name, hash_file_bytes};
 
 #[cfg(test)]
 mod parity_tests {
-    //! The property the document target buys: one verb, two ways of naming the
-    //! document, one answer.
+    //! `dispatch` ignores the target it is handed — every arm destructures
+    //! `target: _`, because resolution happens in the layer above. These tests
+    //! pin exactly that: carrying a `Target` through `dispatch` cannot perturb
+    //! the answer. It is worth knowing, since it is what makes the target safe
+    //! to flatten onto 30 variants.
     //!
-    //! Before `Target`, this test could not be written — a read verb reached its
-    //! document only through a GUI's active view, so "the same request against a
-    //! file" had no expression. It is the assertion that would have caught the
-    //! `digest` methylation drift (ROADMAP decision 27).
+    //! It is **not** the parity property. Both runs here open the file
+    //! themselves, so nothing resolves a `Target::Path`. The test that a
+    //! path target and a view target reach the same document lives in
+    //! `seqforge-cli`, which is where `resolve_on_file` — the code that can
+    //! actually be wrong — is reachable.
 
     use seqforge_core::{Target, ViewerRequest, dispatch};
 
@@ -53,9 +57,8 @@ mod parity_tests {
             .join("../seqforge-bio/tests/fixtures/pUC19.gbk")
     }
 
-    /// Run `req` against a workspace where the file is already open — the
-    /// "session" face — and against one that opens it from the path — the
-    /// headless face. The two must agree.
+    /// Dispatch `req` twice over equivalent workspaces, differing only in the
+    /// inert `Target` value each request carries.
     fn both_faces(req: ViewerRequest) -> (String, String) {
         let path = fixture();
         let bio = Bio;
@@ -69,8 +72,9 @@ mod parity_tests {
             .unwrap()
             .unwrap();
 
-        // A second, independent workspace, addressed by path — what the CLI's
-        // local runner does.
+        // A second, independent workspace. The request names a path rather
+        // than a view, but nothing here resolves that — `dispatch` never reads
+        // the field. That is the point being pinned.
         let mut ws2 = Workspace::default();
         let vid2 = ws2.open_path(&path, &bio).expect("fixture opens");
         let by_path = ws2
@@ -97,7 +101,7 @@ mod parity_tests {
     }
 
     #[test]
-    fn list_features_agrees_across_targets() {
+    fn list_features_is_unperturbed_by_its_target() {
         let (a, b) = both_faces(ViewerRequest::ListFeatures {
             target: Target::active(),
         });
@@ -106,7 +110,7 @@ mod parity_tests {
     }
 
     #[test]
-    fn find_agrees_across_targets() {
+    fn find_is_unperturbed_by_its_target() {
         let (a, b) = both_faces(ViewerRequest::Find {
             pattern: "GAATTC".into(),
             mismatches: 0,
@@ -115,11 +119,11 @@ mod parity_tests {
         assert_eq!(a, b);
     }
 
-    /// The enzyme path — where the drift actually was. `Enzymes` resolves a
-    /// query, scans, and evaluates methylation, so agreement here covers the
-    /// whole chain that `seqforge digest` and the viewer used to duplicate.
+    /// The enzyme path carries the most state through `dispatch` — it resolves
+    /// a query, scans, mutates `view.active_enzymes`, and evaluates
+    /// methylation — so it is the strongest place to pin target-inertness.
     #[test]
-    fn enzymes_agrees_across_targets() {
+    fn enzymes_is_unperturbed_by_its_target() {
         let (a, b) = both_faces(ViewerRequest::Enzymes {
             query: "unique".into(),
             op: Default::default(),
@@ -133,7 +137,7 @@ mod parity_tests {
     }
 
     #[test]
-    fn list_primers_agrees_across_targets() {
+    fn list_primers_is_unperturbed_by_its_target() {
         let (a, b) = both_faces(ViewerRequest::ListPrimers {
             target: Target::active(),
         });
