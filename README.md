@@ -78,28 +78,58 @@ Most verbs take a document target:
 The two flags conflict — `--in` with `--view` is rejected by the argument parser,
 and by the socket handler for callers that bypass it.
 
+A bare positional path is sugar for `--in`, so the two forms below are the same
+request:
+
+```bash
+seqforge info plasmid.gb              # sugar
+seqforge info --in plasmid.gb         # canonical
+seqforge info                         # the running viewer's active tab
+seqforge info --view 3                # a specific tab
+```
+
 **Reading a file needs nothing running:**
 
 ```bash
 seqforge info plasmid.gb
 seqforge translate plasmid.gb --start 0 --end 30
-seqforge orfs plasmid.gb
+seqforge orfs plasmid.gb --min-aa 30
+seqforge digest plasmid.gb --enzymes EcoRI,BamHI
 seqforge primers list plasmid.gb
-seqforge primers find plasmid.gb GCGTAC
+seqforge primers find plasmid.gb GCGTAC     # sugar for find-primer-sites
 
-# Targeted reads — the same verbs the GUI uses, pointed at a file instead of a tab.
 seqforge list-features --in plasmid.gb
 seqforge list-primers  --in plasmid.gb
 seqforge find GAATTC   --in plasmid.gb
 seqforge enzymes unique --in plasmid.gb
+seqforge find-primer-sites --oligo GCGTAC --in plasmid.gb
 
 seqforge tm GGGACCGCCT                # the exception: addresses no document at all
 ```
 
+`--in` is **headless by definition**: it resolves in this process against a
+workspace that exists for one request. Any view state the verb sets — the enzyme
+set, the cursor, the search — is scoped to that request and discarded with it.
+So `--in` never touches a running viewer, even if that viewer has the same file
+open; use `--view`, or `open` the file first, to act on the session's copy.
+
 Ids in a `--in` result (`FeatureId`, `PrimerId`) are **scoped to that one
-invocation**. They name entries in a workspace that exists only for the length of
+invocation** for the same reason. They name entries in a workspace that dies with
 the process, so an id read from a file cannot be passed as `--id` to a verb
 targeting a running session — mint it from that session instead (decision 12).
+
+### Verbs that name no document
+
+Not drift — these are exempt by design:
+
+| verb | why |
+|---|---|
+| `tm` | takes an oligo, not a document |
+| `open`, `new` | *create* a document rather than naming one |
+| `close`, `buffers` | act on the workspace, not a document |
+| `focus <handle>` | names a document by a loose handle — index, path, or basename — deliberately fuzzy because a human types it |
+| `assemble` | its inputs are a **recipe** (per-bin prepare specs, globs, `buffer:<n>`, combos), richer than a document target |
+| `save-as <path>` | the positional path is the *destination*; `--in`/`--view` still names the *source* |
 
 `primers find` seeds on the oligo's 3' end and extends, so a **cloning primer
 finds its site**: the reported footprint is the annealed region and the report

@@ -97,7 +97,10 @@ pub(super) fn apply_buffers(state: &mut AppState) -> Result<Option<ViewerRespons
         .enumerate()
         .filter_map(|(i, vid)| doc_info(state, vid, i + 1, active == Some(vid)))
         .collect();
-    Ok(Some(ViewerResponse::Buffers { docs }))
+    Ok(Some(ViewerResponse::Buffers {
+        count: docs.len(),
+        docs,
+    }))
 }
 
 fn doc_info(state: &AppState, vid: ViewId, index: usize, active: bool) -> Option<DocInfo> {
@@ -424,7 +427,7 @@ mod tests {
         let pb = open_temp(&mut state, "b", "TTTT"); // opened last → active
 
         let resp = apply_buffers(&mut state).unwrap();
-        let seqforge_core::ViewerResponse::Buffers { docs } = resp.unwrap() else {
+        let seqforge_core::ViewerResponse::Buffers { docs, .. } = resp.unwrap() else {
             panic!("expected Buffers");
         };
         assert_eq!(docs.len(), 2);

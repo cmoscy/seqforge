@@ -1,101 +1,14 @@
 use std::path::Path;
 
 use anyhow::Context;
-use seqforge_core::{Annotations, Strand, Topology, ViewerRequest, ViewerResponse};
+use seqforge_core::{ViewerRequest, ViewerResponse};
 
 #[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
-// ── File commands ─────────────────────────────────────────────────────────────
-
-pub fn run_info(path: &Path) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let info = serde_json::json!({
-        "kind": "document_info",
-        "name": doc.name,
-        "length": doc.len(),
-        "topology": format!("{:?}", doc.topology).to_lowercase(),
-        "features": doc.features.len(),
-        "primers": doc.primers.len(),
-        "path": path,
-    });
-    println!("{}", serde_json::to_string_pretty(&info)?);
-    Ok(())
-}
-
-/// Translate a (sub)range of a sequence file to protein — a local, read-only
-/// derivation that needs no running GUI. `start`/`end` are 0-based half-open
-/// (default: whole sequence); `strand` is `+`/`-`; `frame` is the GenBank
-/// codon_start convention (1, 2, or 3).
-pub fn run_translate(
-    path: &Path,
-    start: Option<usize>,
-    end: Option<usize>,
-    strand: &str,
-    frame: usize,
-) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let len = doc.len();
-    let start = start.unwrap_or(0);
-    let end = end.unwrap_or(len);
-    if start >= end || end > len {
-        anyhow::bail!("range {start}..{end} is invalid for a sequence of length {len}");
-    }
-    let strand = match strand.trim() {
-        "-" | "reverse" | "Reverse" => Strand::Reverse,
-        _ => Strand::Forward,
-    };
-    let protein = seqforge_bio::translate(&doc.sequence[start..end], strand, frame);
-    let out = serde_json::json!({
-        "kind": "translation",
-        "name": doc.name,
-        "start": start,
-        "end": end,
-        "strand": format!("{strand:?}").to_lowercase(),
-        "frame": frame,
-        "protein": protein,
-        "length": protein.chars().count(),
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
-/// Find open reading frames in a sequence file — a local analysis (no GUI).
-/// `min_aa` filters by protein length; forward + reverse frames by default.
-pub fn run_orfs(
-    path: &Path,
-    min_aa: usize,
-    stop_to_stop: bool,
-    forward_only: bool,
-) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let orfs = seqforge_bio::find_orfs(&doc.sequence, min_aa, !stop_to_stop, !forward_only);
-    let items: Vec<_> = orfs
-        .iter()
-        .map(|o| {
-            serde_json::json!({
-                "start": o.start,
-                "end": o.end,
-                "strand": format!("{:?}", o.strand).to_lowercase(),
-                "frame": o.frame,
-                "aa_len": o.aa_len,
-            })
-        })
-        .collect();
-    let out = serde_json::json!({
-        "kind": "orfs",
-        "name": doc.name,
-        "count": orfs.len(),
-        "orfs": items,
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
+// ── Local verbs ───────────────────────────────────────────────────────────────
 
 /// Melting temperature + GC of an oligo — a pure, local derivation (no running
 /// GUI, no file). Reaches the vendored seqfold engine through `seqforge-bio`'s
@@ -114,127 +27,6 @@ pub fn run_tm(oligo: &str) -> anyhow::Result<()> {
         "gc": seqforge_bio::gc(oligo),
         "hairpin_dg": hairpin.ok(),
         "self_dimer_dg": dimer.ok(),
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
-/// List the primers in a sequence file with derived attachment state + QC — the
-/// CLI face of the Inspector's `ListPrimers` projection (both go through the one
-/// `seqforge_bio::primer_infos`, so GUI and agent can't drift). No GUI needed.
-///
-/// Ids are session-scoped (minted here via `Annotations::from_parts`, exactly as
-/// on GUI load): stable within this invocation, not across runs.
-pub fn run_primers_list(path: &Path) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let circular = matches!(doc.topology, Topology::Circular);
-    // Mint ids + default names exactly like a GUI load (decision 9).
-    let ann = Annotations::from_parts(doc.features, doc.primers);
-    let primers: Vec<&seqforge_core::Primer> = ann.primers().collect();
-    let infos = seqforge_bio::primer_infos(&doc.sequence, &primers, circular);
-    let out = serde_json::json!({
-        "kind": "primers_list",
-        "count": infos.len(),
-        "primers": infos,
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
-/// Find binding sites for `oligo` on a sequence file (seed-and-extend, both
-/// strands, circular-aware). Ranges are 0-based half-open on the top strand,
-/// matching the `PrimerInfo.binding` projection. No GUI needed.
-pub fn run_primers_find(path: &Path, oligo: &str) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let circular = matches!(doc.topology, Topology::Circular);
-    let settings = seqforge_bio::AnnealSettings::default();
-    let sites = seqforge_bio::find_primer_binding_sites(oligo, &doc.sequence, circular, settings);
-    // `PrimerBinding` isn't `Serialize`; project each site to explicit JSON.
-    let sites_json: Vec<_> = sites
-        .iter()
-        .map(|s| {
-            // The footprint is the annealed region, so anything the oligo has
-            // 5' of it is a tail — a restriction site, an overhang, a homology
-            // arm. Report it explicitly: for a cloning primer the tail is the
-            // functional part, and it is invisible from the span alone.
-            // The footprint is the annealed span, so the tail is exactly what
-            // the oligo has left over — read it straight off, not from a
-            // decomposition, which would clamp an origin-crossing span to the
-            // sequence end and over-report the tail.
-            let tail_len = oligo.len().saturating_sub(s.span.len);
-            let tail = oligo[..tail_len].to_string();
-
-            // Wrap-aware Tm: `anneal_tm_span` gathers an origin-crossing
-            // duplex through `Span::linear_pieces` instead of truncating at the
-            // origin. This used to be open-coded here, which is why this path
-            // was right and `primer_infos` (the Inspector / `primers list` /
-            // socket projection) was wrong.
-            let tm = seqforge_bio::anneal_tm_span(oligo, s.span, s.strand, &doc.sequence)
-                .ok()
-                .map(|t| (t * 10.0).round() / 10.0);
-            serde_json::json!({
-                // Wrap-aware footprint as {start, len} (P5b: a site crossing the
-                // origin is one wrapping span, not an end > len overflow).
-                "start": s.span.start,
-                "len": s.span.len,
-                "strand": s.strand,
-                "mismatches": s.mismatches,
-                "three_prime_match": s.three_prime_match,
-                "anneal_len": s.span.len,
-                "tail": tail,
-                "tail_len": tail_len,
-                "anneal_tm": tm,
-            })
-        })
-        .collect();
-    let out = serde_json::json!({
-        "kind": "primers_find",
-        "oligo": oligo.to_uppercase(),
-        "count": sites_json.len(),
-        "sites": sites_json,
-    });
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
-}
-
-/// Digest a sequence file with restriction enzymes (Restriction Tier 2) — the
-/// **local** CLI face of `digest`. Loads the file, resolves the enzyme query
-/// (same grammar as the GUI: names or presets like `golden gate` / `type IIs`),
-/// and prints the virtual `FragmentInfo` set. Nothing is written — fragments are
-/// virtual (decision 25); the molecule's methylation defaults apply (Dam⁺ Dcm⁺).
-/// `--circular` overrides the file's topology.
-pub fn run_digest(path: &Path, enzymes: &[String], circular_override: bool) -> anyhow::Result<()> {
-    let doc =
-        seqforge_bio::load(path).with_context(|| format!("Failed to load {}", path.display()))?;
-    let circular = circular_override || matches!(doc.topology, Topology::Circular);
-    // Mint ids exactly like a GUI load so inherited features project consistently.
-    let ann = Annotations::from_parts(doc.features, doc.primers);
-
-    // `--enzymes` is repeatable, so join the occurrences; commas inside one
-    // occurrence are `parse_enzyme_query`'s job, not ours (it normalizes them
-    // for both presets and name lists).
-    let query = enzymes.join(" ");
-
-    // One implementation, shared with the viewer — see `digest_resolved`.
-    let (infos, warnings, names) = seqforge_bio::digest_projection(
-        &doc.sequence,
-        &doc.name,
-        circular,
-        &ann,
-        &query,
-        &seqforge_core::MethylContext::default(),
-    );
-    let names: Vec<String> = names.split_whitespace().map(str::to_string).collect();
-
-    let out = serde_json::json!({
-        "kind": "digest",
-        "name": doc.name,
-        "enzymes": names,
-        "count": infos.len(),
-        "fragments": infos,
-        "warnings": warnings,
     });
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
@@ -591,7 +383,7 @@ pub fn resolve_on_file(req: ViewerRequest) -> anyhow::Result<ViewerResponse> {
         .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?;
 
     ws.with_buffer(vid, |view, buf, ann| {
-        seqforge_core::dispatch(view, buf, ann, &bio, req)
+        seqforge_session::project::dispatch(view, buf, ann, &bio, req)
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -753,16 +545,76 @@ mod primer_tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../seqforge-bio/tests/fixtures/pUC19.gbk")
     }
 
-    // Smoke tests: exercise load → project → serialize end-to-end (projection
-    // correctness is covered by seqforge-bio/-core unit tests).
-    #[test]
-    fn primers_list_runs_on_fixture() {
-        assert!(super::run_primers_list(&puc19()).is_ok());
-    }
+    use seqforge_core::{Target, ViewerRequest, ViewerResponse};
 
     #[test]
-    fn primers_find_runs_on_fixture() {
-        assert!(super::run_primers_find(&puc19(), "GGGAAACGCCTGGTATCTTT").is_ok());
+    fn primers_list_runs_on_fixture() {
+        let resp = super::resolve_on_file(ViewerRequest::ListPrimers {
+            target: Target::path(puc19()),
+        })
+        .expect("fixture projects");
+        let ViewerResponse::Primers { count, primers } = resp else {
+            panic!("expected Primers, got {resp:?}")
+        };
+        assert_eq!(count, primers.len(), "envelope count must match the items");
+        assert!(count > 0, "the fixture has primers");
+    }
+
+    /// A cloning primer must surface its 5' tail. The footprint alone does not
+    /// say what the oligo adds, and for a tailed primer the tail *is* the point
+    /// — it is what makes the oligo usable as a PCR fragment source.
+    #[test]
+    fn find_primer_sites_reports_the_tail_separately() {
+        // An M13 anneal with an EcoRI site hung off the 5' end.
+        let resp = super::resolve_on_file(ViewerRequest::FindPrimerSites {
+            oligo: "GAATTCGTAAAACGACGGCCAGT".into(),
+            target: Target::path(puc19()),
+        })
+        .expect("fixture projects");
+        let ViewerResponse::PrimerSites {
+            oligo,
+            count,
+            sites,
+        } = resp
+        else {
+            panic!("expected PrimerSites, got {resp:?}")
+        };
+        assert_eq!(oligo, "GAATTCGTAAAACGACGGCCAGT");
+        assert_eq!(count, sites.len());
+        let site = sites.first().expect("the M13 site is found");
+        assert_eq!(
+            site.tail, "GAATTC",
+            "the tail is the added restriction site"
+        );
+        assert_eq!(site.tail_len, 6);
+        assert_eq!(
+            site.span.len,
+            "GTAAAACGACGGCCAGT".len(),
+            "the footprint is the annealed region, not the whole oligo"
+        );
+        assert!(site.anneal_tm.is_some(), "a clean anneal has a Tm");
+    }
+
+    /// `info` against a file reports the document, not the process.
+    #[test]
+    fn info_projects_the_document() {
+        let resp = super::resolve_on_file(ViewerRequest::Info {
+            input: None,
+            target: Target::path(puc19()),
+        })
+        .expect("fixture projects");
+        let ViewerResponse::DocumentInfo {
+            length,
+            topology,
+            path,
+            ..
+        } = resp
+        else {
+            panic!("expected DocumentInfo, got {resp:?}")
+        };
+        assert_eq!(length, 2686, "pUC19");
+        assert_eq!(topology, "circular");
+        assert!(path.is_some(), "a file-targeted read knows its path");
     }
 }
 
@@ -864,7 +716,9 @@ mod target_parity_tests {
         *req.target_mut().unwrap() = Target::view(vid);
         let by_view = ws
             .with_buffer(vid, |view, buf, ann| {
-                seqforge_core::dispatch(view, buf, ann, &bio, req)
+                // The same entry point the GUI uses — `core::dispatch` alone
+                // cannot serve the bio projections (decision 9).
+                seqforge_session::project::dispatch(view, buf, ann, &bio, req)
             })
             .expect("view resolves")
             .expect("dispatch succeeds");
@@ -935,6 +789,87 @@ mod target_parity_tests {
             dam_on_path, dam_off_path,
             "Dam must change the verdicts, or this test proves nothing"
         );
+    }
+
+    /// The verbs folded in from the CLI-local tier. Before, these could only
+    /// name a file, so "the same request against the active document" had no
+    /// expression and this test could not be written.
+    #[test]
+    fn info_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Info {
+            input: None,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(a.contains("\"kind\":\"document_info\""), "{a}");
+    }
+
+    #[test]
+    fn translate_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Translate {
+            start: Some(0),
+            end: Some(30),
+            strand: "+".into(),
+            frame: 1,
+            input: None,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(a.contains("\"protein\""), "{a}");
+    }
+
+    #[test]
+    fn orfs_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Orfs {
+            min_aa: 30,
+            stop_to_stop: false,
+            forward_only: false,
+            input: None,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(!a.contains("\"count\":0"), "the fixture has ORFs: {a}");
+    }
+
+    #[test]
+    fn find_primer_sites_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::FindPrimerSites {
+            oligo: "GAATTCGTAAAACGACGGCCAGT".into(),
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(a.contains("\"tail\":\"GAATTC\""), "{a}");
+    }
+
+    /// `digest` was the one verb declared twice — a CLI-local command and a
+    /// session command sharing a name via `#[command(skip)]`, taking their
+    /// enzymes differently. One verb now, so the two faces can be compared.
+    #[test]
+    fn digest_agrees_across_resolution_layers() {
+        let (a, b) = both_layers(ViewerRequest::Digest {
+            enzymes: vec!["EcoRI".into(), "BamHI".into()],
+            circular: false,
+            input: None,
+            target: Target::active(),
+        });
+        assert_eq!(a, b);
+        assert!(a.contains("\"kind\":\"fragments\""), "{a}");
+    }
+
+    /// `--circular` is expressible on both faces now. It used to be CLI-only,
+    /// so the socket could not ask the question at all.
+    #[test]
+    fn the_circular_override_is_honoured_by_both_layers() {
+        let cut = |circular| ViewerRequest::Digest {
+            enzymes: vec!["EcoRI".into()],
+            circular,
+            input: None,
+            target: Target::active(),
+        };
+        let (lin_path, lin_view) = both_layers(cut(false));
+        let (circ_path, circ_view) = both_layers(cut(true));
+        assert_eq!(lin_path, lin_view);
+        assert_eq!(circ_path, circ_view);
     }
 
     #[test]

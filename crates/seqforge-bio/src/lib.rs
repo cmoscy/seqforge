@@ -43,7 +43,7 @@ pub use primer::{
     AnnealSettings, AnnealedBase, AttachmentState, DesignError, EnzymeSpec, PcrError, PcrProduct,
     PrimerAttachment, PrimerBinding, PrimerDecomposition, PrimerQc, PrimerQcPlusAnneal, anneal_tm,
     anneal_tm_span, classify_attachment, decompose_primer, enzyme_catalog, enzyme_cuts,
-    find_primer_binding_sites, pcr, primer_infos, primer_qc, primer_qc_with_anneal,
+    find_primer_binding_sites, pcr, primer_infos, primer_qc, primer_qc_with_anneal, primer_sites,
     restriction_tail,
 };
 pub use search::{find_cut_sites, find_iupac_matches, methyl_states_for_sites};

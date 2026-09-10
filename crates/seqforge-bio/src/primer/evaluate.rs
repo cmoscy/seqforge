@@ -154,6 +154,47 @@ pub fn primer_infos(template: &[u8], primers: &[&Primer], circular: bool) -> Vec
         .collect()
 }
 
+/// Every place `oligo` anneals on `template`, projected to [`PrimerSiteInfo`].
+///
+/// `is_attached` marks the site coinciding with an authored footprint; an ad-hoc
+/// oligo has none. Extracted so an authored primer and a `find-primer-sites`
+/// query are scored by one implementation — in particular the wrap-aware
+/// [`anneal_tm_span`], which a parallel copy got wrong for origin-crossing sites.
+fn binding_sites(
+    oligo: &str,
+    template: &[u8],
+    circular: bool,
+    settings: AnnealSettings,
+    is_attached: impl Fn(&super::anneal::PrimerBinding) -> bool,
+) -> Vec<PrimerSiteInfo> {
+    find_primer_binding_sites(oligo, template, circular, settings)
+        .into_iter()
+        .map(|s| {
+            let tail_len = oligo.len().saturating_sub(s.span.len);
+            PrimerSiteInfo {
+                // Wrap-aware: a site crossing the origin is scored over the
+                // whole duplex, not truncated at the origin.
+                anneal_tm: anneal_tm_span(oligo, s.span, s.strand, template).ok(),
+                attached: is_attached(&s),
+                span: s.span,
+                strand: s.strand,
+                mismatches: s.mismatches,
+                tail: oligo[..tail_len].to_string(),
+                tail_len,
+            }
+        })
+        .collect()
+}
+
+/// Where an ad-hoc oligo anneals — the `find-primer-sites` projection.
+///
+/// No authored primer is involved, so no site is `attached`.
+pub fn primer_sites(oligo: &str, template: &[u8], circular: bool) -> Vec<PrimerSiteInfo> {
+    binding_sites(oligo, template, circular, AnnealSettings::default(), |_| {
+        false
+    })
+}
+
 fn primer_info(
     primer: &Primer,
     template: &[u8],
@@ -186,27 +227,14 @@ fn primer_info(
     // binding so a floating oligo still surfaces its candidate sites (drives the
     // Inspector site list + rescan). Each site is tagged `attached` when it
     // coincides with the authored footprint.
-    let sites: Vec<PrimerSiteInfo> =
-        find_primer_binding_sites(&primer.sequence, template, circular, settings)
-            .into_iter()
-            .map(|s| {
-                // One predicate for "is this the stored priming event", shared
-                // with `classify_attachment` — a second copy here would let the
-                // site list disagree with the state it is supposed to explain.
-                let attached = primer
-                    .binding
-                    .is_some_and(|b| super::anneal::same_site(&s, b, primer.strand));
-                PrimerSiteInfo {
-                    // Wrap-aware: a site crossing the origin is scored over the
-                    // whole duplex, not truncated at the origin.
-                    anneal_tm: anneal_tm_span(&primer.sequence, s.span, s.strand, template).ok(),
-                    span: s.span,
-                    strand: s.strand,
-                    mismatches: s.mismatches,
-                    attached,
-                }
-            })
-            .collect();
+    let sites = binding_sites(&primer.sequence, template, circular, settings, |s| {
+        // One predicate for "is this the stored priming event", shared with
+        // `classify_attachment` — a second copy here would let the site list
+        // disagree with the state it is supposed to explain.
+        primer
+            .binding
+            .is_some_and(|b| super::anneal::same_site(s, b, primer.strand))
+    });
     let off_targets = sites.iter().filter(|s| !s.attached).count();
 
     PrimerInfo {

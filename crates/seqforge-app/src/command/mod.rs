@@ -25,7 +25,7 @@ use std::sync::mpsc;
 
 use seqforge_core::{
     BioOps, DispatchError, FeatureId, Selection, ViewId, ViewSelection, ViewerRequest,
-    ViewerResponse, dispatch,
+    ViewerResponse,
 };
 
 use crate::app::AppState;
@@ -592,15 +592,22 @@ pub(super) fn dispatch_active<B: BioOps>(
     bio: &B,
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
+    // `seqforge_session::project::dispatch` extends `core::dispatch` with the
+    // projections that need `bio` (info/translate/orfs/find-primer-sites), and
+    // delegates everything else. Both shells go through it, so a read verb
+    // cannot be reachable from the CLI and not the GUI.
+    use seqforge_session::project::dispatch as project_dispatch;
     if let Some(vid) = req.target().and_then(|t| t.view) {
         return state
             .workspace
-            .with_buffer(vid, |view, buf, ann| dispatch(view, buf, ann, bio, req))
+            .with_buffer(vid, |view, buf, ann| {
+                project_dispatch(view, buf, ann, bio, req)
+            })
             .and_then(|inner| inner);
     }
     state
         .workspace
-        .with_active_buffer(|view, buf, ann| dispatch(view, buf, ann, bio, req))
+        .with_active_buffer(|view, buf, ann| project_dispatch(view, buf, ann, bio, req))
         .and_then(|inner| inner)
 }
 
@@ -1017,9 +1024,9 @@ pub fn apply<B: BioOps>(
                 name,
                 target,
             } => file::apply_pcr(state, target.view, fwd, rev, name),
-            ViewerRequest::Digest { query, target } => {
-                file::apply_digest(state, target.view, query)
-            }
+            ViewerRequest::Digest {
+                enzymes, target, ..
+            } => file::apply_digest(state, target.view, enzymes.join(" ")),
             ViewerRequest::Save { force, target } => edit::apply_save(state, target.view, force),
             ViewerRequest::SaveAs { path, target } => {
                 // `SaveAs` with an explicit path is a direct write; no dialog.
@@ -1071,7 +1078,7 @@ pub fn apply<B: BioOps>(
                 sedit::apply_circularize(&mut state.workspace, target.view, origin)
             }
 
-            // ── Read-scoped (GoTo/Find/Enzymes) → core::dispatch ──
+            // ── Read-scoped → the session's projection dispatch ──
             other => {
                 let sel_before = active_selection(state);
                 let resp = dispatch_active(state, bio, other)?;

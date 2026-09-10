@@ -164,6 +164,13 @@ pub enum EnzymeOp {
     Remove,
 }
 
+fn default_frame() -> usize {
+    1
+}
+fn default_min_aa() -> usize {
+    30
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Subcommand)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum ViewerRequest {
@@ -361,6 +368,90 @@ pub enum ViewerRequest {
         #[arg(long, default_value = "+")]
         #[serde(default = "default_strand")]
         strand: String,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
+    },
+    /// Summarize the document: name, length, topology, feature/primer counts.
+    ///
+    /// A projection over `bio`, so it is served by the session layer rather
+    /// than [`dispatch`] (decision 9 keeps `core` free of a `bio` dependency).
+    Info {
+        /// Sugar: a bare positional path, folded into the target by
+        /// [`ViewerRequest::fold_positional_target`] before anything reads it.
+        /// Never on the wire — the socket only ever sees `path`.
+        #[arg(value_name = "PATH")]
+        #[serde(skip)]
+        input: Option<PathBuf>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
+    },
+    /// Translate a range to protein. `start`/`end` are 0-based half-open
+    /// (default: the whole sequence); `frame` is the GenBank `codon_start`
+    /// convention (1, 2, or 3).
+    Translate {
+        /// 0-based start of the range (default: 0).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<usize>,
+        /// 0-based exclusive end of the range (default: sequence length).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<usize>,
+        /// Strand: `+` (forward) or `-` (reverse complement).
+        #[arg(long, default_value = "+")]
+        #[serde(default = "default_strand")]
+        strand: String,
+        /// Reading frame as GenBank codon_start: 1, 2, or 3.
+        #[arg(long, default_value_t = 1)]
+        #[serde(default = "default_frame")]
+        frame: usize,
+        /// Sugar: a bare positional path, folded into the target by
+        /// [`ViewerRequest::fold_positional_target`] before anything reads it.
+        /// Never on the wire — the socket only ever sees `path`.
+        #[arg(value_name = "PATH")]
+        #[serde(skip)]
+        input: Option<PathBuf>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
+    },
+    /// Find open reading frames. `min_aa` filters by protein length; forward
+    /// and reverse frames are scanned unless `forward_only`.
+    Orfs {
+        /// Minimum ORF length in amino acids.
+        #[arg(long, default_value_t = 30)]
+        #[serde(default = "default_min_aa")]
+        min_aa: usize,
+        /// Report stop-to-stop ORFs instead of Met-to-stop.
+        #[arg(long)]
+        #[serde(default)]
+        stop_to_stop: bool,
+        /// Only scan the forward strand.
+        #[arg(long)]
+        #[serde(default)]
+        forward_only: bool,
+        /// Sugar: a bare positional path, folded into the target by
+        /// [`ViewerRequest::fold_positional_target`] before anything reads it.
+        /// Never on the wire — the socket only ever sees `path`.
+        #[arg(value_name = "PATH")]
+        #[serde(skip)]
+        input: Option<PathBuf>,
+        #[command(flatten)]
+        #[serde(flatten)]
+        target: Target,
+    },
+    /// Find where an ad-hoc oligo anneals (seed-and-extend, both strands,
+    /// circular-aware). Unlike `list-primers` this needs no authored primer —
+    /// the oligo is supplied inline, which is what makes it a design tool.
+    ///
+    /// The nested `primers find <PATH> <OLIGO>` form is sugar for this.
+    #[command(name = "find-primer-sites")]
+    FindPrimerSites {
+        /// The oligo sequence, 5'→3'.
+        #[arg(long)]
+        oligo: String,
         #[command(flatten)]
         #[serde(flatten)]
         target: Target,
@@ -563,16 +654,28 @@ pub enum ViewerRequest {
     /// filters methylation-blocked cut sites. `query` uses the same enzyme
     /// grammar as `enzymes` (names, `golden gate`, `type IIs`, …).
     ///
-    /// `#[command(skip)]`: the CLI `digest` subcommand is the **local** file
-    /// command (`seqforge digest <file> --enzymes …`, prints fragments); this
-    /// in-session variant is reached via the GUI and the JSON-RPC socket (serde),
-    /// so it must not also claim the CLI `digest` name.
-    #[command(skip)]
+    /// One verb for both faces. This used to carry `#[command(skip)]` so a
+    /// separate CLI-local `digest <file> --enzymes …` could own the name; they
+    /// took their enzymes differently and drifted. The enzyme input is now
+    /// `--enzymes` everywhere — the same grammar as the `enzymes` verb — and
+    /// the positional slot belongs to the document (`Target`'s path sugar).
     Digest {
-        /// Enzyme query (names and/or preset keywords), e.g. `EcoRI BamHI`.
-        #[arg(default_value = "")]
-        query: String,
-        /// The **source** view to digest (defaults to the active view).
+        /// Enzyme names or presets (comma- or space-separated; repeatable),
+        /// e.g. `--enzymes EcoRI,BamHI` or `--enzymes "golden gate"`.
+        #[arg(short, long)]
+        #[serde(default, rename = "query")]
+        enzymes: Vec<String>,
+        /// Treat the molecule as circular (overrides the document's topology).
+        #[arg(long)]
+        #[serde(default)]
+        circular: bool,
+        /// The **source** document to digest (defaults to the active view).
+        /// Sugar: a bare positional path, folded into the target by
+        /// [`ViewerRequest::fold_positional_target`] before anything reads it.
+        /// Never on the wire — the socket only ever sees `path`.
+        #[arg(value_name = "PATH")]
+        #[serde(skip)]
+        input: Option<PathBuf>,
         #[command(flatten)]
         #[serde(flatten)]
         target: Target,
@@ -711,6 +814,28 @@ fn default_expand() -> String {
 }
 
 impl ViewerRequest {
+    /// Fold a sugar positional path into the target.
+    ///
+    /// `seqforge info x.gb` and `seqforge info --in x.gb` must build the same
+    /// value; this is where they converge, once, right after parsing. An
+    /// explicit `--in`/`--view` wins, so the two can never disagree silently.
+    pub fn fold_positional_target(&mut self) {
+        let input = match self {
+            ViewerRequest::Info { input, .. }
+            | ViewerRequest::Translate { input, .. }
+            | ViewerRequest::Orfs { input, .. }
+            | ViewerRequest::Digest { input, .. } => input.take(),
+            _ => None,
+        };
+        if let Some(path) = input {
+            if let Some(t) = self.target_mut() {
+                if t.view.is_none() && t.path.is_none() {
+                    *t = Target::path(path);
+                }
+            }
+        }
+    }
+
     /// The request's document [`Target`], if it addresses one.
     ///
     /// `None` for workspace-scoped variants (`Open` / `Close` / `Buffers` /
@@ -730,6 +855,10 @@ impl ViewerRequest {
             ViewerRequest::Copy { target, .. } => Some(target),
             ViewerRequest::Paste { target, .. } => Some(target),
             ViewerRequest::AddFeature { target, .. } => Some(target),
+            ViewerRequest::Info { target, .. } => Some(target),
+            ViewerRequest::Translate { target, .. } => Some(target),
+            ViewerRequest::Orfs { target, .. } => Some(target),
+            ViewerRequest::FindPrimerSites { target, .. } => Some(target),
             ViewerRequest::ListFeatures { target, .. } => Some(target),
             ViewerRequest::ListPrimers { target, .. } => Some(target),
             ViewerRequest::RemoveFeature { target, .. } => Some(target),
@@ -774,6 +903,10 @@ impl ViewerRequest {
             ViewerRequest::Copy { target, .. } => Some(target),
             ViewerRequest::Paste { target, .. } => Some(target),
             ViewerRequest::AddFeature { target, .. } => Some(target),
+            ViewerRequest::Info { target, .. } => Some(target),
+            ViewerRequest::Translate { target, .. } => Some(target),
+            ViewerRequest::Orfs { target, .. } => Some(target),
+            ViewerRequest::FindPrimerSites { target, .. } => Some(target),
             ViewerRequest::ListFeatures { target, .. } => Some(target),
             ViewerRequest::ListPrimers { target, .. } => Some(target),
             ViewerRequest::RemoveFeature { target, .. } => Some(target),
@@ -822,7 +955,7 @@ pub enum ViewerResponse {
     /// Open or Close succeeded.
     Ok,
     /// `buffers` — the open documents in tab order.
-    Buffers { docs: Vec<DocInfo> },
+    Buffers { count: usize, docs: Vec<DocInfo> },
     /// GoTo — 1-based position the viewer navigated to.
     Navigated { position: usize },
     /// Find — all matching hits (empty when the pattern was cleared).
@@ -847,22 +980,90 @@ pub enum ViewerResponse {
     /// update/remove), and the buffer length after the add.
     PrimerAdded { id: PrimerId, len: usize },
     /// `ListFeatures` — every feature on the buffer, in definition order.
-    Features { features: Vec<FeatureInfo> },
+    ///
+    /// `count` mirrors `SearchResults`/`CutSites`: every list response carries
+    /// one, so a caller can read the size without walking the items.
+    Features {
+        count: usize,
+        features: Vec<FeatureInfo>,
+    },
     /// `ListPrimers` — every primer on the buffer (definition order) with its
     /// derived attachment state + QC.
-    Primers { primers: Vec<PrimerInfo> },
+    Primers {
+        count: usize,
+        primers: Vec<PrimerInfo>,
+    },
     /// `Digest` — the virtual fragment set over the source, plus any methylation
     /// warnings. A projection (nothing materialized); the Fragments view and
     /// CLI/agent read the same shape.
     Fragments {
+        /// The digested document.
+        name: String,
+        /// The **canonical** resolved enzyme query — what a preset like
+        /// `golden gate` expanded to. Worth reporting because the request only
+        /// records what the caller typed, and the GUI persists this same string
+        /// as the Fragments view's title.
+        enzymes: String,
+        count: usize,
         fragments: Vec<FragmentInfo>,
         warnings: Vec<String>,
     },
+    /// `Info` — the document summary. `path` is `None` for a scratch buffer.
+    DocumentInfo {
+        name: String,
+        length: usize,
+        topology: String,
+        features: usize,
+        primers: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// `Translate` — the protein for one range/strand/frame.
+    Translation {
+        name: String,
+        start: usize,
+        end: usize,
+        strand: String,
+        frame: usize,
+        protein: String,
+        /// Residue count (the protein's length, not the nucleotide range's).
+        length: usize,
+    },
+    /// `Orfs` — every ORF passing `min_aa`, in position order.
+    Orfs {
+        name: String,
+        count: usize,
+        orfs: Vec<OrfInfo>,
+    },
+    /// `FindPrimerSites` — every place the oligo anneals.
+    PrimerSites {
+        /// The queried oligo, upper-cased.
+        oligo: String,
+        count: usize,
+        sites: Vec<PrimerSiteInfo>,
+    },
     /// `Assemble` — the assembled product(s), in run order.
     Products {
+        count: usize,
         products: Vec<ProductInfo>,
         warnings: Vec<String>,
     },
+}
+
+/// One open reading frame, projected by value.
+///
+/// Mirrors `seqforge_bio::Orf`, which `core` cannot name (decision 9 forbids
+/// `core ──► bio`). The session layer converts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrfInfo {
+    /// 0-based half-open range on the forward strand.
+    pub start: usize,
+    pub end: usize,
+    pub strand: Strand,
+    /// Reading frame within the oriented strand: 1, 2, or 3.
+    pub frame: usize,
+    /// Amino-acid count.
+    pub aa_len: usize,
 }
 
 /// One assembly product, projected for display / CLI. Unlike a fragment, a
@@ -965,6 +1166,16 @@ pub struct PrimerSiteInfo {
     /// This found site coincides with the primer's authored `binding` (the
     /// currently-attached footprint). At most one site is `attached`.
     pub attached: bool,
+    /// Whatever the oligo has 5' of the footprint — a restriction site, an
+    /// overhang, a homology arm. For a cloning primer this is the functional
+    /// part, and it is invisible from the span alone, so it is reported
+    /// explicitly rather than left to be derived.
+    ///
+    /// Read straight off the oligo (`len - footprint`), never from a
+    /// decomposition, which would clamp an origin-crossing span to the sequence
+    /// end and over-report the tail.
+    pub tail: String,
+    pub tail_len: usize,
 }
 
 /// A primer summary for `ListPrimers` — a by-value projection (mirrors
@@ -1153,6 +1364,16 @@ pub fn dispatch<B: BioOps>(
         // never reach `core::dispatch`. Listed explicitly so adding a future
         // write-op forces a compile error here rather than silently falling
         // through.
+        // Projections over `bio` — served by `seqforge_session::dispatch`
+        // before this function is reached. `core` cannot compute them itself
+        // without depending on `bio`, which decision 9 forbids.
+        ViewerRequest::Info { .. }
+        | ViewerRequest::Translate { .. }
+        | ViewerRequest::Orfs { .. }
+        | ViewerRequest::FindPrimerSites { .. } => Err(DispatchError::Unimplemented(
+            "a bio projection (it needs the session layer)",
+        )),
+
         ViewerRequest::Insert { .. }
         | ViewerRequest::Delete { .. }
         | ViewerRequest::Replace { .. }
@@ -1242,7 +1463,7 @@ pub fn dispatch<B: BioOps>(
         // Read-op: features are addressed by id, so surface the live id table
         // for CLI/agent callers. Rides `dispatch` (read-only, no history).
         ViewerRequest::ListFeatures { target: _ } => {
-            let features = annotations
+            let features: Vec<FeatureInfo> = annotations
                 .iter()
                 .map(|f| FeatureInfo {
                     id: f.id,
@@ -1254,7 +1475,10 @@ pub fn dispatch<B: BioOps>(
                     strand: f.strand,
                 })
                 .collect();
-            Ok(ViewerResponse::Features { features })
+            Ok(ViewerResponse::Features {
+                count: features.len(),
+                features,
+            })
         }
 
         // Read-op: derived primer projection (attachment state + QC), routed
@@ -1264,7 +1488,10 @@ pub fn dispatch<B: BioOps>(
             let circular = buffer.is_circular();
             let primers: Vec<&Primer> = annotations.primers().collect();
             let infos = bio.primer_infos(&buffer.text, &primers, circular);
-            Ok(ViewerResponse::Primers { primers: infos })
+            Ok(ViewerResponse::Primers {
+                count: infos.len(),
+                primers: infos,
+            })
         }
 
         ViewerRequest::Enzymes {
@@ -1765,7 +1992,7 @@ mod tests {
         )
         .unwrap();
         match resp {
-            ViewerResponse::Features { features } => {
+            ViewerResponse::Features { features, .. } => {
                 assert_eq!(features.len(), 1);
                 assert_eq!(features[0].id, minted);
                 assert_eq!(features[0].kind, "CDS");
@@ -1824,7 +2051,7 @@ mod tests {
         )
         .unwrap();
         match resp {
-            ViewerResponse::Primers { primers } => {
+            ViewerResponse::Primers { primers, .. } => {
                 assert_eq!(primers.len(), 1);
                 assert_eq!(primers[0].id, minted);
                 assert_eq!(primers[0].name, "p1");

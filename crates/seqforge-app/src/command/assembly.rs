@@ -358,6 +358,7 @@ fn run_and_materialize(
     if total == 0 {
         state.toasts.warning("Assemble: no product produced");
         return Ok(Some(ViewerResponse::Products {
+            count: 0,
             products: Vec::new(),
             warnings: result.warnings,
         }));
@@ -423,6 +424,7 @@ fn run_and_materialize(
         ));
     }
     Ok(Some(ViewerResponse::Products {
+        count: infos.len(),
         products: infos,
         warnings: result.warnings,
     }))

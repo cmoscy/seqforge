@@ -26,6 +26,7 @@ pub mod bases;
 pub mod bio;
 pub mod edit;
 pub mod host;
+pub mod project;
 pub mod resolver;
 pub mod workspace;
 

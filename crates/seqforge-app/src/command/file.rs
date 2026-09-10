@@ -243,7 +243,7 @@ pub(super) fn apply_digest(
     let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
 
     // Read-only over the source: resolve enzymes + compute the projection.
-    let (source_buffer, canonical, infos, warnings) =
+    let (source_buffer, doc_name, canonical, infos, warnings) =
         state.workspace.with_buffer(vid, |v, buf, ann| {
             let methyl = v.methylation;
             let (infos, warnings, canonical) = seqforge_bio::digest_projection(
@@ -254,13 +254,13 @@ pub(super) fn apply_digest(
                 &query,
                 &methyl,
             );
-            (v.buffer_id, canonical, infos, warnings)
+            (v.buffer_id, buf.name.clone(), canonical, infos, warnings)
         })?;
 
     // Open a Fragments view onto the SOURCE buffer (not a new buffer).
     let view_id = state.workspace.add_view(source_buffer, ViewKind::Fragments);
     if let Some(v) = state.workspace.view_mut(view_id) {
-        v.fragments_query = Some(canonical);
+        v.fragments_query = Some(canonical.clone());
     }
     layout::place_view_tab(state, view_id);
     layout::ensure_welcome_invariant(state);
@@ -272,6 +272,9 @@ pub(super) fn apply_digest(
     }
 
     Ok(Some(ViewerResponse::Fragments {
+        name: doc_name,
+        enzymes: canonical,
+        count: infos.len(),
         fragments: infos,
         warnings,
     }))

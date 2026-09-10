@@ -130,8 +130,21 @@ against the pre-target protocol parses unchanged.
 - **`view` and `path` together** is rejected. The CLI's argument parser
   catches it first (`--in` conflicts with `--view`); a caller that speaks
   JSON-RPC directly gets a `DispatchError` from the target resolver.
+- **`path` over the socket is refused.** `--in` means *headless*: it resolves in
+  the calling process against a workspace that lives for one request, which is
+  what the CLI already does (a path target never reaches the socket). A `path`
+  arriving at a running session is therefore a category error — it asks the
+  session to act on a document it does not have. `open` the file first, then
+  target the resulting view.
 - **`path` on a write method** returns `Unimplemented` — writing through a
   file target is not yet supported, and the file is left untouched.
+
+### One rule for GUI updates
+
+A request changes what is on screen **exactly when its target resolves to a live
+view** — the active one, or the `view` named. That is a property of the target,
+not of the verb. A `path` target never has a view, so it never updates anything;
+that is the whole of the rule.
 
 Which document a request names is part of what the request *means*, not
 transport configuration — unlike `SEQFORGE_SOCKET`, which only decides

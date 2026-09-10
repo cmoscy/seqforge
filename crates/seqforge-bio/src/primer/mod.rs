@@ -36,7 +36,7 @@ pub use anneal::{
 pub use design::{DesignError, EnzymeSpec, enzyme_catalog, enzyme_cuts, restriction_tail};
 pub use evaluate::{
     PrimerQc, PrimerQcPlusAnneal, anneal_tm, anneal_tm_span, primer_infos, primer_qc,
-    primer_qc_with_anneal,
+    primer_qc_with_anneal, primer_sites,
 };
 pub use pcr::{PcrError, PcrProduct, pcr};
 

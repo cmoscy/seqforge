@@ -164,7 +164,9 @@ impl InspectorState {
             {
                 pending.push((
                     AppCommand::Viewer(seqforge_core::ViewerRequest::Digest {
-                        query: self.active_enzymes.join(" "),
+                        enzymes: self.active_enzymes.clone(),
+                        circular: false,
+                        input: None,
                         target: Target::active(),
                     }),
                     None,
