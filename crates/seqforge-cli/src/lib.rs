@@ -223,8 +223,10 @@ pub fn run_digest(path: &Path, enzymes: &[String], circular_override: bool) -> a
     // Mint ids exactly like a GUI load so inherited features project consistently.
     let ann = Annotations::from_parts(doc.features, doc.primers);
 
-    // Accept comma- or space-separated enzyme lists (`--enzymes EcoRI,BamHI`).
-    let query = enzymes.join(" ").replace(',', " ");
+    // `--enzymes` is repeatable, so join the occurrences; commas inside one
+    // occurrence are `parse_enzyme_query`'s job, not ours (it normalizes them
+    // for both presets and name lists).
+    let query = enzymes.join(" ");
     let parsed = seqforge_bio::parse_enzyme_query(&query);
     let names = seqforge_bio::resolve_query_names(&parsed, &doc.sequence, circular);
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();

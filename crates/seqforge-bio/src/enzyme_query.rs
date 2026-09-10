@@ -57,11 +57,15 @@ pub fn parse_enzyme_query(input: &str) -> EnzymeQuery {
     }
     let normalized = trimmed.to_ascii_lowercase();
     // Normalize separators to a single space so `unique-and-dual`,
-    // `unique+dual`, `unique  and  dual` all collapse to one form.
+    // `unique+dual`, `unique, dual`, `unique  and  dual` all collapse to one
+    // form. The comma matters: it is the separator users actually type for
+    // enzyme *lists* (`EcoRI,BamHI`), so it reaches this function in preset
+    // position too, and leaving it in made `unique, dual` fall through to the
+    // name branch and resolve to nothing.
     let collapsed: String = normalized
         .chars()
         .map(|c| match c {
-            '-' | '_' | '+' => ' ',
+            '-' | '_' | '+' | ',' => ' ',
             c => c,
         })
         .collect();
@@ -171,6 +175,29 @@ mod tests {
         assert_eq!(parse_enzyme_query("   "), EnzymeQuery::Clear);
         assert_eq!(parse_enzyme_query("none"), EnzymeQuery::Clear);
         assert_eq!(parse_enzyme_query("CLEAR"), EnzymeQuery::Clear);
+    }
+
+    /// A comma is the separator users type for enzyme lists, so it also arrives
+    /// in preset position. It used to survive normalization and drop the query
+    /// into the name branch, where neither word is an enzyme — an empty result
+    /// with no error. `seqforge-cli` hid this by pre-replacing commas before
+    /// calling in; the socket had no such workaround, so the same string gave
+    /// different answers on the two faces.
+    #[test]
+    fn commas_normalize_like_other_separators_in_a_preset() {
+        let expected = EnzymeQuery::Preset(EnzymePreset::UniqueOrDual);
+        assert_eq!(parse_enzyme_query("unique, dual"), expected);
+        assert_eq!(parse_enzyme_query("unique,dual"), expected);
+        assert_eq!(parse_enzyme_query("unique, and, dual"), expected);
+    }
+
+    /// The comma must still separate a plain enzyme list.
+    #[test]
+    fn commas_still_split_enzyme_names() {
+        assert_eq!(
+            parse_enzyme_query("EcoRI,BamHI"),
+            EnzymeQuery::Names(vec!["EcoRI".into(), "BamHI".into()])
+        );
     }
 
     #[test]
