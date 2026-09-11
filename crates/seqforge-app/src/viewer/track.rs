@@ -387,20 +387,20 @@ pub(crate) fn build_block_layouts(
 /// band. Detached primers (`binding = None`) draw nowhere and are skipped.
 /// Returns `(primer_idx → row, n_rows)`; `primer_idx` is the positional index
 /// into `Annotations::primers()`.
-/// How many tail bases the primer track draws before collapsing to a `+N` stub.
-/// Shared with the paint pass so layout reserves exactly what gets drawn.
-pub(crate) const PRIMER_TAIL_CAP: usize = 8;
-
 /// Columns a primer's 5' tail occupies on the row, drawn inline beside the body.
-/// `None` when the oligo has no tail. Capped like the paint pass, plus one
-/// column for the `+N` stub when it overflows.
+/// `0` when the oligo has no tail.
+///
+/// The **whole** tail, uncapped. This used to cap at 8 bases plus a `+N` stub,
+/// which hid the bases that matter most: a tail is the part of the oligo you
+/// cannot read off the template — a restriction site, an overhang, a homology
+/// arm — and for a cloning primer it is the functional half. The paint pass
+/// clips at the block edge instead, so a tail with nowhere to go degrades by
+/// running out of room rather than by lying about its length.
+///
+/// Shared with the paint pass so layout reserves exactly what gets drawn.
 pub(crate) fn primer_tail_cols(p: &seqforge_core::Primer) -> usize {
     let Some(b) = p.binding else { return 0 };
-    let tail = p.sequence.len().saturating_sub(b.len);
-    if tail == 0 {
-        return 0;
-    }
-    tail.min(PRIMER_TAIL_CAP) + usize::from(tail > PRIMER_TAIL_CAP)
+    p.sequence.len().saturating_sub(b.len)
 }
 
 fn stack_primers(
@@ -1913,6 +1913,35 @@ mod tests {
         // 4 ≤ 5); (10,20)→row 0 (ends at 10 ≤ 10).
         assert_eq!(rows, vec![0, 1, 0, 1]);
         assert_eq!(greedy_stack(&[]), (vec![], 0), "empty input → no rows");
+    }
+
+    /// Layout reserves the **whole** tail, not a capped stub.
+    ///
+    /// This is the half of "show every tail base" that is testable without a
+    /// renderer: if the reservation and the paint pass disagree, a long tail
+    /// silently overlaps the primer `greedy_stack` packed beside it. The cap
+    /// used to be 8 + 1 column for the `+N` stub.
+    #[test]
+    fn primer_tail_cols_reserves_the_whole_tail() {
+        let tailed = |oligo: &str, anneal: usize| seqforge_core::Primer {
+            id: seqforge_core::PrimerId(1),
+            name: "p".into(),
+            sequence: oligo.into(),
+            binding: Some(seqforge_core::Span::new(100, anneal)),
+            strand: Strand::Forward,
+            qualifiers: Default::default(),
+        };
+
+        // 20 nt oligo annealing over 6 → a 14 nt tail, all of it reserved.
+        assert_eq!(primer_tail_cols(&tailed("AAAAAAAAAAAAAACCCCCC", 6)), 14);
+        // Well past the old cap of 8, and not 8+1.
+        assert_ne!(primer_tail_cols(&tailed("AAAAAAAAAAAAAACCCCCC", 6)), 9);
+        // No tail → nothing reserved.
+        assert_eq!(primer_tail_cols(&tailed("CCCCCC", 6)), 0);
+        // A detached oligo draws nowhere.
+        let mut floating = tailed("AAAACCCCCC", 6);
+        floating.binding = None;
+        assert_eq!(primer_tail_cols(&floating), 0);
     }
 
     /// The packing predicate is `end <= start`, so *touching* ranges are not

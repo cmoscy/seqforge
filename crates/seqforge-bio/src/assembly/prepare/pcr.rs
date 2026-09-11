@@ -44,6 +44,11 @@ pub(super) fn prepare(src: &ResolvedSource, fwd: &str, rev: &str) -> Result<Vec<
         prod.bytes.len(),
     );
 
+    // The reaction's own primers still carry the footprint they had on the
+    // template, where their 5' tails hung off untemplated. Here the tails *are*
+    // the product's ends, so each oligo pairs over its whole length.
+    prod.reanchor_primers(&mut prod_ann);
+
     let len = prod.bytes.len();
     let product_slice = SeqSlice {
         bytes: prod.bytes,

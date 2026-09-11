@@ -80,6 +80,14 @@
 >   detail line stays the plain full oligo — the track is where annealed-vs-tail
 >   is expressed, and a second vocabulary in the panel only competes with it.
 >
+> **Superseded:** the `+N` stub is gone. Bases mode now letters the **whole**
+> tail — capping at 8 hid precisely the bases a tail exists to carry, and a count
+> is not a sequence. Layout (`primer_tail_cols`) reserves the full width so
+> stacking stays correct, and the paint pass clips to the block's columns, so a
+> tail with nowhere to go runs out of room rather than overdrawing the margin
+> labels. Arrow mode keeps its length label: no base letters are drawn anywhere
+> in that mode.
+>
 > Together these make `assemble '<template>@pcr:F..R' --out …` a real fragment
 > source: the 6H8 library now builds all ten of its fragments that way and
 > asserts each reproduces its design part byte-for-byte.
@@ -671,14 +679,28 @@ it had on the original template. Both share the 3' anchor, so they are one
 priming event; `same_site` compared whole spans and called them two, flagging a
 correct primer as `Drifted` with a phantom off-target.
 
-**Consumers should re-anchor on the product.** `PrimerInfo::tail` is derived from
-the stored `binding`, so an inherited footprint makes a product report a tail it
-does not have — all 49 bases pair there — and every viewer then draws one. The
-binding is the annotation's claim about *this* molecule, so a consumer that keeps
-the primers should rescan them against the product (`rescan-primer`, or
-`primers find` + re-annotate) and let the reaction record live where reaction
-facts belong. The 6H8 build does exactly that: `run_pcr.py` re-anchors each
-amplicon's pair, and which oligos made it stays in `01_pcr_reactions.csv`.
+**PCR re-anchors on the product (landed).** This was previously written as advice
+to consumers, and no code took it: both appliers inherited the template footprint
+through `transport`, which translates coordinates but never recomputes them. The
+binding is the annotation's claim about *this* molecule, and `PrimerInfo::tail`
+is derived from it, so a product reported a tail it does not have — all 49 bases
+pair there — and every viewer drew one.
+
+`PcrProduct` now carries a `PrimerReanchor { inherited, annealed }` per reaction
+primer, and `reanchor_primers` rewrites the bindings after `transport::place`;
+both appliers (`command::file::apply_pcr`, `assembly::prepare::pcr`) call it.
+The answer is **geometry, not search** — `pcr` writes the product *from* the
+oligos, so `fwd = 0..fwd.len()` and `rev = len-rev.len()..len` are exact by
+construction, a mutagenic primer's own mismatched bases included. Searching would
+have picked a global best site and could re-anchor to the wrong copy on a product
+containing repeats. Matching is by `(binding, strand)` because `place` re-mints
+ids; interior primers keep their translated footprints, correctly.
+
+Why it went unseen: `same_site` compares 3' anchors, so the stale short footprint
+read `Confirmed`, and the Inspector offers Rescan only when the state is *not*
+Confirmed — the primer that most needed re-anchoring was the one never offered
+it. The 6H8 build's `run_pcr.py` workaround is now redundant: with it removed,
+every product's `primer_bind` span is identical.
 
 ## Consistency with the implemented model (fixes the audit found)
 

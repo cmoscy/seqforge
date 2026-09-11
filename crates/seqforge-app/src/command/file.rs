@@ -185,6 +185,11 @@ pub(super) fn apply_pcr(
             prod.bytes.len(),
         );
 
+        // The reaction's own primers still carry the footprint they had on the
+        // template, where their 5' tails hung off untemplated. Here the tails
+        // *are* the product's ends, so each oligo pairs over its whole length.
+        prod.reanchor_primers(&mut prod_ann);
+
         // No whole-product marker feature: the inherited amplicon features
         // already carry their own extract-stamped lineage, and product-level
         // provenance is the recipe's job (the composed Lineage map), not a

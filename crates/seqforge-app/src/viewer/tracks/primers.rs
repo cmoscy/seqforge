@@ -251,8 +251,16 @@ fn paint_band(
         // reserves `n_rows × primer_row_h` and nothing more, so a raised ribbon
         // on the top row lands in the ruler. Keeping it on-row also means a tail
         // can never collide with a neighbouring primer that `stack_primers`
-        // packed beside it. Drawn only in the block holding the 5' end; long
-        // tails are capped with a `+N` stub.
+        // packed beside it. Drawn only in the block holding the 5' end.
+        //
+        // Every tail base is lettered. This used to cap at 8 and collapse the
+        // rest into a `+N` stub, which hid exactly the bases a tail exists to
+        // carry — a restriction site, an overhang, a homology arm. A tail runs
+        // *outward* from the 5' edge and a tailed primer usually sits at
+        // position 0, so an uncapped tail would reach into the margin where the
+        // lane labels live; the painter is clipped to the block's columns
+        // instead, so it degrades by running out of room rather than by
+        // overdrawing or by lying about its length.
         let tail = decomp.map(|d| d.tail.as_slice()).unwrap_or(&[]);
         let five_prime_in_block = if reverse {
             binding.start + binding.len <= block_end
@@ -260,12 +268,19 @@ fn paint_band(
             binding.start >= block_start
         };
         if !tail.is_empty() && five_prime_in_block {
-            let cap = crate::viewer::track::PRIMER_TAIL_CAP;
-            let shown = tail.len().min(cap);
+            let shown = tail.len();
             let edge_x = if reverse { body.max.x } else { body.min.x };
             let dir = if reverse { 1.0 } else { -1.0 };
-            let stub = if tail.len() > cap { 1.0 } else { 0.0 };
-            let span_w = dir * (shown as f32 + stub) * char_width;
+            let span_w = dir * shown as f32 * char_width;
+
+            // Keep the tail inside the block's own columns. Without this an
+            // uncapped tail paints over the left margin's 5'/3' lane labels.
+            let cols = (block_end - block_start) as f32;
+            let painter =
+                &painter.with_clip_rect(painter.clip_rect().intersect(Rect::from_min_max(
+                    Pos2::new(geom.seq_x0, painter.clip_rect().min.y),
+                    Pos2::new(geom.seq_x0 + cols * char_width, painter.clip_rect().max.y),
+                )));
 
             // Selected-emphasis pass (Phase 1.5e): one wash over body + tail so
             // the whole oligo reads as a single selected object.
@@ -297,16 +312,6 @@ fn paint_band(
                         Align2::CENTER_CENTER,
                         (base as char).to_string(),
                         style.font_id.clone(),
-                        tail_color,
-                    );
-                }
-                if tail.len() > cap {
-                    let cx = edge_x + dir * (shown as f32 + 0.5) * char_width;
-                    painter.text(
-                        Pos2::new(cx, mid_y),
-                        Align2::CENTER_CENTER,
-                        format!("+{}", tail.len() - cap),
-                        style.small_font.clone(),
                         tail_color,
                     );
                 }

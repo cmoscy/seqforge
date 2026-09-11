@@ -27,10 +27,31 @@
 //!
 //! A PCR product is always **linear**, even off a circular template.
 
-use seqforge_core::{Primer, PrimerId, Span, Strand};
+use seqforge_core::{Annotations, Primer, PrimerId, Span, Strand};
 
 use super::{AnnealSettings, decompose_primer, find_primer_binding_sites};
 use crate::dna::reverse_complement;
+
+/// A reaction primer's footprint on the product, before and after re-anchoring.
+///
+/// On the template the oligo anneals over part of itself and the 5' tail hangs
+/// off untemplated. On the **product** the tail is templated — `pcr` wrote the
+/// oligo's own bases into the product ends — so the oligo pairs over its whole
+/// length and the tail is gone.
+///
+/// An applier inherits the template footprint through `transport`, which
+/// *translates* coordinates but never recomputes them, so without this the
+/// product keeps a footprint that claims a tail the molecule does not have.
+/// Nothing flags it: `same_site` compares 3' anchors, not spans, so the short
+/// span and the true one are one priming event and the primer reads `Confirmed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimerReanchor {
+    /// Where the inherited template footprint lands after `transport::place`.
+    /// The key an applier matches on, because `place` re-mints primer ids.
+    pub inherited: Span,
+    /// Where the oligo actually anneals on the product: its whole length.
+    pub annealed: Span,
+}
 
 /// The result of a successful [`pcr`] run — product bytes plus the geometry the
 /// applier uses to inherit the template's annotations.
@@ -49,6 +70,43 @@ pub struct PcrProduct {
     /// Non-fatal advisories (mispriming: >1 binding site for a primer). Reported,
     /// never blocking.
     pub warnings: Vec<String>,
+    /// The forward primer's footprint on the product. See [`PrimerReanchor`].
+    pub fwd: PrimerReanchor,
+    /// The reverse primer's footprint on the product. See [`PrimerReanchor`].
+    pub rev: PrimerReanchor,
+}
+
+impl PcrProduct {
+    /// Re-anchor the reaction's own primers onto the product.
+    ///
+    /// Call **after** the applier has extracted the template's annotations over
+    /// [`Self::amplicon`] and placed them at [`Self::tail_f_len`]. `transport`
+    /// translates a footprint but never recomputes it, so the two reaction
+    /// primers arrive still claiming the tail they had on the old template —
+    /// which is now part of this molecule.
+    ///
+    /// Matching is by `(binding, strand)` rather than by id because
+    /// `transport::place` re-mints ids. Primers *interior* to the amplicon keep
+    /// their translated footprints, which is correct: they still anneal
+    /// internally, unchanged.
+    pub fn reanchor_primers(&self, ann: &mut Annotations) {
+        let retarget: Vec<(PrimerId, Span)> = ann
+            .primers()
+            .filter_map(|p| {
+                let b = p.binding?;
+                match p.strand {
+                    Strand::Forward if b == self.fwd.inherited => Some((p.id, self.fwd.annealed)),
+                    Strand::Reverse if b == self.rev.inherited => Some((p.id, self.rev.annealed)),
+                    _ => None,
+                }
+            })
+            .collect();
+        for (id, span) in retarget {
+            if let Some(p) = ann.primer_mut(id) {
+                p.binding = Some(span);
+            }
+        }
+    }
 }
 
 /// Why a [`pcr`] run could not produce a product.
@@ -162,11 +220,33 @@ pub fn pcr(
         ));
     }
 
+    // Where each reaction primer sits on the product. Pure geometry — the
+    // product was built *from* these oligos a few lines above, so the answer is
+    // exact by construction and needs no search. That matters: searching would
+    // pick a global best site and could re-anchor to the wrong copy on a
+    // product containing repeats, and it would also disagree with a mutagenic
+    // primer, whose own (mismatched) bases are what got written here.
+    //
+    // Both inherited spans share their 3' anchor with the annealed one — the
+    // forward's end, the reverse's start — which is exactly why the stale
+    // footprint reads `Confirmed` and never surfaced as a problem.
+    let rev_start = bytes.len() - rev.sequence.len();
+    let fwd = PrimerReanchor {
+        inherited: Span::new(tail_f_len, bf.len),
+        annealed: Span::new(0, fwd.sequence.len()),
+    };
+    let rev = PrimerReanchor {
+        inherited: Span::new(rev_start, br.len),
+        annealed: Span::new(rev_start, rev.sequence.len()),
+    };
+
     Ok(PcrProduct {
         bytes,
         amplicon,
         tail_f_len,
         warnings,
+        fwd,
+        rev,
     })
 }
 
@@ -229,6 +309,78 @@ mod tests {
         assert_eq!(
             p.bytes.len(),
             f.sequence.len() + (22 - 8) + r.sequence.len()
+        );
+    }
+
+    /// The bug: a tailed primer's footprint on its own product.
+    ///
+    /// `transport` translates the template footprint into product coordinates
+    /// but never recomputes it, so the product used to claim a tail that is
+    /// physically part of it. The assertion is that `pcr` hands the applier the
+    /// real answer.
+    #[test]
+    fn a_tailed_primer_anneals_over_its_whole_length_on_the_product() {
+        let (mut f, mut r) = perfect_pair();
+        f.sequence = format!("AAAA{}", f.sequence); // 4 nt 5' tail
+        r.sequence = format!("CGCG{}", r.sequence); // 4 nt 5' tail
+        let p = pcr(T, &f, &r, false).unwrap();
+
+        // On the product the whole oligo pairs — no tail left over.
+        assert_eq!(
+            p.fwd.annealed,
+            Span::new(0, f.sequence.len()),
+            "the forward oligo is the product's 5' end, verbatim"
+        );
+        assert_eq!(
+            p.rev.annealed,
+            Span::new(p.bytes.len() - r.sequence.len(), r.sequence.len()),
+            "the reverse oligo is the product's 3' end, revcomp'd"
+        );
+
+        // The inherited spans are what an applier would otherwise store: too
+        // short by each tail, and sharing the 3' anchor (which is why nothing
+        // flagged them).
+        assert_eq!(p.fwd.inherited, Span::new(4, 6));
+        assert_eq!(
+            p.rev.inherited,
+            Span::new(p.bytes.len() - r.sequence.len(), 6)
+        );
+        assert_ne!(p.fwd.inherited, p.fwd.annealed);
+        assert_ne!(p.rev.inherited, p.rev.annealed);
+
+        // The claim that makes this exact rather than approximate: the annealed
+        // span really is the oligo.
+        let fwd_region = &p.bytes[p.fwd.annealed.range()];
+        assert_eq!(fwd_region, f.sequence.as_bytes());
+        let rev_region = &p.bytes[p.rev.annealed.range()];
+        assert_eq!(rev_region, reverse_complement(r.sequence.as_bytes()));
+    }
+
+    /// An untailed primer must be unaffected — inherited and annealed coincide.
+    /// This is why the existing app-level PCR test could not catch the bug.
+    #[test]
+    fn an_untailed_primer_needs_no_reanchor() {
+        let (f, r) = perfect_pair();
+        let p = pcr(T, &f, &r, false).unwrap();
+        assert_eq!(p.fwd.inherited, p.fwd.annealed);
+        assert_eq!(p.rev.inherited, p.rev.annealed);
+    }
+
+    /// A mutagenic primer carries its own mismatched bases into the product, so
+    /// it still pairs over its whole length there. This is the case where
+    /// "re-anchor by searching" and "re-anchor by geometry" could diverge —
+    /// geometry is right because `pcr` wrote these bases itself.
+    #[test]
+    fn a_mutagenic_tailed_primer_still_reanchors_to_its_whole_length() {
+        let (mut f, r) = perfect_pair();
+        // 4 nt tail, plus a mismatch inside the annealed region (3' anchor kept).
+        f.sequence = format!("AAAAT{}", &f.sequence[1..]);
+        let p = pcr(T, &f, &r, false).unwrap();
+        assert_eq!(p.fwd.annealed, Span::new(0, f.sequence.len()));
+        assert_eq!(
+            &p.bytes[p.fwd.annealed.range()],
+            f.sequence.as_bytes(),
+            "the product carries the primer's bases, mismatch included"
         );
     }
 

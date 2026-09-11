@@ -1242,6 +1242,96 @@ mod tests {
         );
     }
 
+    /// A tailed primer on its own PCR product pairs over its **whole length** —
+    /// the tail is the product's end, not an overhang any more.
+    ///
+    /// The untailed test above cannot catch this: with no tail the inherited
+    /// and re-anchored footprints coincide. And nothing else flags it, because
+    /// `same_site` compares 3' anchors rather than spans, so the stale short
+    /// footprint reports `Confirmed` — and the Inspector only offers Rescan when
+    /// the state is *not* Confirmed.
+    #[test]
+    fn pcr_reanchors_a_tailed_primer_over_the_whole_oligo() {
+        const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
+        let mut s = state_with(T);
+
+        // 4 nt untemplated tails on both oligos.
+        let fwd_seq = format!("TTTT{}", std::str::from_utf8(&T[4..10]).unwrap());
+        let rev_seq = format!(
+            "GGGG{}",
+            String::from_utf8(seqforge_bio::reverse_complement(&T[20..26])).unwrap()
+        );
+        let fwd = add_primer(&mut s, Some("F"), &fwd_seq, Some(4), Some(10), "+");
+        let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
+
+        let view = s.workspace.active_view;
+        crate::command::file::apply_pcr(&mut s, view, fwd, rev, Some("amp".into())).unwrap();
+
+        let vid = s.workspace.active_view.unwrap();
+        let (len, spans) = s
+            .workspace
+            .with_buffer(vid, |_, buf, ann| {
+                let mut spans: Vec<(String, Option<(usize, usize)>)> = ann
+                    .primers()
+                    .map(|p| (p.name.clone(), p.binding.map(|b| (b.start, b.len))))
+                    .collect();
+                spans.sort();
+                (buf.text.len(), spans)
+            })
+            .unwrap();
+
+        // Product = fwd oligo (10) + interior (10) + rev oligo (10) = 30.
+        assert_eq!(len, fwd_seq.len() + 10 + rev_seq.len());
+        assert_eq!(
+            spans,
+            vec![
+                ("F".to_string(), Some((0, fwd_seq.len()))),
+                ("R".to_string(), Some((len - rev_seq.len(), rev_seq.len()))),
+            ],
+            "each oligo anneals over its whole length on the product"
+        );
+    }
+
+    /// The user-visible symptom, asserted directly: the product's primers must
+    /// report **no tail**. This is a different claim from the span — the tail is
+    /// derived as `sequence.len() - binding.len`, so a stale binding fabricates
+    /// one even when every other field looks right.
+    #[test]
+    fn a_pcr_product_reports_no_tail_on_its_own_primers() {
+        const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";
+        let mut s = state_with(T);
+        let fwd_seq = format!("TTTT{}", std::str::from_utf8(&T[4..10]).unwrap());
+        let rev_seq = format!(
+            "GGGG{}",
+            String::from_utf8(seqforge_bio::reverse_complement(&T[20..26])).unwrap()
+        );
+        let fwd = add_primer(&mut s, Some("F"), &fwd_seq, Some(4), Some(10), "+");
+        let rev = add_primer(&mut s, Some("R"), &rev_seq, Some(20), Some(26), "-");
+
+        let view = s.workspace.active_view;
+        crate::command::file::apply_pcr(&mut s, view, fwd, rev, Some("amp".into())).unwrap();
+
+        let vid = s.workspace.active_view.unwrap();
+        let tails = s
+            .workspace
+            .with_buffer(vid, |_, buf, ann| {
+                let primers: Vec<&seqforge_core::Primer> = ann.primers().collect();
+                let mut t: Vec<(String, String)> =
+                    seqforge_bio::primer_infos(&buf.text, &primers, false)
+                        .into_iter()
+                        .map(|i| (i.name, i.tail))
+                        .collect();
+                t.sort();
+                t
+            })
+            .unwrap();
+
+        for (name, tail) in &tails {
+            assert_eq!(tail, "", "{name} must report no tail on its own product");
+        }
+        assert_eq!(tails.len(), 2);
+    }
+
     #[test]
     fn pcr_detached_primer_errors() {
         const T: &[u8] = b"AAAACCCCGGGGTTTTAAAACCCCGGGGTT";

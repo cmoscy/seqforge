@@ -655,11 +655,22 @@ mod tests {
         assert!(!att.off_target_sites.is_empty());
     }
 
-    /// A cloning primer on the product it amplified: its 5' tail is templated
-    /// there, so the oligo anneals over its **whole** length while the stored
-    /// binding is the footprint it had on the original template. Same 3' anchor,
-    /// so it is one priming event — `Confirmed`, not `Drifted` with a phantom
-    /// off-target. This is what `pcr::prepare` hands every amplicon.
+    /// A stored footprint shorter than what actually anneals: the oligo pairs
+    /// over its **whole** length, but the record claims only part of it. Same 3'
+    /// anchor, so it is one priming event — `Confirmed`, not `Drifted` with a
+    /// phantom off-target.
+    ///
+    /// This used to say "what `pcr::prepare` hands every amplicon", and it did:
+    /// both PCR appliers inherited the template footprint verbatim. They now
+    /// re-anchor (`PcrProduct::reanchor_primers`), so a PCR product no longer
+    /// produces this shape. The case still arises for a hand-authored or
+    /// imported primer whose stored span undersells its anneal, and the
+    /// 3'-anchor rule is the right answer there — which is why the test stays.
+    ///
+    /// Note what this rule costs: a wrong footprint reads `Confirmed`, so
+    /// nothing surfaces it, and the Inspector offers Rescan only when the state
+    /// is *not* Confirmed. That is precisely why the PCR bug went unseen, and
+    /// why the fix had to be in the applier rather than in this classifier.
     #[test]
     fn full_length_anneal_over_a_stored_footprint_is_the_same_site() {
         // Product layout: 5 nt tail + 20 nt that annealed on the old template.
