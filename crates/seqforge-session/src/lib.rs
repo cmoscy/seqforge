@@ -21,17 +21,30 @@
 //! expected to be renderer-free, and that is what keeps the CLI able to run a
 //! real session without linking a GUI. State that is genuinely visual — the
 //! per-view render cache, dock layout, overlays — stays in `seqforge-app`.
+//!
+//! ## Verbs
+//!
+//! Document verbs enter through [`execute`], which routes to **edit** /
+//! **query** / **produce**. Shells only load and present. See
+//! `docs/architecture.md` (Command pipeline).
 
 pub mod bases;
 pub mod bio;
 pub mod edit;
+pub mod execute;
 pub mod host;
-pub mod project;
+pub mod produce;
+pub mod query;
 pub mod resolver;
 pub mod workspace;
 
 pub use bio::Bio;
+pub use execute::{
+    Executed, execute, execute_bio, execute_on_file, file_address_observable,
+    file_write_refused_msg,
+};
 pub use host::{Host, Level, NullHost};
+pub use produce::{AssembleOpts, ComboSelection, assemble, recipe_from_flags};
 pub use resolver::WorkspaceResolver;
 pub use workspace::{BufferStore, Workspace, display_name, hash_file_bytes};
 

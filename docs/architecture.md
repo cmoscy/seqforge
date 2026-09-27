@@ -204,77 +204,79 @@ The buffer-level map itself (moving lineage off individual features onto
 which reuses the typed `LineageOp` + JSON payload as its serialization unit; the
 storage *anchor* moves, the format does not. See `plans/assembly.md`.
 
-## Edit operations: primitive (`core`) vs composed (command layer)
+## Edit operations: primitive (`core`) vs session
 
-Editing splits into two tiers, placed by what they depend on:
+Two tiers, placed by what they depend on:
 
-- **Primitive edits live in `core`.** `mutations::apply_splice` (and its
-  content-given reductions `insert` / `delete` / `replace`) take only
-  positions + bytes. They splice `text`, apply the feature-shift policy,
-  and bump `version` / `dirty`. They are the model's own mutation methods,
-  enforcing the `Buffer`/`Annotations` invariants — and they need **no
-  biology**. (DDD: mutation belongs with the aggregate that owns the
-  invariants, not an external service.)
-- **Composed edits live at the command layer** (`command/edit.rs`, reached
-  via `ViewerRequest`). These *derive bytes via `bio`, then call the
-  primitive*. Reverse-complement is the first: `bio::reverse_complement`
-  of the range → `apply_splice`. The whole cloning/primer roadmap is
-  composed edits (digest+religate, Golden Gate, codon-optimize,
-  primer-based mutagenesis) — all "`bio` derives bytes → `apply_splice` /
-  new `Buffer`", riding the single mutation path so undo/dirty/version
-  apply uniformly.
-
-This is why `apply_revcomp` is **not** a `core` wrapper: it would force
-`core ──► bio`. It belongs where both crates are already in scope.
+- **Primitive** — `core::mutations` (`apply_splice` and friends). Positions +
+  bytes only; enforces `Buffer`/`Annotations` invariants; **no biology**.
+- **Everything else** — `seqforge_session::{edit, query, produce}` via
+  `execute`. Bio-backed compose (e.g. reverse-complement → splice), reads,
+  and minting new buffers/panes live here because decision 9 forbids
+  `core ──► bio`. Shells only load and present.
 
 ## Command pipeline (CLI / GUI / agent parity)
 
-SeqForge's defining goal: every action — menu click, hotkey, embedded-
-terminal `seqforge` invocation, or external agent over the socket —
-converges on **one typed command layer**. There is exactly one place
-that mutates state.
+Every face — menu, hotkey, embedded terminal, agent socket — converges on
+one `ViewerRequest` and one interpreter: `seqforge_session::execute`.
 
 ```mermaid
 flowchart LR
-    menu[Menu click]
-    key[Hotkey<br/>keymap dispatch]
-    bar[Find/GoTo bar submit]
-    sock[CLI / agent<br/>over JSON-RPC socket]
-
-    menu --> q
-    key --> q
-    bar --> q
-    sock --> q
-
-    q["pending_commands<br/><i>AppCommand queue</i>"] --> apply["command::apply()<br/><b>the only mutation site</b>"]
-    apply --> disp["core::dispatch(view, buffer, ann, bio, req)"]
-    disp --> bioops["BioOps<br/>(seqforge-bio)"]
-    apply --> state[("AppState")]
-    apply --> events["AppEvent bus"]
-    state --> render["egui render pass"]
-    render --> key
+    file["CLI file address"] --> load["Process-local Workspace"]
+    agent["CLI or agent live address"] --> socket["SEQFORGE_SOCKET"]
+    menu["Menu or hotkey"] --> apply["command::apply"]
+    socket --> apply
+    load --> exec["session::execute"]
+    apply --> exec
+    exec --> result["Executed"]
+    result --> print["CLI prints the response"]
+    result --> dock["GUI docks opened views"]
 ```
 
-The same `ViewerRequest` variants serve the GUI menu, the embedded
-terminal, and external agents — so any operation reachable in the UI has
-a CLI equivalent with structured output.
+**Boundary — load → execute → present**
 
-> **Routing follows the document, not the verb** (ROADMAP decision 27).
-> `assemble` is a `ViewerRequest` like everything else; `DocSource::of` decides
-> where it runs. Inputs that are all paths execute in the calling process — no
-> socket, no GUI — while anything naming live session state (`buffer:<n>`, or
-> an implicit "the active view") is forwarded to the session that owns it. One
-> schema, two document sources.
->
-> The remaining hand-written CLI-local verbs (`digest`, `translate`, `orfs`,
-> `primers`, `tm`) have not been folded in yet; they are read-only projections
-> over a file, so the asymmetry costs nothing today, but they are the next
-> candidates.
+1. **Load** — file address → process-local workspace; live address
+   (`--view` / active / `buffer:N`) → socket; menus enqueue `ViewerRequest`.
+2. **Execute** — mutate the given workspace; return
+   `Executed { response, opened }`. No print, dock, or process choice.
+3. **Present** — CLI prints; GUI docks `opened`. Non-verbs (dialogs,
+   staging, focus, layout) stay `AppCommand`s.
 
-Per-frame ordering (drain
-inputs → dispatch keys → render → apply) is detailed in
-[`focus-refactor.md`](focus-refactor.md) §2; this diagram shows the
-*convergence + crate boundary*, that one shows the *frame lifecycle*.
+**Inside `execute` — edit / query / produce**
+
+```mermaid
+flowchart TD
+    execute["execute"]
+    execute --> edit["edit: mutate this buffer"]
+    execute --> query["query: answer about this buffer"]
+    execute --> produce["produce: mint buffers or panes"]
+```
+
+- **edit** — in-place (`insert`, feature/primer writes, undo, …).
+- **query** — answers (`info`, `translate`, `find`, …), including
+  bio-backed reads that cannot live in `core`.
+- **produce** — mint buffers or panes (`pcr`, `assemble`, `new`; digest
+  opens a Fragments pane). Digestion's fragment *list* is a query; the
+  pane is produce.
+
+**CLI file gate** — same three kinds: query always ok; produce ok when
+observable without a live session (digest list, assemble print /
+`--dry-run` / `--out`); edit and in-memory-only PCR refused.
+
+Routing follows the **document**, not the verb (decision 27): path-only
+inputs run in-process; anything naming live session state forwards to the
+viewer. One schema, two sources.
+
+**Adding a document verb**
+
+1. Add a `ViewerRequest` variant (clap + serde as today).
+2. Classify: edit → `edit.rs`; query → `query` / `core::dispatch`;
+   produce → `produce.rs`.
+3. Route in `execute`'s match — no logic in the router.
+4. Update `file_address_observable` if the verb may run against `--in`.
+
+Per-frame ordering (drain → keys → render → apply) is in
+[`focus-refactor.md`](focus-refactor.md) §2.
 
 ## Single-applier mutation pattern
 

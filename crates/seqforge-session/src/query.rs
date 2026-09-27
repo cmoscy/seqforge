@@ -1,30 +1,23 @@
-//! Projections that need `seqforge-bio`.
+//! Query verbs: answers about a document that need `seqforge-bio`.
 //!
-//! `info`, `translate`, `orfs`, `find-primer-sites` and `digest` are read-only
-//! derivations, so they belong with the other read verbs in
-//! [`seqforge_core::dispatch`] — except that they need
-//! `seqforge_bio::{translate, find_orfs, digest_projection, primer_sites}`, and
-//! decision 9 forbids `core ──► bio`.
+//! `info`, `translate`, `orfs`, and `find-primer-sites` are read-only
+//! derivations that belong with the other query verbs in
+//! [`seqforge_core::dispatch`] — except that they need `seqforge_bio`, and
+//! decision 9 forbids `core ──► bio`. Digestion's *list* also lives here as
+//! [`digest_fragments`]; opening a Fragments pane is **produce**, not query.
 //!
-//! Widening `BioOps` to reach them would push bio-shaped concerns into `core`'s
-//! trait surface for the sake of five verbs. Instead they live here, above both
-//! crates, in the shape `digest_projection` already established: take
-//! `(&View, &Buffer, &Annotations)` plus the request's own parameters, return a
-//! `ViewerResponse`. Both shells call [`dispatch`], which tries these first and
-//! falls through to `core::dispatch` for everything else — the same
-//! extend-then-delegate shape the GUI's command layer already uses.
+//! Widening `BioOps` would push bio-shaped concerns into `core`'s trait
+//! surface. Instead these live here, above both crates. [`dispatch`] tries
+//! the bio queries first and falls through to `core::dispatch`.
 
 use seqforge_core::{
     Annotations, Buffer, DispatchError, OrfInfo, Strand, Topology, View, ViewerRequest,
     ViewerResponse,
 };
 
-/// Run `req` against one document: bio projections here, everything else in
-/// `core::dispatch`.
-///
-/// This is the single read entry point for both shells, so a verb cannot be
-/// reachable from one face and not the other.
-pub fn dispatch<B: seqforge_core::BioOps>(
+/// Run a **query** against one document: bio answers here, everything else in
+/// `core::dispatch`. Never opens a pane or mints a buffer.
+pub fn dispatch<B: seqforge_core::BioOps + ?Sized>(
     view: &mut View,
     buffer: &Buffer,
     annotations: &mut Annotations,
@@ -47,11 +40,6 @@ pub fn dispatch<B: seqforge_core::BioOps>(
             ..
         } => Ok(orfs(buffer, min_aa, stop_to_stop, forward_only)),
         ViewerRequest::FindPrimerSites { oligo, .. } => Ok(primer_sites(buffer, &oligo)),
-        ViewerRequest::Digest {
-            ref enzymes,
-            circular,
-            ..
-        } => Ok(digest(view, buffer, annotations, enzymes, circular)),
         other => seqforge_core::dispatch(view, buffer, annotations, bio, other),
     }
 }
@@ -121,14 +109,6 @@ fn orfs(buffer: &Buffer, min_aa: usize, stop_to_stop: bool, forward_only: bool) 
     }
 }
 
-/// Where an ad-hoc oligo anneals.
-///
-/// Builds the same [`PrimerSiteInfo`] the Inspector and `list-primers` use
-/// (`seqforge_bio::primer_sites`), so an ad-hoc oligo and an authored primer
-/// are scored by one implementation — including the wrap-aware `anneal_tm_span`
-/// that a hand-rolled copy here got wrong for origin-crossing sites.
-///
-/// [`PrimerSiteInfo`]: seqforge_core::PrimerSiteInfo
 fn primer_sites(buffer: &Buffer, oligo: &str) -> ViewerResponse {
     let circular = matches!(buffer.topology, Topology::Circular);
     let sites = seqforge_bio::primer_sites(oligo, &buffer.text, circular);
@@ -139,20 +119,15 @@ fn primer_sites(buffer: &Buffer, oligo: &str) -> ViewerResponse {
     }
 }
 
-/// The virtual fragment set.
-///
-/// Methylation comes from the view (the molecule's authored Dam/Dcm/CpG state),
-/// and `circular` may override the document's topology — the two axes on which
-/// three separate `digest` implementations used to disagree.
-fn digest(
+/// The virtual fragment set — a query. Callers that also open a Fragments pane
+/// live in [`crate::produce`].
+pub fn digest_fragments(
     view: &View,
     buffer: &Buffer,
     annotations: &Annotations,
     enzymes: &[String],
     circular: bool,
 ) -> ViewerResponse {
-    // `--enzymes` is repeatable, so join the occurrences; the query grammar
-    // handles separators within one argument.
     let query = enzymes.join(" ");
     let circular = circular || matches!(buffer.topology, Topology::Circular);
     let (fragments, warnings, canonical) = seqforge_bio::digest_projection(
@@ -174,13 +149,6 @@ fn digest(
 
 #[cfg(test)]
 mod tests {
-    //! Value tests, not parity tests.
-    //!
-    //! Both shells now call [`dispatch`], so a bug *inside* it is identical on
-    //! every face and the cross-layer parity tests in `seqforge-cli` cannot see
-    //! it — they pin addressing, which is a different property. Each parameter
-    //! therefore needs an assertion that it actually changes the answer.
-
     use super::*;
     use crate::{Bio, Workspace};
     use seqforge_core::Target;
@@ -197,7 +165,15 @@ mod tests {
         let vid = ws.open_path(&fixture(file), &bio).expect("fixture opens");
         ws.with_buffer(vid, |v, b, a| dispatch(v, b, a, &bio, req))
             .expect("view resolves")
-            .expect("projection succeeds")
+            .expect("query succeeds")
+    }
+
+    fn digest_run(file: &str, enzymes: Vec<String>, circular: bool) -> ViewerResponse {
+        let bio = Bio;
+        let mut ws = Workspace::default();
+        let vid = ws.open_path(&fixture(file), &bio).expect("fixture opens");
+        ws.with_buffer(vid, |v, b, a| digest_fragments(v, b, a, &enzymes, circular))
+            .expect("view resolves")
     }
 
     fn orf_count(min_aa: usize, stop_to_stop: bool, forward_only: bool) -> usize {
@@ -289,19 +265,9 @@ mod tests {
         assert!(err.to_string().contains("invalid"), "{err}");
     }
 
-    /// `--circular` was CLI-only before, so the socket could not ask the
-    /// question. It has to actually override the document's topology.
     #[test]
     fn the_circular_override_changes_the_fragment_set() {
-        let go = |circular| match run(
-            "small_linear.fasta",
-            ViewerRequest::Digest {
-                enzymes: vec!["NheI".into()],
-                circular,
-                input: None,
-                target: Target::active(),
-            },
-        ) {
+        let go = |circular| match digest_run("small_linear.fasta", vec!["NheI".into()], circular) {
             ViewerResponse::Fragments {
                 count, fragments, ..
             } => {
@@ -310,25 +276,13 @@ mod tests {
             }
             other => panic!("expected Fragments, got {other:?}"),
         };
-        // Joining the ends of a linear molecule fuses the two terminal
-        // fragments into one.
         assert_eq!(go(false), 32, "linear");
         assert_eq!(go(true), 31, "circularized");
     }
 
-    /// `--enzymes` is repeatable and each occurrence may itself hold a list;
-    /// they have to join into one query rather than the last one winning.
     #[test]
     fn repeated_enzymes_arguments_all_contribute() {
-        let go = |enzymes: Vec<String>| match run(
-            "pUC19.gbk",
-            ViewerRequest::Digest {
-                enzymes,
-                circular: false,
-                input: None,
-                target: Target::active(),
-            },
-        ) {
+        let go = |enzymes: Vec<String>| match digest_run("pUC19.gbk", enzymes, false) {
             ViewerResponse::Fragments { count, .. } => count,
             other => panic!("expected Fragments, got {other:?}"),
         };

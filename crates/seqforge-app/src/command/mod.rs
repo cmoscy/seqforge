@@ -31,7 +31,7 @@ use seqforge_core::{
 use crate::app::AppState;
 use crate::event::AppEvent;
 use crate::focus::FocusScope;
-use seqforge_session::edit as sedit;
+use seqforge_session::Executed;
 
 pub(crate) mod assembly;
 mod edit;
@@ -575,40 +575,71 @@ pub(super) fn restore_focus_after_overlay(state: &mut AppState) {
     }
 }
 
-/// Dispatch a view-scoped `ViewerRequest`. Routing rules:
-///   - If `req.target_view()` is `Some(vid)`, the request operates on
-///     that view explicitly (Stage 2.5d socket-protocol targeting).
-///     `ViewNotFound` if the view has been closed.
-///   - Otherwise it operates on `workspace.active_view`. `NoActiveView`
-///     if no view is open.
-///
-/// View-scoped requests that target a non-active view still mutate
-/// that view's state (selection, scroll, search results); callers
-/// downstream of the response (status bar, agent reply) should treat
-/// the response as authoritative for the *target* view, not the
-/// current active view.
+/// Run a view-scoped request through [`seqforge_session::execute`] and return
+/// only the response (no new views to dock). Used by overlay submitters
+/// (Find / GoTo / Enzymes) that already own presentation.
 pub(super) fn dispatch_active<B: BioOps>(
     state: &mut AppState,
     bio: &B,
     req: ViewerRequest,
 ) -> Result<ViewerResponse, DispatchError> {
-    // `seqforge_session::project::dispatch` extends `core::dispatch` with the
-    // projections that need `bio` (info/translate/orfs/find-primer-sites), and
-    // delegates everything else. Both shells go through it, so a read verb
-    // cannot be reachable from the CLI and not the GUI.
-    use seqforge_session::project::dispatch as project_dispatch;
-    if let Some(vid) = req.target().and_then(|t| t.view) {
-        return state
+    let Executed { response, opened } = {
+        let (ws, mut host) = state.session();
+        seqforge_session::execute(ws, &mut host, bio, req)?
+    };
+    debug_assert!(
+        opened.is_empty(),
+        "dispatch_active is for read/nav verbs that do not open views; got {opened:?}"
+    );
+    Ok(response)
+}
+
+/// Run a document verb through [`seqforge_session::execute`], then dock any
+/// views it created. Shell lifecycle verbs (open/close/buffers/focus/save) are
+/// handled above this and never reach here.
+pub(super) fn execute_and_present<B: BioOps>(
+    state: &mut AppState,
+    bio: &B,
+    req: ViewerRequest,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let sel_before = active_selection(state);
+    let Executed { response, opened } = {
+        let (ws, mut host) = state.session();
+        seqforge_session::execute(ws, &mut host, bio, req)?
+    };
+
+    let first = opened.first().copied();
+    for &vid in &opened {
+        layout::place_view_tab(state, vid);
+        let is_document = state
             .workspace
-            .with_buffer(vid, |view, buf, ann| {
-                project_dispatch(view, buf, ann, bio, req)
-            })
-            .and_then(|inner| inner);
+            .view(vid)
+            .is_some_and(|v| matches!(v.kind, seqforge_core::ViewKind::TextView));
+        if is_document {
+            if let Some((name, len)) = state.workspace.view(vid).and_then(|v| {
+                state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
+                    arc.read()
+                        .ok()
+                        .map(|b| (seqforge_session::display_name(&b), b.len()))
+                })
+            }) {
+                state.events.emit(AppEvent::DocOpened { name, len });
+            }
+        }
     }
-    state
-        .workspace
-        .with_active_buffer(|view, buf, ann| project_dispatch(view, buf, ann, bio, req))
-        .and_then(|inner| inner)
+    if let Some(vid) = first {
+        layout::ensure_welcome_invariant(state);
+        layout::dock_activate_view(state, vid);
+        state.focus.set_scope(FocusScope::View(vid));
+    }
+
+    if let ViewerResponse::SearchResults { count, .. } = &response {
+        state
+            .events
+            .emit(AppEvent::SearchCompleted { hits: *count });
+    }
+    emit_selection_diff(state, sel_before);
+    Ok(Some(response))
 }
 
 /// Seed `path` from `template` if it doesn't exist, then launch it in
@@ -884,212 +915,19 @@ pub fn apply<B: BioOps>(
         }
 
         // ── Pass-through ────────────────────────────────────────────
+        // Shell lifecycle verbs need dock order, recent-files, or save
+        // dialogs — present them here. Every other ViewerRequest is a
+        // document verb: session::execute computes, we dock `opened`.
         Viewer(req) => match req {
             ViewerRequest::Open { path } => file::apply_open_file(state, bio, path),
             ViewerRequest::Close => file::apply_close_doc(state),
             ViewerRequest::Buffers => layout::apply_buffers(state),
             ViewerRequest::Focus { target } => layout::apply_focus_doc(state, &target),
-
-            // ── Editor write-ops → command/edit.rs (Phase 11 write path) ──
-            // Intercepted here, never reaching `dispatch_active`/`core::dispatch`
-            // (which read-lock); see commands.rs `dispatch` doc + editor.md §4.
-            ViewerRequest::Insert { pos, bases, target } => {
-                sedit::apply_insert(&mut state.workspace, target.view, pos, bases)
-            }
-            ViewerRequest::Delete { start, end, target } => {
-                sedit::apply_delete(&mut state.workspace, target.view, start, end)
-            }
-            ViewerRequest::Replace {
-                start,
-                end,
-                bases,
-                target,
-            } => sedit::apply_replace(&mut state.workspace, target.view, start, end, bases),
-            ViewerRequest::ReverseComplement { start, end, target } => {
-                sedit::apply_reverse_complement(&mut state.workspace, target.view, start, end)
-            }
-            // Clipboard ops reach the OS pasteboard, so they take a `Host`
-            // alongside the workspace — disjoint borrows of `AppState`.
-            ViewerRequest::Cut { start, end, target } => {
-                let (ws, mut host) = state.session();
-                sedit::apply_cut(ws, &mut host, target.view, start, end)
-            }
-            ViewerRequest::Copy { start, end, target } => {
-                let (ws, mut host) = state.session();
-                sedit::apply_copy(ws, &mut host, target.view, start, end)
-            }
-            ViewerRequest::Paste { pos, target } => {
-                let (ws, mut host) = state.session();
-                sedit::apply_paste(ws, &mut host, target.view, pos)
-            }
-            ViewerRequest::AddFeature {
-                start,
-                end,
-                kind,
-                label,
-                strand,
-                target,
-            } => sedit::apply_add_feature(
-                &mut state.workspace,
-                target.view,
-                start,
-                end,
-                kind,
-                label,
-                strand,
-            ),
-            ViewerRequest::RemoveFeature { id, target } => {
-                sedit::apply_remove_feature(&mut state.workspace, target.view, id)
-            }
-            ViewerRequest::RenameFeature { id, label, target } => {
-                sedit::apply_rename_feature(&mut state.workspace, target.view, id, label)
-            }
-            ViewerRequest::UpdateFeature {
-                id,
-                kind,
-                label,
-                strand,
-                start,
-                end,
-                target,
-            } => sedit::apply_update_feature(
-                &mut state.workspace,
-                target.view,
-                id,
-                kind,
-                label,
-                strand,
-                start,
-                end,
-            ),
-            ViewerRequest::AddPrimer {
-                name,
-                sequence,
-                start,
-                end,
-                strand,
-                target,
-            } => sedit::apply_add_primer(
-                &mut state.workspace,
-                target.view,
-                name,
-                sequence,
-                start,
-                end,
-                strand,
-            ),
-            ViewerRequest::UpdatePrimer {
-                id,
-                name,
-                sequence,
-                strand,
-                start,
-                end,
-                detach,
-                target,
-            } => sedit::apply_update_primer(
-                &mut state.workspace,
-                target.view,
-                id,
-                name,
-                sequence,
-                strand,
-                start,
-                end,
-                detach,
-            ),
-            ViewerRequest::RescanPrimer { id, target } => {
-                sedit::apply_rescan_primer(&mut state.workspace, target.view, id)
-            }
-            ViewerRequest::AddPrimerSite {
-                id,
-                enzyme,
-                overhang,
-                flank,
-                target,
-            } => sedit::apply_add_primer_site(
-                &mut state.workspace,
-                target.view,
-                id,
-                enzyme,
-                overhang,
-                flank,
-            ),
-            ViewerRequest::RemovePrimer { id, target } => {
-                sedit::apply_remove_primer(&mut state.workspace, target.view, id)
-            }
-            ViewerRequest::Pcr {
-                fwd,
-                rev,
-                name,
-                target,
-            } => file::apply_pcr(state, target.view, fwd, rev, name),
-            ViewerRequest::Digest {
-                enzymes, target, ..
-            } => file::apply_digest(state, target.view, enzymes.join(" ")),
             ViewerRequest::Save { force, target } => edit::apply_save(state, target.view, force),
             ViewerRequest::SaveAs { path, target } => {
-                // `SaveAs` with an explicit path is a direct write; no dialog.
                 file::apply_save_document(state, target.view, path)
             }
-            ViewerRequest::Assemble {
-                inputs,
-                method,
-                topology,
-                enzymes,
-                expand,
-                emit_recipe,
-                dry_run: _,
-                fidelity_dataset: _,
-                fidelity_matrix: _,
-                out,
-                format,
-                name_template,
-                combos,
-                origin,
-            } => assembly::apply_assemble(
-                state,
-                inputs,
-                method,
-                topology,
-                enzymes,
-                expand,
-                emit_recipe,
-                out,
-                format,
-                name_template,
-                combos,
-                origin,
-            ),
-            ViewerRequest::Undo { target } => sedit::apply_undo(&mut state.workspace, target.view),
-            ViewerRequest::Redo { target } => sedit::apply_redo(&mut state.workspace, target.view),
-
-            // ── Buffer lifecycle / topology ──
-            ViewerRequest::New { circular, name } => file::apply_new(state, circular, name),
-            ViewerRequest::SetOrigin {
-                index,
-                feature,
-                target,
-            } => sedit::apply_set_origin(&mut state.workspace, target.view, index, feature),
-            ViewerRequest::Linearize { at, target } => {
-                sedit::apply_linearize(&mut state.workspace, target.view, at)
-            }
-            ViewerRequest::Circularize { origin, target } => {
-                sedit::apply_circularize(&mut state.workspace, target.view, origin)
-            }
-
-            // ── Read-scoped → the session's projection dispatch ──
-            other => {
-                let sel_before = active_selection(state);
-                let resp = dispatch_active(state, bio, other)?;
-                if let ViewerResponse::SearchResults { count, .. } = &resp {
-                    state
-                        .events
-                        .emit(AppEvent::SearchCompleted { hits: *count });
-                }
-                emit_selection_diff(state, sel_before);
-                Ok(Some(resp))
-            }
+            other => execute_and_present(state, bio, other),
         },
     }
 }

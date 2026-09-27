@@ -93,44 +93,22 @@ pub(super) fn apply_open_file<B: BioOps>(
     Ok(Some(ViewerResponse::Ok))
 }
 
-/// Create a new empty in-memory buffer (not backed by a file) and open it in a
-/// new dock tab — mirrors the tail of [`apply_open_file`]. Enables copy → New →
-/// paste, the bare-metal transport loop.
+/// Test helpers: production New / Pcr / Digest go through
+/// [`super::execute_and_present`] via `AppCommand::Viewer`.
+#[cfg(test)]
 pub(super) fn apply_new(
     state: &mut AppState,
     circular: bool,
     name: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let topology = if circular {
-        Topology::Circular
-    } else {
-        Topology::Linear
-    };
-    let name = name.unwrap_or_else(|| "untitled".to_string());
-    let view_id = state.workspace.new_buffer(name, Vec::new(), topology);
-
-    layout::place_view_tab(state, view_id);
-    layout::ensure_welcome_invariant(state);
-    layout::dock_activate_view(state, view_id);
-    state.focus.set_scope(FocusScope::View(view_id));
-
-    if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
-        state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
-            arc.read()
-                .ok()
-                .map(|b| (seqforge_session::display_name(&b), b.len()))
-        })
-    }) {
-        state.events.emit(AppEvent::DocOpened { name, len });
-    }
-    Ok(Some(ViewerResponse::Ok))
+    super::execute_and_present(
+        state,
+        &seqforge_session::Bio,
+        seqforge_core::ViewerRequest::New { circular, name },
+    )
 }
 
-/// Amplify between two attached primers → a new **linear** product buffer that
-/// inherits the template's annotations (Primers Phase 3.1a). The biology lives
-/// in `seqforge_bio::pcr`; here we re-home the amplicon's annotations onto the
-/// fresh product via `transport::{extract,place}` and open it as a tab (the
-/// `apply_new` buffer/tab flow).
+#[cfg(test)]
 pub(super) fn apply_pcr(
     state: &mut AppState,
     view: Option<ViewId>,
@@ -138,151 +116,16 @@ pub(super) fn apply_pcr(
     rev: seqforge_core::PrimerId,
     name: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    use seqforge_core::{Annotations, Orient, PartialPolicy, transport};
-
-    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
-
-    struct Built {
-        bytes: Vec<u8>,
-        ann: Annotations,
-        name: String,
-        warnings: Vec<String>,
-    }
-
-    // ── Read-only over the template: build product bytes + inherit annotations ──
-    let built = state.workspace.with_buffer(vid, |_, buf, ann| {
-        let fwd_p = ann
-            .primer(fwd)
-            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {fwd}")))?;
-        let rev_p = ann
-            .primer(rev)
-            .ok_or_else(|| DispatchError::InvalidInput(format!("no primer with id {rev}")))?;
-
-        let prod = seqforge_bio::pcr(&buf.text, fwd_p, rev_p, buf.is_circular())
-            .map_err(|e| DispatchError::InvalidInput(e.to_string()))?;
-
-        // Inherit template annotations across the amplicon. Straddling features
-        // are clamped + fuzzy-marked (TruncatePartials); straddling primers are
-        // detached by `extract` (binding = None) — we drop those below.
-        let mut slice = transport::extract(
-            &buf.text,
-            ann,
-            prod.amplicon,
-            PartialPolicy::TruncatePartials,
-            &buf.name,
-        );
-        slice.primers.retain(|p| p.binding.is_some());
-
-        // Place at the forward tail offset (the tail prepends bases ahead of the
-        // first template column). Fresh product → nothing to reunite (merge=false).
-        let mut prod_ann = Annotations::default();
-        transport::place(
-            &mut prod_ann,
-            &slice,
-            prod.tail_f_len,
-            Orient::Identity,
-            false,
-            prod.bytes.len(),
-        );
-
-        // The reaction's own primers still carry the footprint they had on the
-        // template, where their 5' tails hung off untemplated. Here the tails
-        // *are* the product's ends, so each oligo pairs over its whole length.
-        prod.reanchor_primers(&mut prod_ann);
-
-        // No whole-product marker feature: the inherited amplicon features
-        // already carry their own extract-stamped lineage, and product-level
-        // provenance is the recipe's job (the composed Lineage map), not a
-        // hand-rolled whole-span feature. See docs/architecture.md "Lineage".
-
-        let name = name
-            .clone()
-            .unwrap_or_else(|| format!("{} amplicon", buf.name));
-        Ok::<Built, DispatchError>(Built {
-            bytes: prod.bytes,
-            ann: prod_ann,
+    super::execute_and_present(
+        state,
+        &seqforge_session::Bio,
+        seqforge_core::ViewerRequest::Pcr {
+            fwd,
+            rev,
             name,
-            warnings: prod.warnings,
-        })
-    })??;
-
-    // ── Materialize the product buffer + open it (mirrors `apply_new`) ──
-    let len = built.bytes.len();
-    let view_id =
-        state
-            .workspace
-            .new_buffer_annotated(built.name, built.bytes, Topology::Linear, built.ann);
-
-    layout::place_view_tab(state, view_id);
-    layout::ensure_welcome_invariant(state);
-    layout::dock_activate_view(state, view_id);
-    state.focus.set_scope(FocusScope::View(view_id));
-
-    if let Some((name, len)) = state.workspace.view(view_id).and_then(|v| {
-        state.workspace.buffers.get(v.buffer_id).and_then(|arc| {
-            arc.read()
-                .ok()
-                .map(|b| (seqforge_session::display_name(&b), b.len()))
-        })
-    }) {
-        state.events.emit(AppEvent::DocOpened { name, len });
-    }
-
-    for w in &built.warnings {
-        state.toasts.warning(format!("PCR: {w}"));
-    }
-
-    Ok(Some(ViewerResponse::Edited { len, changed: true }))
-}
-
-/// Digest the source view's buffer and open a read-only Fragments view over it.
-/// Fragments are **virtual** — no buffer is materialized here (decision 25); the
-/// view stores the enzyme query and recomputes the list on demand.
-pub(super) fn apply_digest(
-    state: &mut AppState,
-    view: Option<ViewId>,
-    query: String,
-) -> Result<Option<ViewerResponse>, DispatchError> {
-    use seqforge_core::ViewKind;
-
-    let vid = seqforge_session::edit::resolve_target(&state.workspace, view)?;
-
-    // Read-only over the source: resolve enzymes + compute the projection.
-    let (source_buffer, doc_name, canonical, infos, warnings) =
-        state.workspace.with_buffer(vid, |v, buf, ann| {
-            let methyl = v.methylation;
-            let (infos, warnings, canonical) = seqforge_bio::digest_projection(
-                &buf.text,
-                &buf.name,
-                buf.is_circular(),
-                ann,
-                &query,
-                &methyl,
-            );
-            (v.buffer_id, buf.name.clone(), canonical, infos, warnings)
-        })?;
-
-    // Open a Fragments view onto the SOURCE buffer (not a new buffer).
-    let view_id = state.workspace.add_view(source_buffer, ViewKind::Fragments);
-    if let Some(v) = state.workspace.view_mut(view_id) {
-        v.fragments_query = Some(canonical.clone());
-    }
-    layout::place_view_tab(state, view_id);
-    layout::ensure_welcome_invariant(state);
-    layout::dock_activate_view(state, view_id);
-    state.focus.set_scope(FocusScope::View(view_id));
-
-    for w in &warnings {
-        state.toasts.warning(format!("Digest: {w}"));
-    }
-
-    Ok(Some(ViewerResponse::Fragments {
-        name: doc_name,
-        enzymes: canonical,
-        count: infos.len(),
-        fragments: infos,
-        warnings,
-    }))
+            target: seqforge_core::Target { view, path: None },
+        },
+    )
 }
 
 /// Materialize one digest fragment as its own buffer — the opt-in single-fragment

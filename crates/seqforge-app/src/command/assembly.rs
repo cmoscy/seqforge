@@ -7,19 +7,15 @@ use std::path::PathBuf;
 
 use egui_file_dialog::FileDialog;
 use seqforge_core::{
-    Annotations, Bin, Boundary, DispatchError, PrepareKind, ProductInfo, Recipe, RecipeId,
-    SourceRef, SpanEnds, TopologyIntent, ViewerResponse, default_role,
+    Bin, Boundary, DispatchError, PrepareKind, Recipe, RecipeId, SourceRef, SpanEnds,
+    TopologyIntent, ViewerResponse, default_role,
 };
+use seqforge_session::Executed;
 
 use super::{layout, snapshot_focus_for_overlay};
 use crate::app::AppState;
 use crate::focus::FocusScope;
 use crate::overlay::Overlay;
-use seqforge_session::WorkspaceResolver;
-
-/// Above this many products, materialization is capped (with a warning) so a
-/// large combinatorial run can't flood the workspace with tabs.
-const MAX_MATERIALIZED: usize = 24;
 
 /// An in-place edit to a recipe's authored state (decision 26 — batch-first).
 #[derive(Debug, Clone)]
@@ -195,243 +191,45 @@ pub(super) fn apply_run_recipe(
         v.sort_unstable();
         v
     });
-    run_and_materialize(state, &recipe, Selection::Indices(selection), None, None)
+    present_assemble(
+        state,
+        seqforge_session::AssembleOpts {
+            recipe,
+            dry_run: false,
+            fidelity_dataset: None,
+            fidelity_matrix: false,
+            emit_recipe: None,
+            out: None,
+            format: "genbank".into(),
+            combos: seqforge_session::ComboSelection::Indices(selection),
+            origin: None,
+        },
+    )
 }
 
-/// `ViewerRequest::Assemble` — the socket face of Run.
-///
-/// One verb over two document sources (ROADMAP decision 27): `inputs` is a
-/// single `recipe.json`, or inline bin tokens parsed by the *same*
-/// `seqforge_bio::parse_bin_token` the command line uses. Path-only requests
-/// never arrive here — the CLI runs those in its own process — so what reaches
-/// this handler is the work that genuinely needs the session: `buffer:<n>`
-/// sources resolved against the open documents.
-///
-/// This is deliberately the same body as the workbench Run below it: one engine
-/// call, one materialize loop, one export call.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn apply_assemble(
+/// Present an assembly run: `session::assemble` computes, we dock `opened`.
+fn present_assemble(
     state: &mut AppState,
-    inputs: Vec<String>,
-    method: String,
-    topology: String,
-    enzymes: Option<String>,
-    expand: String,
-    emit_recipe: Option<PathBuf>,
-    out: Option<PathBuf>,
-    format: String,
-    name_template: Option<String>,
-    combos: Option<String>,
-    origin: Option<String>,
+    opts: seqforge_session::AssembleOpts,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
-    let bad = DispatchError::InvalidInput;
-
-    let mut recipe: Recipe = if inputs.len() == 1 && inputs[0].ends_with(".json") {
-        let text = std::fs::read_to_string(&inputs[0])
-            .map_err(|e| bad(format!("read recipe {}: {e}", inputs[0])))?;
-        serde_json::from_str(&text).map_err(|e| bad(format!("parse recipe {}: {e}", inputs[0])))?
-    } else if inputs.is_empty() {
-        return Err(bad(
-            "no inputs — pass a recipe.json or bin tokens (SOURCE[@FROM..TO])".into(),
-        ));
-    } else {
-        let bins = inputs
-            .iter()
-            .map(|t| seqforge_bio::parse_bin_token(t, enzymes.as_deref()))
-            .collect::<Result<Vec<_>, String>>()
-            .map_err(bad)?;
-        let join = match method.as_str() {
-            "ligate" => seqforge_core::JoinKind::Ligate,
-            "golden-gate" | "golden_gate" | "gg" => {
-                let enzyme = enzymes
-                    .as_deref()
-                    .map(seqforge_bio::normalize_enzymes)
-                    .and_then(|e| e.split_whitespace().next().map(str::to_string))
-                    .ok_or_else(
-                        || bad("--method golden-gate needs --enzymes (e.g. BsaI)".into()),
-                    )?;
-                seqforge_core::JoinKind::GoldenGate { enzyme }
-            }
-            other => {
-                return Err(bad(format!(
-                    "unknown method {other:?} (supports: ligate, golden-gate)"
-                )));
-            }
-        };
-        Recipe {
-            bins,
-            join,
-            intent: match topology.as_str() {
-                "linear" => seqforge_core::TopologyIntent::Linear,
-                "any" => seqforge_core::TopologyIntent::Any,
-                _ => seqforge_core::TopologyIntent::Circular,
-            },
-            expand: if expand == "zip" {
-                seqforge_core::Expand::Zip
-            } else {
-                seqforge_core::Expand::AllToAll
-            },
-            name_template: None,
-        }
+    let Executed { response, opened } = {
+        let (ws, mut host) = state.session();
+        seqforge_session::assemble(ws, &mut host, opts)?
     };
-
-    if let Some(t) = name_template {
-        recipe.name_template = Some(t);
-    }
-    if let Some(path) = &emit_recipe {
-        let json = serde_json::to_string_pretty(&recipe)
-            .map_err(|e| bad(format!("serialize recipe: {e}")))?;
-        std::fs::write(path, json)
-            .map_err(|e| bad(format!("write recipe {}: {e}", path.display())))?;
-    }
-
-    let format = seqforge_bio::ProductFormat::parse(&format).ok_or_else(|| {
-        bad(format!(
-            "unknown product format {format:?} (supports: genbank, fasta)"
-        ))
-    })?;
-    let export = out.map(|dir| (dir, format));
-    let origin = origin.map(|spec| spec.parse().unwrap_or_else(|e| match e {}));
-    run_and_materialize(state, &recipe, Selection::Spec(combos), export, origin)
-}
-
-/// How the caller chose which combos to run.
-enum Selection {
-    /// Already-resolved indices (`None` = every compatible combo).
-    Indices(Option<Vec<usize>>),
-    /// An unparsed `--combos` selector (`None` = every compatible combo).
-    Spec(Option<String>),
-}
-
-/// Run `recipe`, open each product as a buffer, and export when asked.
-///
-/// The materialization cap applies to **tabs only** — every product is still
-/// written to `export`, so a 31-member combinatorial run does not silently
-/// lose 7 files to a UI limit.
-fn run_and_materialize(
-    state: &mut AppState,
-    recipe: &Recipe,
-    selection: Selection,
-    export: Option<(PathBuf, seqforge_bio::ProductFormat)>,
-    origin: Option<seqforge_bio::OriginSpec>,
-) -> Result<Option<ViewerResponse>, DispatchError> {
-    // Resolve + run under an immutable borrow; drop it before materializing.
-    let result = {
-        let resolver = WorkspaceResolver {
-            ws: &state.workspace,
-        };
-        let compatible = |resolver: &WorkspaceResolver| -> Vec<usize> {
-            let (summaries, _) = seqforge_bio::enumerate_combos(recipe, resolver, None);
-            summaries
-                .into_iter()
-                .filter(|c| c.ok)
-                .map(|c| c.index)
-                .collect()
-        };
-        let indices: Vec<usize> = match selection {
-            Selection::Indices(Some(v)) => v,
-            Selection::Indices(None) => compatible(&resolver),
-            Selection::Spec(None) => compatible(&resolver),
-            Selection::Spec(Some(spec)) => {
-                let (summaries, _) = seqforge_bio::enumerate_combos(recipe, &resolver, None);
-                seqforge_bio::parse_combo_spec(&spec, summaries.len())
-                    .map_err(|e| DispatchError::InvalidInput(format!("combos: {e}")))?
-            }
-        };
-        seqforge_bio::run_indices(recipe, &resolver, &indices)
-    };
-
-    // Rotate before anything reads a coordinate, so the buffer, the file, and
-    // the reported spans agree on where position 0 is.
-    let mut result = result;
-    if let Some(spec) = &origin {
-        seqforge_bio::set_origins(&mut result.products, spec)
-            .map_err(DispatchError::InvalidInput)?;
-    }
-    let result = result;
-
-    for w in &result.warnings {
-        state.toasts.warning(format!("Assemble: {w}"));
-    }
-
-    let total = result.products.len();
-    if total == 0 {
-        state.toasts.warning("Assemble: no product produced");
-        return Ok(Some(ViewerResponse::Products {
-            count: 0,
-            products: Vec::new(),
-            warnings: result.warnings,
-        }));
-    }
-
-    // Export first (all of them), then materialize up to the tab cap.
-    let paths: Vec<Option<PathBuf>> = match &export {
-        Some((dir, format)) => seqforge_bio::write_products(&result.products, dir, *format)
-            .map_err(|e| DispatchError::InvalidInput(format!("write products: {e}")))?
-            .into_iter()
-            .map(Some)
-            .collect(),
-        None => vec![None; total],
-    };
-
-    let infos: Vec<ProductInfo> = result
-        .products
-        .iter()
-        .zip(&paths)
-        .map(|(p, path)| ProductInfo {
-            name: p.name.clone(),
-            length: p.fragment.len(),
-            topology: p.fragment.topology,
-            combo_index: p.combo_index,
-            parts: p.parts.iter().map(|c| c.source_name.clone()).collect(),
-            path: path.clone(),
-        })
-        .collect();
-
-    let capped = total > MAX_MATERIALIZED;
-    let mut first = None;
-    for prod in result.products.into_iter().take(MAX_MATERIALIZED) {
-        let ann =
-            Annotations::from_parts(prod.fragment.slice.features, prod.fragment.slice.primers);
-        let vid = state.workspace.new_buffer_annotated(
-            prod.name,
-            prod.fragment.slice.bytes,
-            prod.fragment.topology,
-            ann,
-        );
+    let first = opened.first().copied();
+    for vid in opened {
         layout::place_view_tab(state, vid);
-        first.get_or_insert(vid);
     }
     if let Some(vid) = first {
         layout::ensure_welcome_invariant(state);
         layout::dock_activate_view(state, vid);
         state.focus.set_scope(FocusScope::View(vid));
     }
-    if capped {
-        let written = if export.is_some() {
-            " (all were written to disk)"
-        } else {
-            ""
-        };
-        state.toasts.warning(format!(
-            "Assemble: {total} products, opened the first {MAX_MATERIALIZED}{written}"
-        ));
-    }
-    if let Some((dir, _)) = &export {
-        state.toasts.info(format!(
-            "Assemble: wrote {total} product(s) to {}",
-            dir.display()
-        ));
-    }
-    Ok(Some(ViewerResponse::Products {
-        count: infos.len(),
-        products: infos,
-        warnings: result.warnings,
-    }))
+    Ok(Some(response))
 }
 
 /// Workbench Run with an export directory — the GUI half of the parity pair
-/// with `seqforge assemble --out` / `seqforge run-recipe --out`.
+/// with `seqforge assemble --out`.
 pub(super) fn apply_run_recipe_to_dir(
     state: &mut AppState,
     id: RecipeId,
@@ -447,12 +245,19 @@ pub(super) fn apply_run_recipe_to_dir(
         v.sort_unstable();
         v
     });
-    run_and_materialize(
+    present_assemble(
         state,
-        &recipe,
-        Selection::Indices(selection),
-        Some((dir, seqforge_bio::ProductFormat::GenBank)),
-        None,
+        seqforge_session::AssembleOpts {
+            recipe,
+            dry_run: false,
+            fidelity_dataset: None,
+            fidelity_matrix: false,
+            emit_recipe: None,
+            out: Some(dir),
+            format: "genbank".into(),
+            combos: seqforge_session::ComboSelection::Indices(selection),
+            origin: None,
+        },
     )
 }
 

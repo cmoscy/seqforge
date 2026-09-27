@@ -1048,6 +1048,56 @@ pub enum ViewerResponse {
         products: Vec<ProductInfo>,
         warnings: Vec<String>,
     },
+    /// `Assemble --dry-run` — the plan without materializing products.
+    /// Both shells serde this; there is no hand-built dry-run JSON.
+    AssemblyDryRun {
+        bins: Vec<AssemblyBinPreview>,
+        combos: usize,
+        compatible_combos: usize,
+        combo_list: Vec<AssemblyComboPreview>,
+        warnings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fidelity_dataset: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fidelity_matrix: Option<FidelityMatrixPreview>,
+    },
+}
+
+/// One bin in an [`ViewerResponse::AssemblyDryRun`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssemblyBinPreview {
+    pub role: String,
+    pub fragments: usize,
+    pub warnings: Vec<String>,
+}
+
+/// One combo in an [`ViewerResponse::AssemblyDryRun`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssemblyComboPreview {
+    pub index: usize,
+    pub ok: bool,
+    pub parts: Vec<AssemblyPartPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fidelity_three_prime: bool,
+}
+
+/// One part of a dry-run combo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssemblyPartPreview {
+    pub source: String,
+    pub length: usize,
+}
+
+/// Subset ligation-frequency matrix on a dry-run (informational only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FidelityMatrixPreview {
+    pub combo_index: usize,
+    pub labels: Vec<String>,
+    pub counts: Vec<Vec<u32>>,
 }
 
 /// One open reading frame, projected by value.
@@ -1310,7 +1360,7 @@ fn difference_names(base: &[String], remove: &[String]) -> Vec<String> {
 /// `active_enzymes` + `methylation` against the live buffer bytes, and stamp
 /// `results_version`. The single scan implementation: the `Enzymes` command sets
 /// the params then calls this; [`rescan_if_stale`] calls it when the stamp lags.
-fn scan_cut_sites<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
+fn scan_cut_sites<B: BioOps + ?Sized>(view: &mut View, buffer: &Buffer, bio: &B) {
     let circular = buffer.is_circular();
     let refs: Vec<&str> = view.active_enzymes.iter().map(String::as_str).collect();
     let sites = bio.find_cut_sites(&buffer.text, &refs, circular);
@@ -1330,7 +1380,7 @@ fn scan_cut_sites<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
 /// restriction digest) — calls this first, keyed to the view it is about to read.
 /// Correctness therefore never depends on GUI focus/active-view events, which CLI
 /// callers do not generate.
-pub fn rescan_if_stale<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
+pub fn rescan_if_stale<B: BioOps + ?Sized>(view: &mut View, buffer: &Buffer, bio: &B) {
     if view.cut_sites_stale(buffer.version) {
         scan_cut_sites(view, buffer, bio);
     }
@@ -1340,7 +1390,7 @@ pub fn rescan_if_stale<B: BioOps>(view: &mut View, buffer: &Buffer, bio: &B) {
     }
 }
 
-pub fn dispatch<B: BioOps>(
+pub fn dispatch<B: BioOps + ?Sized>(
     view: &mut View,
     buffer: &Buffer,
     annotations: &mut Annotations,

@@ -63,15 +63,13 @@ interchangeable from the pane's view.
 ### Two accuracy caveats (verified against the code)
 
 1. **The `ViewerRequest` seam is single-source on the wire, split on
-   dispatch.** clap + serde reach CLI + JSON-RPC for *any* variant. But
-   **read-ops** flow through `seqforge-core::dispatch`, while the editor
-   **write-ops** are deliberately excluded from `dispatch` (it `unreachable!()`s
-   on them) and hand-routed through `seqforge-app`'s `command/edit.rs` — forced
-   by the core⊘bio boundary (decision 9: mutating ops need history + `bio`-derived
-   bytes, which `core` must not depend on). So a plugin op picks a path: a pure
-   read/query op can ride `dispatch`; a mutating op wires through the app write
-   path. Do **not** describe this as "add a variant, get everything for free" —
-   that holds only for the wire/CLI surface.
+   kind.** clap + serde reach CLI + JSON-RPC for *any* variant. Interpretation
+   is `seqforge_session::execute` → **edit** / **query** / **produce**
+   (`docs/architecture.md`). `core::dispatch` is query-only (it
+   `unreachable!()`s on edits); mutating and producing need history and/or
+   `bio`, which decision 9 keeps out of `core`. Do **not** describe this as
+   "add a variant, get everything for free" — that holds only for the
+   wire/CLI surface; the body still lands in the matching session module.
 2. **`SEQFORGE_SOCKET` reaches the terminal child via process-global
    `std::env::set_var`** (`terminal.rs`), not explicit child-env injection into
    the PTY `BackendSettings`. It works today, but the mechanism is global and

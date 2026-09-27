@@ -22,8 +22,9 @@ pub mod topology;
 pub mod transport;
 
 pub use commands::{
-    BioOps, DispatchError, DocInfo, EnzymeOp, OrfInfo, PrimerInfo, PrimerSiteInfo, PrimerState,
-    ProductInfo, Target, TargetKind, ViewerRequest, ViewerResponse, dispatch, rescan_if_stale,
+    AssemblyBinPreview, AssemblyComboPreview, AssemblyPartPreview, BioOps, DispatchError, DocInfo,
+    EnzymeOp, FidelityMatrixPreview, OrfInfo, PrimerInfo, PrimerSiteInfo, PrimerState, ProductInfo,
+    Target, TargetKind, ViewerRequest, ViewerResponse, dispatch, rescan_if_stale,
 };
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,
