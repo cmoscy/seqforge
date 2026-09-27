@@ -23,7 +23,7 @@ use seqforge_core::{
 };
 
 use crate::clipboard::filter_bases as iupac_filter;
-use crate::command::{AppCommand, PendingCommand};
+use crate::command::{AppCommand, PendingCommand, StagedEdit};
 use crate::config::Config;
 
 use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
@@ -486,6 +486,7 @@ fn handle_keyboard(
                 ViewerRequest::Copy {
                     start,
                     end,
+                    reverse: false,
                     target: Target::view(vid),
                 },
             );
@@ -500,6 +501,7 @@ fn handle_keyboard(
                 ViewerRequest::Copy {
                     start: 0,
                     end: 0,
+                    reverse: false,
                     target: Target::view(vid),
                 },
             );
@@ -660,11 +662,16 @@ pub struct SequenceView {
     /// The feature under the pointer at the last right-click, captured so the
     /// context menu (Rename / Remove / Translate) can act on a stable
     /// `FeatureId` while the menu is open. `None` when the last secondary click
-    /// missed every annotation bar (the menu then renders nothing).
+    /// missed every annotation bar (the sequence / ORF menu is shown instead).
     context_feature: Option<FeatureContext>,
     /// The ORF under the pointer at the last right-click in a frame lane (when no
     /// feature was hit), enabling "Annotate ORF as CDS feature".
     context_orf: Option<OrfPromote>,
+    /// Sequence index under the pointer at the last right-click (when no feature
+    /// / ORF was hit). Drives Paste position and Set Origin on the sequence
+    /// context menu. Falls back to the caret when the click missed the sequence
+    /// row. `None` until the first sequence right-click.
+    context_seq_pos: Option<usize>,
     /// Which in-canvas translation lanes are shown (View → Translation). Transient
     /// per-view state (like the active enzyme set), toggled through `AppCommand`.
     pub translation: TranslationDisplay,
@@ -1286,7 +1293,7 @@ impl SequenceView {
                 }
             }
 
-            // ── Right-click a feature → context menu ──────────────────────
+            // ── Right-click → context menu (feature / ORF / sequence) ─────
             if response.secondary_clicked() {
                 self.context_feature = ptr.and_then(|p| {
                     find_hit(&hits, p, Hit::as_feature)
@@ -1299,15 +1306,30 @@ impl SequenceView {
                 } else {
                     ptr.and_then(|p| find_hit(&hits, p, Hit::as_orf))
                 };
+                // Sequence menu: remember the click position (or caret fallback).
+                self.context_seq_pos =
+                    if self.context_feature.is_some() || self.context_orf.is_some() {
+                        None
+                    } else {
+                        ptr_seq.or_else(|| view.selection.text_range().map(|s| s.ordered().0))
+                    };
             }
             let ctx_feat = self.context_feature.clone();
             let ctx_orf = self.context_orf;
+            let ctx_seq_pos = self.context_seq_pos;
             let feat_translated = ctx_feat
                 .as_ref()
                 .is_some_and(|fc| self.translation.features.contains(&fc.id));
+            // Operands for the sequence menu (feature/ORF branches ignore these).
+            let seq_sel_range = selection.filter(|s| !s.is_cursor()).map(|s| s.ordered());
+            let seq_paste_pos = ctx_seq_pos
+                .or_else(|| selection.map(|s| s.ordered().0))
+                .unwrap_or(0);
+            let seq_can_paste = !clipboard.is_empty();
+            let seq_is_circular = buffer.is_circular();
             response.context_menu(|ui| {
                 let Some(fc) = ctx_feat else {
-                    // No feature under the click — offer ORF promotion if one is.
+                    // No feature under the click — ORF promotion, else sequence menu.
                     if let Some(orf) = ctx_orf {
                         ui.label(egui::RichText::new("ORF").strong());
                         ui.separator();
@@ -1325,8 +1347,136 @@ impl SequenceView {
                             ));
                             ui.close_menu();
                         }
-                    } else {
+                        return;
+                    }
+                    // ── Sequence context menu ─────────────────────────────
+                    let has_range = seq_sel_range.is_some();
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Copy  ⌘C"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = seq_sel_range {
+                            cmds.push((
+                                AppCommand::Viewer(ViewerRequest::Copy {
+                                    start,
+                                    end,
+                                    reverse: false,
+                                    target: Target::active(),
+                                }),
+                                None,
+                            ));
+                        }
                         ui.close_menu();
+                    }
+                    ui.add_enabled_ui(has_range, |ui| {
+                        ui.menu_button("Copy As", |ui| {
+                            if ui.button("Reverse Complement").clicked() {
+                                if let Some((start, end)) = seq_sel_range {
+                                    cmds.push((
+                                        AppCommand::Viewer(ViewerRequest::Copy {
+                                            start,
+                                            end,
+                                            reverse: true,
+                                            target: Target::active(),
+                                        }),
+                                        None,
+                                    ));
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("Amino Acids").clicked() {
+                                if let Some((start, end)) = seq_sel_range {
+                                    cmds.push((AppCommand::CopyAminoAcids { start, end }, None));
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    });
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Cut  ⌘X"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = seq_sel_range {
+                            cmds.push((
+                                AppCommand::StageEdit(StagedEdit::Cut { start, end }),
+                                None,
+                            ));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(seq_can_paste, egui::Button::new("Paste  ⌘V"))
+                        .clicked()
+                    {
+                        cmds.push((
+                            AppCommand::StageEdit(StagedEdit::Paste { pos: seq_paste_pos }),
+                            None,
+                        ));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Delete"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = seq_sel_range {
+                            cmds.push((
+                                AppCommand::StageEdit(StagedEdit::Delete { start, end }),
+                                None,
+                            ));
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("New Feature from Selection…"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = seq_sel_range {
+                            cmds.push((
+                                AppCommand::OpenFeatureForm {
+                                    id: None,
+                                    label: String::new(),
+                                    kind: "misc_feature".to_string(),
+                                    strand: "+".to_string(),
+                                    start,
+                                    end,
+                                },
+                                None,
+                            ));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_range, egui::Button::new("Translate in window…"))
+                        .clicked()
+                    {
+                        if let Some((start, end)) = seq_sel_range {
+                            cmds.push((
+                                AppCommand::OpenTranslation {
+                                    title: "Selection".to_string(),
+                                    start,
+                                    end,
+                                    strand: Strand::Forward,
+                                    frame: 1,
+                                },
+                                None,
+                            ));
+                        }
+                        ui.close_menu();
+                    }
+                    if seq_is_circular {
+                        ui.separator();
+                        if ui.button("Set Origin at cursor").clicked() {
+                            cmds.push((
+                                AppCommand::Viewer(ViewerRequest::SetOrigin {
+                                    index: Some(seq_paste_pos),
+                                    feature: None,
+                                    target: Target::active(),
+                                }),
+                                None,
+                            ));
+                            ui.close_menu();
+                        }
                     }
                     return;
                 };

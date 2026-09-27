@@ -42,4 +42,6 @@ pub use recipe::{
 };
 pub use span::{Pieces, Span};
 pub use topology::{reverse_complement_circular, rotate_origin};
-pub use transport::{Orient, PartialPolicy, SeqSlice, extract, place};
+pub use transport::{
+    Orient, PartialPolicy, SeqSlice, extract, place, reverse_complement_annotations,
+};

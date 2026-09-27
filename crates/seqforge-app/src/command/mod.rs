@@ -226,6 +226,13 @@ pub enum AppCommand {
         strand: seqforge_core::Strand,
         frame: usize,
     },
+    /// Copy the translated protein for `[start, end)` to the OS clipboard as
+    /// plain text (forward strand, frame 1). Does **not** fill the sequence
+    /// clipboard — protein letters must not become a Paste payload.
+    CopyAminoAcids {
+        start: usize,
+        end: usize,
+    },
 
     // ── Tools ────────────────────────────────────────────────────────
     InstallCli,
@@ -411,6 +418,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         | ToggleFeatureTranslation(_)
         | SetPrimerDisplay(_)
         | SetFeatureVisibility(_) => state.workspace.active_view().is_some(),
+        CopyAminoAcids { .. } => has_range_selection(state),
         SubmitFeatureForm { .. } | OpenRenameFeature { .. } | SubmitRenameFeature { .. } => {
             state.workspace.active_view().is_some()
         }
@@ -831,6 +839,7 @@ pub fn apply<B: BioOps>(
             strand,
             frame,
         } => nav::apply_open_translation(state, title, start, end, strand, frame),
+        CopyAminoAcids { start, end } => edit::apply_copy_amino_acids(state, start, end),
 
         // ── In-canvas staging (menu) ────────────────────────────────
         StageEdit(edit) => stage::apply_stage_edit(state, edit),

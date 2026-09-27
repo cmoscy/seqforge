@@ -503,6 +503,25 @@ pub fn place(
     ids
 }
 
+/// Mirror feature/primer coordinates and flip strands on a [`SeqSlice`] in place.
+///
+/// Pair with a byte reverse-complement outside this crate (`core` cannot call
+/// `bio`). Used by copy-as-RC before the slice lands on the clipboard; the
+/// transforms match [`place`] with [`Orient::Rev`] at offset 0.
+pub fn reverse_complement_annotations(slice: &mut SeqSlice) {
+    let l = slice.len();
+    for f in &mut slice.features {
+        f.location = f.location.mirrored(l);
+        f.strand = flip_strand(f.strand);
+    }
+    for p in &mut slice.primers {
+        if let Some(b) = &p.binding {
+            p.binding = Some(b.mirrored(l));
+        }
+        p.strand = flip_strand(p.strand);
+    }
+}
+
 // ── merge (provenance-gated) ──────────────────────────────────────────────────
 
 /// Coalesce features that share a **source identity** ([`Lineage::same_source`])
@@ -869,6 +888,22 @@ mod tests {
         assert_eq!(p.binding, Some(Span::new(6, 3)));
         assert_eq!(p.strand, Strand::Reverse);
         assert_eq!(p.sequence, "ACGT"); // physical oligo unchanged
+    }
+
+    #[test]
+    fn reverse_complement_annotations_matches_place_rev_at_zero() {
+        // Same geometry as place_rev_mirrors_coords_and_flips_strand, but via the
+        // clipboard helper (copy-as-RC) rather than place.
+        let mut slice = SeqSlice {
+            bytes: vec![b'A'; 10],
+            features: vec![feat(1, 4, Strand::Forward)],
+            primers: vec![primer(Some(1..4), Strand::Forward)],
+        };
+        reverse_complement_annotations(&mut slice);
+        assert_eq!(slice.features[0].bounds(10), 6..9);
+        assert_eq!(slice.features[0].strand, Strand::Reverse);
+        assert_eq!(slice.primers[0].binding, Some(Span::new(6, 3)));
+        assert_eq!(slice.primers[0].strand, Strand::Reverse);
     }
 
     // ── merge (provenance-gated) ─────────────────────────────────────────────

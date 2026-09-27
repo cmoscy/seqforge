@@ -291,9 +291,17 @@ pub enum ViewerRequest {
         target: Target,
     },
     /// Copy the bases in `[start, end)` to the clipboard.
+    ///
+    /// With `--reverse` / `reverse: true`, the clipboard holds the reverse
+    /// complement of the region (annotations mirrored) so a later paste inserts
+    /// the other strand. The molecule itself is unchanged.
     Copy {
         start: usize,
         end: usize,
+        /// Reverse-complement the copied slice (clipboard only).
+        #[arg(long, default_value_t = false)]
+        #[serde(default)]
+        reverse: bool,
         #[command(flatten)]
         #[serde(flatten)]
         target: Target,

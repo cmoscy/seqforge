@@ -222,7 +222,7 @@ impl RenameFeatureForm {
 /// Read-only translation window: protein derived from DNA + strand + frame
 /// (recomputed live from these fields each frame). Opened from the feature
 /// context menu (prefilled from a CDS's strand + `/codon_start`) or from
-/// `Tools → Translate Selection…` (frame user-adjustable, default 1).
+/// `Tools → Translate in window…` (frame user-adjustable, default 1).
 pub struct TranslationView {
     /// Feature label or `"Selection"` — window subtitle.
     pub title: String,

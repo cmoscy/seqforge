@@ -107,6 +107,34 @@ pub(super) fn apply_save_as(
         .push((AppCommand::OpenSaveAs { view: Some(vid) }, None));
     Ok(None)
 }
+
+/// Copy the translated protein for `[start, end)` to the OS as plain text.
+/// Clears the sequence clipboard so Paste does not adopt protein letters as
+/// bases (IUPAC overlap). Forward strand, frame 1 — same defaults as
+/// Tools → Translate in window.
+pub(super) fn apply_copy_amino_acids(
+    state: &mut AppState,
+    start: usize,
+    end: usize,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let vid = edit::resolve_target(&state.workspace, None)?;
+    let protein = state.workspace.with_buffer(vid, |_, buf, _| {
+        let len = buf.text.len();
+        if start >= end || end > len {
+            return Err(DispatchError::InvalidInput(format!(
+                "range {start}..{end} is invalid for a sequence of length {len}"
+            )));
+        }
+        Ok(seqforge_bio::translate(
+            &buf.text[start..end],
+            seqforge_core::Strand::Forward,
+            1,
+        ))
+    })??;
+    crate::clipboard::set_plain_export(&mut state.clipboard, &protein);
+    Ok(Some(ViewerResponse::Ok))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -129,7 +157,7 @@ mod tests {
         end: usize,
     ) -> Result<Option<ViewerResponse>, DispatchError> {
         let (ws, mut host) = s.session();
-        sedit::apply_copy(ws, &mut host, view, start, end)
+        sedit::apply_copy(ws, &mut host, view, start, end, false)
     }
 
     fn h_cut(
@@ -549,6 +577,7 @@ mod tests {
             AppCommand::Viewer(ViewerRequest::Copy {
                 start: 2,
                 end: 8,
+                reverse: false,
                 target: Target::active(),
             }),
             &mut s,
@@ -565,6 +594,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feature_spans(&mut s), vec![3..6, 13..16]);
+    }
+
+    #[test]
+    fn copy_amino_acids_exports_protein_without_paste_payload() {
+        // ATG = M; sequence clipboard must stay empty so Paste cannot adopt AA.
+        use seqforge_core::ViewerRequest;
+        let mut s = state_with(b"ATGAAATAG");
+        s.workspace.active_view_mut().unwrap().selection =
+            ViewSelection::Text(Selection::range(0, 9));
+        crate::command::apply(
+            AppCommand::CopyAminoAcids { start: 0, end: 9 },
+            &mut s,
+            &LoadBio,
+        )
+        .unwrap();
+        assert!(
+            s.clipboard.is_empty(),
+            "AA export must not fill the sequence clipboard"
+        );
+        assert!(!crate::command::is_enabled(
+            &AppCommand::Viewer(ViewerRequest::Paste {
+                pos: 0,
+                target: Target::active(),
+            }),
+            &s
+        ));
     }
 
     #[test]

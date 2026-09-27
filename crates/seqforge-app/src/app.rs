@@ -1309,6 +1309,7 @@ impl eframe::App for SeqForgeApp {
                     let copy_probe = ViewerRequest::Copy {
                         start: 0,
                         end: 0,
+                        reverse: false,
                         target: Target::active(),
                     };
                     let can_copy =
@@ -1335,6 +1336,7 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
                                 start,
                                 end,
+                                reverse: false,
                                 target: Target::active(),
                             }));
                         } else if self
@@ -1347,11 +1349,34 @@ impl eframe::App for SeqForgeApp {
                             menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
                                 start: 0,
                                 end: 0,
+                                reverse: false,
                                 target: Target::active(),
                             }));
                         }
                         ui.close_menu();
                     }
+                    // Copy As formats need a nucleotide range (not a bare primer).
+                    ui.add_enabled_ui(has_range, |ui| {
+                        ui.menu_button("Copy As", |ui| {
+                            if ui.button("Reverse Complement").clicked() {
+                                if let Some((start, end)) = sel_range {
+                                    menu_cmds.push(AppCommand::Viewer(ViewerRequest::Copy {
+                                        start,
+                                        end,
+                                        reverse: true,
+                                        target: Target::active(),
+                                    }));
+                                }
+                                ui.close_menu();
+                            }
+                            if ui.button("Amino Acids").clicked() {
+                                if let Some((start, end)) = sel_range {
+                                    menu_cmds.push(AppCommand::CopyAminoAcids { start, end });
+                                }
+                                ui.close_menu();
+                            }
+                        });
+                    });
                     let paste_req = ViewerRequest::Paste {
                         pos: paste_pos,
                         target: Target::active(),
@@ -1546,7 +1571,7 @@ impl eframe::App for SeqForgeApp {
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(has_range, egui::Button::new("Translate Selection…"))
+                        .add_enabled(has_range, egui::Button::new("Translate in window…"))
                         .clicked()
                     {
                         if let Some((start, end)) = sel_range {

@@ -239,6 +239,7 @@ pub fn apply_copy(
     view: Option<ViewId>,
     start: usize,
     end: usize,
+    reverse: bool,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(ws, view)?;
     // Object-aware copy (decision 15 / Phase 1.5c + 1.5e): copy the authored oligo
@@ -251,8 +252,14 @@ pub fn apply_copy(
     // an off-footprint range copy (CLI/agent) still yields a literal slice — parity
     // holds. The object-vs-range invariant means `selected_primer` is only set when
     // there's no conflicting text selection.
-    let oligo = ws
-        .with_buffer(vid, |v, _buf, ann| {
+    //
+    // `reverse` (copy-as-RC) skips the oligo shortcut: a reverse-complement copy is
+    // always a region of the template (or the RC of those bases when the range is
+    // empty / oligo-only callers pass reverse=false).
+    let oligo = if reverse {
+        None
+    } else {
+        ws.with_buffer(vid, |v, _buf, ann| {
             let id = v.selection.selected_primer()?;
             let p = ann.primer(id)?;
             let is_footprint = p
@@ -262,12 +269,13 @@ pub fn apply_copy(
             (start == end || is_footprint).then(|| p.sequence.clone().into_bytes())
         })
         .ok()
-        .flatten();
+        .flatten()
+    };
 
     // A selected-primer copy carries only the authored oligo bytes (no template
     // features/primers ride along — it's a reagent, not a region). A region copy
     // carries the full annotated slice (features + primers) via `extract`.
-    let slice = match oligo {
+    let mut slice = match oligo {
         Some(bytes) => SeqSlice {
             bytes,
             features: Vec::new(),
@@ -275,6 +283,11 @@ pub fn apply_copy(
         },
         None => extract_region(ws, vid, start..end)?,
     };
+    if reverse {
+        // Bytes via bio; annotation mirror in core (place's Orient::Rev at 0).
+        slice.bytes = seqforge_bio::reverse_complement(&slice.bytes);
+        seqforge_core::transport::reverse_complement_annotations(&mut slice);
+    }
     let len = slice.bytes.len();
     host.clipboard_set(slice);
     // Copy doesn't mutate the buffer — report the copied length, not a buffer
@@ -795,10 +808,22 @@ mod tests {
         let mut ws = ws_with(b"ATGCATGC");
         let mut host = NullHost::default();
 
-        apply_copy(&mut ws, &mut host, None, 0, 4).unwrap();
+        apply_copy(&mut ws, &mut host, None, 0, 4, false).unwrap();
         apply_paste(&mut ws, &mut host, None, 8).unwrap();
 
         assert_eq!(text(&mut ws), b"ATGCATGCATGC");
+    }
+
+    #[test]
+    fn copy_reverse_puts_rc_on_clipboard_without_mutating() {
+        let mut ws = ws_with(b"ATGCATGC");
+        let mut host = NullHost::default();
+        apply_copy(&mut ws, &mut host, None, 0, 4, true).unwrap();
+        assert_eq!(text(&mut ws), b"ATGCATGC", "copy-as-RC must not edit");
+        let slice = host.clipboard_get().expect("clipboard filled");
+        assert_eq!(slice.bytes(), b"GCAT", "RC of ATGC");
+        apply_paste(&mut ws, &mut host, None, 8).unwrap();
+        assert_eq!(text(&mut ws), b"ATGCATGCGCAT");
     }
 
     #[test]

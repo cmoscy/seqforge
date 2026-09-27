@@ -168,9 +168,12 @@ pub fn execute(
         ViewerRequest::Cut { start, end, target } => {
             from_edit(edit::apply_cut(ws, host, target.view, start, end))
         }
-        ViewerRequest::Copy { start, end, target } => {
-            from_edit(edit::apply_copy(ws, host, target.view, start, end))
-        }
+        ViewerRequest::Copy {
+            start,
+            end,
+            reverse,
+            target,
+        } => from_edit(edit::apply_copy(ws, host, target.view, start, end, reverse)),
         ViewerRequest::Paste { pos, target } => {
             from_edit(edit::apply_paste(ws, host, target.view, pos))
         }

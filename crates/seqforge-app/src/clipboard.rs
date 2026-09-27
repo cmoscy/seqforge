@@ -110,6 +110,38 @@ pub fn set_slice_cache(clip: &mut ClipboardState, slice: SeqSlice) {
     }
 }
 
+/// Write plain text to the OS clipboard **without** adopting it as a pasteable
+/// sequence. Clears the session [`SeqSlice`] so Paste stays empty / grey.
+///
+/// Used for amino-acid export: protein letters overlap the IUPAC alphabet, so
+/// putting them through [`set_slice_cache`] / [`sync_with_plain_hint`] would
+/// leave a bogus DNA paste payload.
+pub fn set_plain_export(clip: &mut ClipboardState, text: &str) {
+    clip.slice = None;
+    clip.last_text = Some(text.to_owned());
+
+    if clip.memory_only {
+        clip.owned_gen = Some(0);
+        clip.last_seen_gen = Some(0);
+        return;
+    }
+
+    match os_set_text(text) {
+        Ok(()) => {
+            let pb_gen = os_generation();
+            clip.owned_gen = pb_gen;
+            clip.last_seen_gen = pb_gen;
+            #[cfg(test)]
+            test_os::note_write(text, pb_gen);
+        }
+        Err(_) => {
+            clip.memory_only = true;
+            clip.owned_gen = Some(0);
+            clip.last_seen_gen = Some(0);
+        }
+    }
+}
+
 /// Reconcile the cache with the system clipboard (no paste-event hint).
 pub fn sync_from_os(state: &mut AppState) {
     sync_with_plain_hint(&mut state.clipboard, None);
@@ -398,6 +430,22 @@ mod tests {
         // No prior ownership — hint alone populates the cache.
         sync_with_plain_hint(&mut s.clipboard, Some("at gc\nZZ"));
         assert_eq!(s.clipboard.bytes(), Some(b"ATGC".as_slice()));
+        test_os::clear();
+    }
+
+    #[test]
+    fn plain_export_clears_slice_and_survives_sync() {
+        // Amino-acid export must not leave a pasteable SeqSlice (protein letters
+        // overlap IUPAC). Ownership keeps sync from re-adopting the OS text.
+        let mut s = state_gui();
+        set_slice_cache(&mut s.clipboard, rich_slice());
+        set_plain_export(&mut s.clipboard, "MKT*");
+        assert!(s.clipboard.is_empty(), "session slice cleared");
+        sync_from_os(&mut s);
+        assert!(
+            s.clipboard.is_empty(),
+            "owned plain export must not become a DNA paste"
+        );
         test_os::clear();
     }
 
