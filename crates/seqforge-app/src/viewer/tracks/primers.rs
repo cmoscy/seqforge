@@ -9,8 +9,8 @@
 //! the primer's own row**, dimmed, with a notch at the anneal boundary — it is
 //! part of the primer's shape, not a base-rendering extra, so it draws in arrow
 //! mode too (as a dimmed rule + length). It stays on-row deliberately: the band
-//! reserves `n_rows × primer_row_h`, so anything raised above the top row lands
-//! in the ruler. A **moved** badge marks
+//! reserves `n_rows × primer_row_h`, so anything raised above the top row would
+//! collide with cut labels / the previous wrap. A **moved** badge marks
 //! [`AttachmentState::Drifted`] primers; an **×N** badge counts off-target sites.
 //!
 //! The per-primer alignment (annealed / mismatch / tail, strand-correct) comes
@@ -249,9 +249,10 @@ fn paint_band(
         // dimmed hue with a thin notch at the junction — the SnapGene/Benchling
         // idiom. It deliberately does not lift into a separate row: the band
         // reserves `n_rows × primer_row_h` and nothing more, so a raised ribbon
-        // on the top row lands in the ruler. Keeping it on-row also means a tail
-        // can never collide with a neighbouring primer that `stack_primers`
-        // packed beside it. Drawn only in the block holding the 5' end.
+        // on the top row would collide with cut labels / the previous wrap.
+        // Keeping it on-row also means a tail can never collide with a
+        // neighbouring primer that `stack_primers` packed beside it. Drawn only
+        // in the block holding the 5' end.
         //
         // Every tail base is lettered. This used to cap at 8 and collapse the
         // rest into a `+N` stub, which hid exactly the bases a tail exists to

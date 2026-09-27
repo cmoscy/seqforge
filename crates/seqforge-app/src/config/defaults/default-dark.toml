@@ -1,12 +1,12 @@
 [bases]
-A = "#009640"
-T = "#C81E3C"
-G = "#DC7800"
-C = "#3264DC"
-other = "#555555"
+A = "#E8E8E8"
+T = "#E8E8E8"
+G = "#E8E8E8"
+C = "#E8E8E8"
+other = "#8A8A8A"
 
 [ui]
-selection      = "#ADD6FF"
+selection      = "#3A6EA8CC"
 cursor         = "#3278FF"
 cut_site       = "#9CA8B8"
 label_text     = "#FFFFFF"   # used on dark feature swatches

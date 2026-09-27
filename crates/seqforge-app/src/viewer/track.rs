@@ -206,6 +206,9 @@ pub(crate) struct BlockLayout {
     /// As above for **reverse** primers (band below the bottom strand).
     pub primer_rev_rows: Vec<(usize, usize)>,
     pub primer_rev_band_h: f32,
+    /// Extra air above the letter rows when cut + forward-primer bands fall short
+    /// of `Style::min_above_sequence`. Owned by the Sequence track's height.
+    pub seq_top_pad: f32,
     /// Total height including ruler + both strands + gap.
     pub height: f32,
 }
@@ -215,9 +218,10 @@ pub(crate) struct BlockLayout {
 /// `offsets[n_blocks]` is the total content height.
 ///
 /// The per-block height is the sum of every track's `block_height` plus the
-/// trailing `block_gap`, in track order (CutLabels · Ruler · Sequence ·
-/// Translation · Features); `TrackStack::y0s` re-derives the same prefix sums so
-/// a track's painted position matches the offsets computed here.
+/// trailing `block_gap`, in track order (CutLabels · PrimerForward · Sequence ·
+/// Translation · PrimerReverse · Features · Ruler); `TrackStack::y0s` re-derives
+/// the same prefix sums so a track's painted position matches the offsets
+/// computed here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_block_layouts(
     annotations: &Annotations,
@@ -354,9 +358,12 @@ pub(crate) fn build_block_layouts(
         let primer_rev_band_h = n_rev_rows as f32 * style.primer_row_h;
 
         let cut_label_h = cut_band_lines as f32 * style.cut_label_row_h;
+        let occupied_above = cut_label_h + primer_fwd_band_h;
+        let seq_top_pad = (style.min_above_sequence - occupied_above).max(0.0);
         let height = cut_label_h
             + style.ruler_h
             + primer_fwd_band_h
+            + seq_top_pad
             + style.strand_h * 2.0
             + primer_rev_band_h
             + trans_band_h
@@ -374,6 +381,7 @@ pub(crate) fn build_block_layouts(
             primer_fwd_band_h,
             primer_rev_rows,
             primer_rev_band_h,
+            seq_top_pad,
             height,
         });
     }
@@ -614,6 +622,8 @@ pub(crate) struct Style {
     /// Height of one primer-arrow stack row (arrow body + tail lift-off).
     pub primer_row_h: f32,
     pub block_gap: f32,
+    /// Floor clearance above the dual strand (see `EditorSettings::min_above_sequence`).
+    pub min_above_sequence: f32,
     pub line_width: usize,
     pub label_overflow: LabelOverflow,
     // fonts
@@ -739,12 +749,15 @@ pub(crate) trait Track {
 /// Index of the Sequence track in the layout order — the strands, whose `y0`
 /// every connector track (cut-site staples, primer bands) reaches to. Must match
 /// the Sequence track's position in [`TrackStack::new`].
-const SEQUENCE_TRACK: usize = 3;
+const SEQUENCE_TRACK: usize = 2;
+/// Cut-sites track index — painted last so hover staples overlay the strands.
+const CUT_SITES_TRACK: usize = 0;
 
 /// The ordered set of tracks and the one block loop over them. Layout order
-/// (top→bottom) is CutLabels · Ruler · Sequence · Translation · Features; the
-/// paint order defers the CutSites track so its hover staple lands **on top of**
-/// the strands it crosses (z-order preserved from the pre-refactor monolith).
+/// (top→bottom) is CutLabels · PrimerForward · Sequence · Translation ·
+/// PrimerReverse · Features · Ruler (Benchling-style: ruler captions the whole
+/// strip). Paint order defers CutSites so its hover staple lands **on top of**
+/// the strands it crosses.
 pub(crate) struct TrackStack {
     tracks: Vec<Box<dyn Track>>,
     /// Indices into `tracks` in painting (z) order.
@@ -766,21 +779,23 @@ impl TrackStack {
         // Layout order (top→bottom): forward primers above the top strand,
         // reverse primers below the bottom strand — straddling the Sequence track
         // (decision 14 render; SnapGene/Benchling idiom). Below the strand the
-        // codon-aligned Translation band hugs the bases (innermost), then reverse
-        // primers, then Features outermost — distance from the bases tracks how
-        // base-level each lane is.
+        // codon-aligned Translation band hugs the bases, then reverse primers,
+        // then Features, then the position Ruler outermost — numbers caption the
+        // whole block (Benchling).
         let tracks: Vec<Box<dyn Track>> = vec![
-            Box::new(CutSitesTrack),      // 0
-            Box::new(RulerTrack),         // 1
-            Box::new(PrimerForwardTrack), // 2
-            Box::new(SequenceTrack),      // 3 (== SEQUENCE_TRACK)
-            Box::new(TranslationTrack),   // 4 — codon band hugs the bases
-            Box::new(PrimerReverseTrack), // 5
-            Box::new(FeaturesTrack),      // 6
+            Box::new(CutSitesTrack),      // 0 (== CUT_SITES_TRACK)
+            Box::new(PrimerForwardTrack), // 1
+            Box::new(SequenceTrack),      // 2 (== SEQUENCE_TRACK)
+            Box::new(TranslationTrack),   // 3 — codon band hugs the bases
+            Box::new(PrimerReverseTrack), // 4
+            Box::new(FeaturesTrack),      // 5
+            Box::new(RulerTrack),          // 6 — below annotations
         ];
-        // Paint every track in layout order, then the cut-site staples last so
-        // they overlay the strands / translation band they descend through.
-        let paint_order = vec![1, 2, 3, 4, 5, 6, 0];
+        // Paint cut-site staples last so they overlay strands / translation.
+        let paint_order: Vec<usize> = (0..tracks.len())
+            .filter(|&i| i != CUT_SITES_TRACK)
+            .chain([CUT_SITES_TRACK])
+            .collect();
         Self {
             tracks,
             paint_order,
@@ -806,13 +821,15 @@ impl TrackStack {
         seq_x0: f32,
         rect_min_x: f32,
         strand_h: f32,
+        seq_top_pad: f32,
     ) -> BlockGeom {
+        let strand_top_y = y0s[SEQUENCE_TRACK] + seq_top_pad;
         BlockGeom {
             y0: y0s[idx],
             seq_x0,
             rect_min_x,
-            strand_top_y: y0s[SEQUENCE_TRACK],
-            strand_bot_y: y0s[SEQUENCE_TRACK] + strand_h,
+            strand_top_y,
+            strand_bot_y: strand_top_y + strand_h,
         }
     }
 
@@ -827,8 +844,9 @@ impl TrackStack {
     ) {
         let y0s = self.y0s(ctx, block_top);
         let strand_h = ctx.style.strand_h;
+        let seq_top_pad = ctx.layout.seq_top_pad;
         for &idx in &self.paint_order {
-            let geom = self.geom_for(&y0s, idx, seq_x0, rect_min_x, strand_h);
+            let geom = self.geom_for(&y0s, idx, seq_x0, rect_min_x, strand_h, seq_top_pad);
             self.tracks[idx].paint(ctx, &geom, painter);
         }
     }
@@ -844,8 +862,9 @@ impl TrackStack {
     ) {
         let y0s = self.y0s(ctx, block_top);
         let strand_h = ctx.style.strand_h;
+        let seq_top_pad = ctx.layout.seq_top_pad;
         for idx in 0..self.tracks.len() {
-            let geom = self.geom_for(&y0s, idx, seq_x0, rect_min_x, strand_h);
+            let geom = self.geom_for(&y0s, idx, seq_x0, rect_min_x, strand_h, seq_top_pad);
             self.tracks[idx].hit_rects(ctx, &geom, hits);
         }
     }
@@ -1238,6 +1257,7 @@ mod tests {
             aa_row_h: 14.0,
             primer_row_h: 14.0,
             block_gap: 10.0,
+            min_above_sequence: 32.0,
             line_width: 20,
             label_overflow: LabelOverflow::Truncate,
             font_id: FontId::monospace(12.0),
@@ -1863,10 +1883,10 @@ mod tests {
 
         for (idx, what) in [
             (0, "cut band"),
-            (2, "forward primer band"),
-            (4, "translation band"),
-            (5, "reverse primer band"),
-            (6, "feature band"),
+            (1, "forward primer band"),
+            (3, "translation band"),
+            (4, "reverse primer band"),
+            (5, "feature band"),
         ] {
             assert!(
                 heights[idx] > 0.0,
@@ -1879,6 +1899,45 @@ mod tests {
             (sum - fx.layout().height).abs() < 1e-3,
             "Σ track heights + gap ({sum}) must equal build_block_layouts height ({})",
             fx.layout().height
+        );
+        // Cuts + forward primers already exceed min_above_sequence → no pad.
+        assert!(
+            fx.layout().seq_top_pad.abs() < 1e-3,
+            "populated upper bands must not add seq_top_pad"
+        );
+    }
+
+    /// Empty cut/forward-primer bands get a floor pad so the previous wrap's
+    /// ruler cannot sit against the letters; tall upper bands add nothing.
+    #[test]
+    fn seq_top_pad_fills_min_above_sequence_only_when_short() {
+        let bare = BlockFixture::new(&[b'A'; 40]);
+        assert!(
+            (bare.layout().seq_top_pad - bare.style.min_above_sequence).abs() < 1e-3,
+            "empty upper bands → pad equals min_above_sequence"
+        );
+        let stack = TrackStack::new();
+        let ctx = bare.ctx();
+        let sum: f32 = stack
+            .tracks
+            .iter()
+            .map(|t| t.block_height(&ctx))
+            .sum::<f32>()
+            + bare.style.block_gap;
+        assert!(
+            (sum - bare.layout().height).abs() < 1e-3,
+            "pad must be included in both SequenceTrack::block_height and layout height"
+        );
+
+        let busy = BlockFixture::new(&[b'A'; 40]).cut_sites(vec![
+            cut("EcoRI", 5),
+            cut("BamHI", 5),
+            cut("HindIII", 5),
+        ]);
+        // Three co-located names → cut_band_lines >= 3 × cut_label_row_h ≫ 20.
+        assert!(
+            busy.layout().seq_top_pad.abs() < 1e-3,
+            "tall cut band → pad is zero"
         );
     }
 

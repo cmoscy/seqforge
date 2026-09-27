@@ -70,8 +70,9 @@ internal composition, not the app.
   block loop: per visible block, sum `block_height`s, then dispatch `paint` / `hit_test`
   at each track's computed `y0`.
 
-**Track order (top→bottom):** CutLabels · Ruler · Sequence (strands + decorations) ·
-Translation (global frame lanes) · Features (bars + per-CDS AA sub-row).
+**Track order (top→bottom):** CutLabels · PrimerForward · Sequence (strands + decorations) ·
+Translation (global frame lanes) · PrimerReverse · Features (bars + per-CDS AA sub-row) ·
+Ruler (Benchling-style: captions the whole strip).
 
 ## Phases
 

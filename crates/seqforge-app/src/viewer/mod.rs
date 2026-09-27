@@ -843,7 +843,6 @@ impl SequenceView {
         let annot_row_h = (label_size + 2.0 * cfg.settings.editor.label_padding)
             .max(cfg.settings.editor.min_annot_row_height);
         let ruler_h = cfg.settings.editor.ruler_height.max(ruler_size + 2.0);
-        let strand_h = cfg.settings.editor.strand_bar_height;
         let block_gap = cfg.settings.editor.block_gap;
         let left_margin = cfg.settings.editor.left_margin;
         let right_margin = cfg.settings.editor.right_margin;
@@ -867,6 +866,9 @@ impl SequenceView {
                 label_probe.rect.width() / 32.0,
             )
         });
+        // Half-band = letter row + air to the mid-strand rail (layout-first gutter).
+        let spine_gap = (cfg.settings.editor.strand_bar_height - char_height).max(4.0);
+        let strand_h = char_height + spine_gap;
 
         // Fit the line width to the available pane width.
         let avail = (ui.available_width() - left_margin - right_margin).max(char_width);
@@ -939,6 +941,7 @@ impl SequenceView {
             // must fit a monospace glyph — size it to the sequence row height.
             primer_row_h: char_height,
             block_gap,
+            min_above_sequence: cfg.settings.editor.min_above_sequence,
             line_width,
             label_overflow,
             font_id: font_id.clone(),
@@ -1626,7 +1629,7 @@ impl SequenceView {
                     painter.hline(
                         rect.min.x..=rect.min.x + content_width,
                         block_y + block_h - block_gap * 0.5,
-                        Stroke::new(0.5, style.text_color.gamma_multiply(0.08)),
+                        Stroke::new(0.5, style.text_color.gamma_multiply(0.18)),
                     );
                 }
             }

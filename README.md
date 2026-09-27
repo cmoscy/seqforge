@@ -50,7 +50,7 @@ Both methods symlink the bundled binary into `/usr/local/bin` (if writable) or `
 
 Open the app, then use the file browser on the left to navigate to a `.gb` or `.fasta` file. Double-click to open it in the viewer.
 
-The viewer shows the dual-strand sequence with ATGC colouring, a position ruler, and stacked annotation bars. The **Inspector** (**Features · Cut sites · Primers**) lists annotations; the **Restriction Sites** panel (`⌘E`) shares the CLI enzyme grammar. Primers show as a map overlay with thermo QC. Map selection highlights the matching Inspector row (and switches tabs unless `inspector.follow_selection = false`).
+The viewer shows the dual-strand sequence in high-contrast ink, a position ruler, and stacked annotation bars. The **Inspector** (**Features · Cut sites · Primers**) lists annotations; the **Restriction Sites** panel (`⌘E`) shares the CLI enzyme grammar. Primers show as a map overlay with thermo QC. Map selection highlights the matching Inspector row (and switches tabs unless `inspector.follow_selection = false`).
 
 From **Cut sites**, **Digest** opens a read-only **Fragments** list over the source buffer. For cloning, **File → New Assembly…** builds a recipe of bins (Digest / PCR / AsIs → Ligate or Golden Gate); optional fidelity % appears on the join strip. Products open as normal sequence tabs. Depth: [plans/assembly.md](plans/assembly.md), [plans/fidelity.md](plans/fidelity.md).
 

@@ -67,6 +67,10 @@ pub struct EditorSettings {
     pub ruler_height: f32,
     pub strand_bar_height: f32,
     pub block_gap: f32,
+    /// Floor clearance above the dual strand within a wrap. When cut labels +
+    /// forward primers already occupy at least this much, no extra pad is added
+    /// (Benchling-style: previous wrap's ruler must not sit against the letters).
+    pub min_above_sequence: f32,
     /// Padding above + below the label text inside each annotation row.
     pub label_padding: f32,
     /// Behaviour when a feature label is wider than its bar.
@@ -82,8 +86,9 @@ impl Default for EditorSettings {
             left_margin: 30.0,
             right_margin: 20.0,
             ruler_height: 14.0,
-            strand_bar_height: 17.0,
+            strand_bar_height: 21.0,
             block_gap: 14.0,
+            min_above_sequence: 32.0,
             label_padding: 2.5,
             label_overflow: LabelOverflow::Truncate,
             min_annot_row_height: 16.0,

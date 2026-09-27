@@ -16,7 +16,7 @@ pub(crate) struct SequenceTrack;
 
 impl Track for SequenceTrack {
     fn block_height(&self, ctx: &BlockCtx) -> f32 {
-        ctx.style.strand_h * 2.0
+        ctx.style.strand_h * 2.0 + ctx.layout.seq_top_pad
     }
 
     fn hit_rects(&self, ctx: &BlockCtx, geom: &BlockGeom, hits: &mut Vec<(Rect, Hit)>) {
@@ -26,7 +26,8 @@ impl Track for SequenceTrack {
             return;
         }
         let style = ctx.style;
-        let top_y = geom.y0;
+        // Letter band starts below `seq_top_pad` (geom.strand_top_y).
+        let top_y = geom.strand_top_y;
         for (hit_idx, hit) in ctx.search_hits.iter().enumerate() {
             // One hit rect per linear run — an origin-spanning hit is clickable on
             // either arm (`Span::linear_pieces`, the shared geometry primitive).
@@ -57,8 +58,12 @@ impl Track for SequenceTrack {
         let char_width = style.char_width;
         let char_height = style.char_height;
         let strand_h = style.strand_h;
-        let top_y = geom.y0;
-        let bot_y = top_y + strand_h;
+        // Letter band below seq_top_pad; mid-rail at the half-band boundary.
+        let top_y = geom.strand_top_y;
+        let spine_gap = (strand_h - char_height).max(0.0);
+        let top_text_y = top_y;
+        let mid_y = top_y + strand_h;
+        let bot_text_y = mid_y + spine_gap;
         let text_color = style.text_color;
 
         // ── Search hit highlights (behind selection and text) ──────
@@ -75,12 +80,18 @@ impl Track for SequenceTrack {
                         let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                         let sw = (vis_e - vis_s) as f32 * char_width;
                         painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                            Rect::from_min_size(
+                                Pos2::new(sx, top_text_y),
+                                Vec2::new(sw, char_height),
+                            ),
                             2.0,
                             color,
                         );
                         painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                            Rect::from_min_size(
+                                Pos2::new(sx, bot_text_y),
+                                Vec2::new(sw, char_height),
+                            ),
                             2.0,
                             color,
                         );
@@ -108,10 +119,10 @@ impl Track for SequenceTrack {
                     );
                 };
                 if strands.top() {
-                    wash(top_y);
+                    wash(top_text_y);
                 }
                 if strands.bottom() {
-                    wash(bot_y);
+                    wash(bot_text_y);
                 }
             }
         }
@@ -146,12 +157,18 @@ impl Track for SequenceTrack {
                         let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                         let sw = (vis_e - vis_s) as f32 * char_width;
                         painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, top_y), Vec2::new(sw, char_height)),
+                            Rect::from_min_size(
+                                Pos2::new(sx, top_text_y),
+                                Vec2::new(sw, char_height),
+                            ),
                             0.0,
                             style.selection_color,
                         );
                         painter.rect_filled(
-                            Rect::from_min_size(Pos2::new(sx, bot_y), Vec2::new(sw, char_height)),
+                            Rect::from_min_size(
+                                Pos2::new(sx, bot_text_y),
+                                Vec2::new(sw, char_height),
+                            ),
                             0.0,
                             style.selection_color.gamma_multiply(0.7),
                         );
@@ -194,19 +211,44 @@ impl Track for SequenceTrack {
         // ── 5'/3' labels (first block only) ───────────────────────
         if ctx.block_idx == 0 {
             painter.text(
-                Pos2::new(geom.rect_min_x, top_y),
+                Pos2::new(geom.rect_min_x, top_text_y),
                 Align2::LEFT_TOP,
                 "5'",
                 style.font_id.clone(),
                 text_color.gamma_multiply(0.45),
             );
             painter.text(
-                Pos2::new(geom.rect_min_x, bot_y),
+                Pos2::new(geom.rect_min_x, bot_text_y),
                 Align2::LEFT_TOP,
                 "3'",
                 style.font_id.clone(),
                 text_color.gamma_multiply(0.45),
             );
+        }
+
+        // ── Mid-strand rail (spine + per-base / decade ticks) ─────
+        // SnapGene-style column guide between forward and reverse.
+        // Behind glyphs; cut staples / cursor remain the stronger verticals.
+        let block_len = block_end.saturating_sub(block_start);
+        if block_len > 0 {
+            let rail = Stroke::new(1.25, text_color.gamma_multiply(0.30));
+            let spine_x1 = seq_x0 + block_len as f32 * char_width;
+            painter.line_segment([Pos2::new(seq_x0, mid_y), Pos2::new(spine_x1, mid_y)], rail);
+            for col in 0..block_len {
+                let pos = block_start + col + 1; // 1-based
+                let half = if pos % 10 == 0 {
+                    4.5
+                } else if pos % 5 == 0 {
+                    3.0
+                } else {
+                    2.0
+                };
+                let cx = seq_x0 + col as f32 * char_width + char_width * 0.5;
+                painter.line_segment(
+                    [Pos2::new(cx, mid_y - half), Pos2::new(cx, mid_y + half)],
+                    rail,
+                );
+            }
         }
 
         // ── Strands ───────────────────────────────────────────────
@@ -217,13 +259,13 @@ impl Track for SequenceTrack {
             1.0,
             ctx.theme,
         );
-        painter.galley(Pos2::new(seq_x0, top_y), top_galley, text_color);
+        painter.galley(Pos2::new(seq_x0, top_text_y), top_galley, text_color);
 
         // Bottom strand is the complement of the visible block, derived on
         // demand — never stored on the buffer.
         let block_comp = seqforge_bio::complement(&seq[block_start..block_end]);
         let bot_galley = build_strand_galley(painter, &block_comp, &style.font_id, 0.65, ctx.theme);
-        painter.galley(Pos2::new(seq_x0, bot_y), bot_galley, text_color);
+        painter.galley(Pos2::new(seq_x0, bot_text_y), bot_galley, text_color);
 
         // ── Delete strikethrough (Phase 13.6b) ────────────────────
         // Deleted bases are kept visible (verify-what's-leaving) with a
@@ -235,7 +277,7 @@ impl Track for SequenceTrack {
                 let sx = seq_x0 + (vis_s - block_start) as f32 * char_width;
                 let ex = seq_x0 + (vis_e - block_start) as f32 * char_width;
                 let stroke = Stroke::new(1.5, style.diff_del_line);
-                for strand_top in [top_y, bot_y] {
+                for strand_top in [top_text_y, bot_text_y] {
                     let my = strand_top + char_height * 0.5;
                     painter.line_segment([Pos2::new(sx, my), Pos2::new(ex, my)], stroke);
                 }

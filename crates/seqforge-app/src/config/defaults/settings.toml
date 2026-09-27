@@ -19,8 +19,9 @@ ruler_size    = 11.0   # ruler tick labels
 left_margin           = 30.0
 right_margin          = 20.0
 ruler_height          = 14.0
-strand_bar_height     = 17.0
+strand_bar_height     = 21.0
 block_gap             = 14.0
+min_above_sequence    = 32.0   # floor air above strands when cuts/fwd primers are short
 label_padding         = 2.5
 min_annot_row_height  = 16.0   # floor; rows grow to fit label_size
 

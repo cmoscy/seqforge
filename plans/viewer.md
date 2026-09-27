@@ -195,16 +195,16 @@ Skip porting: complement, translation (hand-rolled in `seqforge-bio`), restricti
 
 Monospace rendering using `egui::Painter` + `Galley` (via `LayoutJob` for per-base ATGC coloring).
 
-**Layout per block (standard convention: cut labels → ruler → strands → annotations):**
+**Layout per block (Benchling-style: cut labels → strands → annotations → ruler):**
 
 ```
-[cut label row 0: EcoRI  BamHI ]   ← stacked above ruler; omitted when no sites
+[cut label row 0: EcoRI  BamHI ]   ← stacked above sequence; omitted when no sites
 [cut label row 1: HindIII      ]
-[position ruler: 1    10   20 …]
-[top strand 5'→3': A T G C …  ]   ← ATGC colored; cut staple passes through
+[top strand 5'→3': A T G C …  ]   ← mid-strand rail; cut staple passes through
 [bottom strand 3'→5': T A C G …]  ← complement, dimmed; staple ends here
-[annotation row 0              ]   ← stacked below strands
+[annotation row 0              ]   ← features / primers / translation below strands
 [annotation row 1              ]
+[position ruler: 1    10   20 …]   ← captions the whole strip
 …
 [gap]
 ```
@@ -491,7 +491,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - [x] `BioOps` trait bridges core/bio boundary — `dispatch` calls `bio.find_matches` / `bio.find_cut_sites` directly and populates `ViewerState`; no `SideEffect` indirection
 - [x] Render search hits as amber (forward) / cyan (reverse) semi-transparent highlights behind strand text; clicking a hit selects its range
 - [x] Render cut sites as **staple shapes** through the strand rows — vertical top line from stacked label through top strand, horizontal bridge to `bottom_cut_pos`, vertical bottom line through bottom strand; blunt cutters use a single straight line
-- [x] Cut site labels stacked above the ruler using the same greedy interval algorithm as feature stacking; `block_h` grows by `n_label_rows × CUT_LABEL_ROW_H` (14 px/row)
+- [x] Cut site labels stacked above the sequence using the same greedy interval algorithm as feature stacking; `block_h` grows by `n_label_rows × CUT_LABEL_ROW_H` (14 px/row)
 - [x] Cut label stacking cached in `SequenceView` (`cached_cut_site_key`, `cached_char_width`); invalidation key is a sorted `Vec<usize>` of cut positions — catches same-count enzyme swaps that a bare count check would miss
 - [x] Clicking a cut site label selects the recognition site range; staple line area remains clickable for cursor placement (not enzyme selection)
 - [x] Empty `seqforge find` clears hits; empty `seqforge enzymes` clears cut sites; both require an open document
@@ -514,7 +514,7 @@ Each phase is independently testable. Don't start phase N+1 until phase N's "don
 - `find_ecori_cut_sites`, `unknown_enzyme_returns_empty`, `enzyme_name_case_insensitive`, `multiple_enzymes`
 - `find_returns_search_side_effect`, `enzymes_returns_show_enzymes_side_effect`, `find_without_doc_returns_error`, `enzymes_empty_clears_cut_sites`
 
-**Done when:** `seqforge enzymes EcoRI BamHI` shows staple-shaped cut sites with stacked labels above the ruler at known positions; `seqforge find ATGCNNNNGCAT` highlights IUPAC matches on both strands; clicking a search hit or enzyme label selects the corresponding range. ✅
+**Done when:** `seqforge enzymes EcoRI BamHI` shows staple-shaped cut sites with stacked labels above the sequence at known positions; `seqforge find ATGCNNNNGCAT` highlights IUPAC matches on both strands; clicking a search hit or enzyme label selects the corresponding range. ✅
 
 ---
 

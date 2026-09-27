@@ -94,12 +94,13 @@ pub struct BaseColors {
 
 impl Default for BaseColors {
     fn default() -> Self {
+        // Mirrors default-dark.toml [bases] (mono ink; other dimmer).
         Self {
-            a: HexColor(Color32::from_rgb(0, 150, 64)),
-            t: HexColor(Color32::from_rgb(200, 30, 60)),
-            g: HexColor(Color32::from_rgb(220, 120, 0)),
-            c: HexColor(Color32::from_rgb(50, 100, 220)),
-            other: HexColor(Color32::DARK_GRAY),
+            a: HexColor(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
+            t: HexColor(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
+            g: HexColor(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
+            c: HexColor(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
+            other: HexColor(Color32::from_rgb(0x8A, 0x8A, 0x8A)),
         }
     }
 }
@@ -188,7 +189,7 @@ pub struct UiColors {
 impl Default for UiColors {
     fn default() -> Self {
         Self {
-            selection: HexColor(Color32::from_rgb(173, 214, 255)),
+            selection: HexColor(Color32::from_rgba_unmultiplied(0x3A, 0x6E, 0xA8, 0xCC)),
             cursor: HexColor(Color32::from_rgb(50, 120, 255)),
             cut_site: HexColor(Color32::from_rgb(156, 168, 184)),
             label_text: HexColor(Color32::WHITE),

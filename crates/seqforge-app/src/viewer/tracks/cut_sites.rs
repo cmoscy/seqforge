@@ -1,11 +1,11 @@
-//! Cut-sites track — restriction-enzyme labels stacked above the ruler, each
-//! with a short tick; on hover the full SnapGene-style staple (descender +
+//! Cut-sites track — restriction-enzyme labels stacked above the sequence,
+//! each with a short tick; on hover the full SnapGene-style staple (descender +
 //! overhang step + wedge arrows) reveals, descending across the strand rows.
 //!
-//! Position-owned, but a **connector**: the hover staple reaches down into the
-//! Sequence track's strand rows via `geom.strand_top_y` / `strand_bot_y`. It is
-//! painted last in the stack's z-order so the staple lands on top of the
-//! strands it crosses.
+//! Position-owned, but a **connector**: resting leaders and the hover staple
+//! reach the Sequence track's strand rows via `geom.strand_top_y` /
+//! `strand_bot_y`. Painted last in the stack's z-order so the staple lands on
+//! top of the strands it crosses.
 
 use egui::{Align2, Color32, Painter, Pos2, Rect, Stroke, Vec2};
 use seqforge_core::MethylState;
@@ -85,13 +85,14 @@ impl Track for CutSitesTrack {
         let seq_x0 = geom.seq_x0;
         let block_y = geom.y0;
         let cut_site_color = style.cut_site_color;
-        // Bottom of this block's cut-label band == top of the ruler.
-        let ruler_y = block_y + ctx.layout.cut_band_lines as f32 * cut_label_row_h;
+        // Bottom of this block's cut-label band; resting leaders continue to the
+        // top strand (not to whatever track happens to follow in the stack).
+        let strand_top = geom.strand_top_y;
 
         // ── Resting state: each group's names stacked over a single leader ──
         // Co-located enzymes share one tick (deduped) that descends from just
-        // below the group's lowest name toward the ruler — the "one site, many
-        // isoschizomers" cue.
+        // below the group's lowest name toward the top strand — the "one site,
+        // many isoschizomers" cue.
         for group in &ctx.layout.cut_groups {
             let tcx = seq_x0 + (group.cut_pos - block_start) as f32 * char_width;
             for (k, &site_idx) in group.members.iter().enumerate() {
@@ -108,7 +109,7 @@ impl Track for CutSitesTrack {
                     color,
                 );
             }
-            // One leader tick per group, from below the last name to the ruler.
+            // One leader tick per group, from below the last name to the top strand.
             let tick_top =
                 block_y + (group.base_line + group.members.len()) as f32 * cut_label_row_h;
             let tick_color = methyl_tint_color(
@@ -116,7 +117,7 @@ impl Track for CutSitesTrack {
                 worst_group_methyl(ctx, group.members.iter().copied()),
             );
             painter.line_segment(
-                [Pos2::new(tcx, tick_top), Pos2::new(tcx, ruler_y)],
+                [Pos2::new(tcx, tick_top), Pos2::new(tcx, strand_top)],
                 Stroke::new(1.0, tick_color),
             );
         }
