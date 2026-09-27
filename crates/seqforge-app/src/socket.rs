@@ -1,25 +1,27 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use interprocess::local_socket::{
+    GenericFilePath, Listener, ListenerOptions, Stream, ToFsName, prelude::*,
+};
 use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Socket path lifecycle (Tier 1 hardening) ─────────────────────────────────
 
-/// RAII guard that removes the socket file on drop. Held in
+/// RAII guard that removes a filesystem socket file on drop. Held in
 /// `AppState` so a normal process exit (window close) cleans up the
 /// socket, not just the abnormal-exit path that the listener thread's
 /// own cleanup covered before.
 ///
-/// On a panic or `process::exit`, drop ordering may skip this guard —
-/// per-pid socket paths (`/tmp/seqforge-<pid>.sock` /
-/// `$XDG_RUNTIME_DIR/seqforge-<pid>.sock`) protect us from collisions
-/// even when a stale file is left behind. Cleanup is best-effort.
+/// On Windows the endpoint is a named pipe (`\\.\pipe\…`); there is no
+/// filesystem object to unlink, so drop is a no-op. On Unix, per-pid
+/// paths under `$XDG_RUNTIME_DIR` / `/tmp` protect us from collisions
+/// even when a stale file is left behind after a panic. Cleanup is
+/// best-effort.
 pub struct SocketGuard {
     path: PathBuf,
 }
@@ -32,6 +34,8 @@ impl SocketGuard {
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
+        // Unix: unlink the filesystem socket. Windows named pipes have no
+        // filesystem object — remove_file fails harmlessly.
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -104,8 +108,12 @@ fn err_response(id: Value, code: i32, message: impl Into<String>) -> JsonRpcResp
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Open a Unix domain socket at `path`, spawn a listener thread, and return a
+/// Open a local socket at `path`, spawn a listener thread, and return a
 /// receiver for incoming `SocketRequest` values.
+///
+/// On Unix `path` is a filesystem Unix-domain socket. On Windows it is a
+/// named-pipe path of the form `\\.\pipe\seqforge-<pid>`. Both are published
+/// in `SEQFORGE_SOCKET` and speak the same newline-delimited JSON-RPC.
 ///
 /// The caller is responsible for:
 ///  1. Choosing the path (use [`socket_path`]).
@@ -116,21 +124,28 @@ pub fn start_socket_listener(
     path: PathBuf,
     ctx: egui::Context,
 ) -> anyhow::Result<mpsc::Receiver<SocketRequest>> {
-    let _ = std::fs::remove_file(&path);
+    let name = path
+        .as_os_str()
+        .to_fs_name::<GenericFilePath>()
+        .map_err(|e| anyhow::anyhow!("invalid socket name {}: {e}", path.display()))?;
 
-    let listener = UnixListener::bind(&path)?;
+    #[cfg(unix)]
+    let opts = {
+        // Hardening: mode 0600 so only the owner can connect. The default
+        // umask usually achieves this on macOS / Linux but not always
+        // (e.g. umask 022 yields 0644). Without this, any local user on a
+        // multi-user host could drive `open` / `find` / `enzymes` against
+        // our GUI. Named pipes on Windows already default to the creating
+        // user's ACL — no equivalent step.
+        use interprocess::os::unix::local_socket::ListenerOptionsExt;
+        ListenerOptions::new().name(name).mode(0o600)
+    };
+    #[cfg(not(unix))]
+    let opts = ListenerOptions::new().name(name);
 
-    // Hardening: explicitly chmod 0600 so only the owner can connect.
-    // The default umask usually achieves this on macOS / Linux but
-    // not always (e.g. umask 022 yields 0644 on some setups). Without
-    // this, any local user on a multi-user host could connect and
-    // drive `open` / `find` / `enzymes` against our GUI.
-    let perms = std::fs::Permissions::from_mode(0o600);
-    if let Err(e) = std::fs::set_permissions(&path, perms) {
-        // Non-fatal — log and continue. On the typical single-user
-        // dev host this never fires.
-        eprintln!("[seqforge] could not set socket permissions: {e}");
-    }
+    let listener = opts
+        .create_sync()
+        .map_err(|e| anyhow::anyhow!("could not bind socket at {}: {e}", path.display()))?;
 
     let (tx, rx) = mpsc::channel::<SocketRequest>();
 
@@ -142,31 +157,48 @@ pub fn start_socket_listener(
     Ok(rx)
 }
 
-/// Pick a socket path. Hardening preference order:
+/// Pick a local-socket endpoint for this GUI process.
+///
+/// **Unix** preference order:
 ///   1. `$XDG_RUNTIME_DIR/seqforge-<pid>.sock` — per-user, mode-0700
 ///      directory, the standard Linux runtime spot.
 ///   2. `/tmp/seqforge-<pid>.sock` — fallback for macOS (no
 ///      XDG_RUNTIME_DIR by default) and other systems.
 ///
+/// **Windows:** `\\.\pipe\seqforge-<pid>` — a per-user named pipe (the
+/// creating user's ACL is the access boundary).
+///
 /// The `<pid>` suffix gives per-process uniqueness — multiple GUI
-/// instances won't collide, and a stale file from a crashed prior
-/// process can be `unlink`ed by the new owner without confusion.
+/// instances won't collide, and a stale Unix socket file from a crashed
+/// prior process can be reclaimed by the new owner without confusion.
 pub fn socket_path() -> PathBuf {
-    let name = format!("seqforge-{}.sock", std::process::id());
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        if !dir.is_empty() {
-            let mut p = PathBuf::from(dir);
-            p.push(&name);
-            return p;
-        }
+    let pid = std::process::id();
+    #[cfg(windows)]
+    {
+        PathBuf::from(format!(r"\\.\pipe\seqforge-{pid}"))
     }
-    PathBuf::from("/tmp").join(name)
+    #[cfg(unix)]
+    {
+        let name = format!("seqforge-{pid}.sock");
+        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if !dir.is_empty() {
+                let mut p = PathBuf::from(dir);
+                p.push(&name);
+                return p;
+            }
+        }
+        PathBuf::from("/tmp").join(name)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        PathBuf::from(format!("seqforge-{pid}.sock"))
+    }
 }
 
 // ── Listener thread ───────────────────────────────────────────────────────────
 
 fn accept_loop(
-    listener: UnixListener,
+    listener: Listener,
     tx: mpsc::Sender<SocketRequest>,
     ctx: egui::Context,
     path: PathBuf,
@@ -180,27 +212,31 @@ fn accept_loop(
         let ctx = ctx.clone();
         let _ = std::thread::spawn(move || handle_connection(stream, tx, ctx));
     }
+    #[cfg(unix)]
     let _ = std::fs::remove_file(path);
+    #[cfg(not(unix))]
+    let _ = path; // named pipes have nothing to unlink
 }
 
-fn handle_connection(
-    mut stream: std::os::unix::net::UnixStream,
-    tx: mpsc::Sender<SocketRequest>,
-    ctx: egui::Context,
-) {
-    let reader = BufReader::new(match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    });
+fn handle_connection(stream: Stream, tx: mpsc::Sender<SocketRequest>, ctx: egui::Context) {
+    // `Stream` implements `Read` / `Write` for `&Stream`, so one connection
+    // handles both directions without cloning.
+    let mut reader = BufReader::new(&stream);
+    let mut writer = &stream;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
             Err(_) => break,
-        };
-        let resp = handle_rpc_line(&line, &tx, &ctx);
+        }
+        let resp = handle_rpc_line(line.trim_end_matches(['\r', '\n']), &tx, &ctx);
         let json = serde_json::to_string(&resp).unwrap_or_default();
-        let _ = stream.write_all(format!("{json}\n").as_bytes());
+        if writer.write_all(format!("{json}\n").as_bytes()).is_err() {
+            break;
+        }
     }
 }
 
@@ -259,9 +295,11 @@ fn handle_rpc_line(
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
 
+    use interprocess::local_socket::{
+        GenericFilePath, ListenerOptions, Stream, ToFsName, prelude::*,
+    };
     use seqforge_core::{DispatchError, ViewerRequest, ViewerResponse};
 
     use super::SocketRequest;
@@ -281,21 +319,63 @@ mod tests {
         });
     }
 
+    /// A unique local-socket endpoint for one test (filesystem path on Unix,
+    /// named pipe on Windows).
+    fn test_endpoint(tag: &str) -> std::path::PathBuf {
+        let tag = tag.replace(':', "-");
+        #[cfg(windows)]
+        {
+            std::path::PathBuf::from(format!(
+                r"\\.\pipe\seqforge-test-{}-{}",
+                tag,
+                std::process::id()
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir().join(format!("seqforge-test-{}-{}.sock", tag, std::process::id()))
+        }
+    }
+
     #[test]
     fn jsonrpc_goto_round_trip() {
         let (tx, rx) = mpsc::channel::<SocketRequest>();
         fake_app(rx);
 
-        let (mut client, server) = UnixStream::pair().unwrap();
+        let endpoint = test_endpoint("goto");
+        let name = endpoint
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("test endpoint name");
+        let listener = ListenerOptions::new()
+            .name(name)
+            .create_sync()
+            .expect("bind test listener");
+
+        let endpoint_for_client = endpoint.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(server.try_clone().unwrap());
-            let mut server = server;
-            for line in reader.lines().map_while(Result::ok) {
-                let resp = super::handle_rpc_line(&line, &tx, &egui::Context::default());
+            let stream = match listener.incoming().next() {
+                Some(Ok(s)) => s,
+                _ => return,
+            };
+            let mut reader = BufReader::new(&stream);
+            let mut writer = &stream;
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_ok() {
+                let resp = super::handle_rpc_line(line.trim_end(), &tx, &egui::Context::default());
                 let json = serde_json::to_string(&resp).unwrap();
-                let _ = server.write_all(format!("{json}\n").as_bytes());
+                let _ = writer.write_all(format!("{json}\n").as_bytes());
             }
         });
+
+        // Give the accept thread a moment to be waiting.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let name = endpoint_for_client
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("client name");
+        let mut client = Stream::connect(name).expect("connect to test listener");
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":42}}"#;
         client.write_all(format!("{req}\n").as_bytes()).unwrap();

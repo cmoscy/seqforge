@@ -14,3 +14,4 @@ seqforge-session = { path = "../seqforge-session" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+interprocess = "2.4.4"

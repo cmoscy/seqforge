@@ -14,7 +14,6 @@ mod keymap;
 mod minimap;
 mod overlay;
 mod persistence;
-#[cfg(unix)]
 mod socket;
 mod tabs;
 mod terminal;
@@ -27,7 +26,8 @@ use clap::Parser;
 #[command(name = "seqforge-app", about = "SeqForge sequence viewer")]
 struct Args {
     /// Install the bundled `seqforge` CLI to PATH and exit.
-    /// Symlinks the CLI binary into /usr/local/bin or ~/.local/bin.
+    /// On Unix, symlinks into /usr/local/bin or ~/.local/bin.
+    /// On Windows, copies to %LOCALAPPDATA%\\SeqForge\\bin and updates the user PATH.
     #[arg(long)]
     install_cli: bool,
 }

@@ -1,10 +1,8 @@
 use anyhow::Context;
+use interprocess::local_socket::{GenericFilePath, Stream, ToFsName, prelude::*};
 use seqforge_core::{ViewerRequest, ViewerResponse};
-
-#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 // ── Local verbs ───────────────────────────────────────────────────────────────
 
@@ -132,31 +130,23 @@ pub fn dispatch_cmd(req: ViewerRequest) -> anyhow::Result<()> {
 
 // ── Viewer command socket dispatch ────────────────────────────────────────────
 
-/// Send a `ViewerRequest` to a running SeqForge GUI via the Unix domain socket
+/// Send a `ViewerRequest` to a running SeqForge GUI via the local socket
 /// using the JSON-RPC 2.0 wire format.
 ///
-/// Reads `SEQFORGE_SOCKET` from the environment. If unset, the command cannot
-/// be delivered and an error is returned.
-///
-/// On non-Unix platforms (Windows), returns an error explaining that the
-/// agent-IPC transport isn't supported in v0.1 (Tier 1 #5). File commands
-/// (`info`, `digest`, `annotate`) work everywhere; viewer commands are
-/// Unix-only until/unless we adopt `interprocess` for cross-platform sockets.
-#[cfg(not(unix))]
-pub fn dispatch_viewer_cmd(_req: ViewerRequest) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "viewer commands (open/close/goto/find/enzymes) require a Unix \
-         domain socket; not supported on this platform"
-    )
-}
-
-#[cfg(unix)]
+/// Reads `SEQFORGE_SOCKET` from the environment. That value is a filesystem
+/// Unix-domain socket path on macOS/Linux, or a named-pipe path
+/// (`\\.\pipe\seqforge-<pid>`) on Windows. If unset, the command cannot be
+/// delivered and an error is returned.
 pub fn dispatch_viewer_cmd(req: ViewerRequest) -> anyhow::Result<()> {
     let socket_path = std::env::var("SEQFORGE_SOCKET").map_err(|_| {
         anyhow::anyhow!("no SeqForge instance running (SEQFORGE_SOCKET is not set)")
     })?;
 
-    let mut stream = UnixStream::connect(&socket_path)
+    let name = Path::new(&socket_path)
+        .as_os_str()
+        .to_fs_name::<GenericFilePath>()
+        .with_context(|| format!("invalid SEQFORGE_SOCKET value {socket_path}"))?;
+    let mut stream = Stream::connect(name)
         .with_context(|| format!("could not connect to SeqForge socket at {socket_path}"))?;
 
     // Serialize the ViewerRequest as a JSON-RPC 2.0 request.
@@ -212,7 +202,7 @@ pub fn dispatch_viewer_cmd(req: ViewerRequest) -> anyhow::Result<()> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use seqforge_core::ViewerRequest;
 

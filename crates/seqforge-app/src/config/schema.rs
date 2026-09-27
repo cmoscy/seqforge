@@ -166,6 +166,7 @@ impl Default for InspectorSettings {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
-    /// Shell to spawn. Empty string = use `$SHELL` (or `/bin/bash` as a fallback).
+    /// Shell to spawn. Empty string = use `$SHELL` if set, else `/bin/sh`
+    /// (Unix) or `powershell.exe` (Windows).
     pub shell: String,
 }

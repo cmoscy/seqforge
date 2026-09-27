@@ -48,5 +48,5 @@ spine_feature_gap         = 3.0
 follow_selection = true   # auto-switch inspector tab when selection changes
 
 [terminal]
-# Empty = use $SHELL (or /bin/bash as a fallback)
+# Empty = use $SHELL, else /bin/sh (Unix) or powershell.exe (Windows)
 shell = ""

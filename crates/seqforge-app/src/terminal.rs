@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
@@ -9,12 +11,26 @@ use egui_term::{BackendSettings, PtyEvent, TerminalBackend, TerminalView};
 ///
 /// When both crates are built via `cargo build`, they land in the same
 /// `target/{profile}/` directory, so the embedded terminal can find the CLI
-/// without a separate `cargo install`.
-fn sibling_seqforge_dir() -> Option<std::path::PathBuf> {
+/// without a separate `cargo install`. On Windows the sibling is
+/// `seqforge.exe` (`std::env::consts::EXE_SUFFIX`).
+fn sibling_seqforge_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let candidate = dir.join("seqforge");
+    let name = format!("seqforge{}", std::env::consts::EXE_SUFFIX);
+    let candidate = dir.join(name);
     candidate.exists().then(|| dir.to_owned())
+}
+
+/// Default shell when neither `[terminal] shell` nor `$SHELL` is set.
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        "powershell.exe".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "/bin/sh".to_string()
+    }
 }
 
 // ── Process-wide env setup ────────────────────────────────────────────────────
@@ -28,13 +44,15 @@ fn sibling_seqforge_dir() -> Option<std::path::PathBuf> {
 /// another thread is UB; sequencing this strictly first is how we keep it safe.
 ///
 /// Sets:
-/// - `SEQFORGE_SOCKET` — the Unix socket path for viewer-command dispatch.
+/// - `SEQFORGE_SOCKET` — local-socket endpoint for viewer-command dispatch
+///   (filesystem path on Unix; named pipe on Windows).
 /// - `PATH` — prepends the directory of a sibling `seqforge` binary so the
 ///   embedded terminal can use it without `cargo install` (mirrors VS Code's
-///   `code` CLI pattern).
-/// - `HISTFILE` — isolates embedded-terminal history from the user's main
-///   shell history.
-pub fn install_pty_env(socket_path: Option<&std::path::Path>) {
+///   `code` CLI pattern). Uses the platform path separator via
+///   [`std::env::join_paths`].
+/// - `HISTFILE` (Unix only) — isolates embedded-terminal history from the
+///   user's main shell history.
+pub fn install_pty_env(socket_path: Option<&Path>) {
     // Safety: caller contract is "main thread, before any thread spawns".
     unsafe {
         if let Some(path) = socket_path {
@@ -42,13 +60,19 @@ pub fn install_pty_env(socket_path: Option<&std::path::Path>) {
         }
 
         if let Some(bin_dir) = sibling_seqforge_dir() {
-            let current_path = std::env::var("PATH").unwrap_or_default();
-            let new_path = format!("{}:{}", bin_dir.display(), current_path);
-            std::env::set_var("PATH", new_path);
+            let mut entries: Vec<OsString> = Vec::new();
+            entries.push(bin_dir.into_os_string());
+            if let Some(current) = std::env::var_os("PATH") {
+                entries.extend(std::env::split_paths(&current).map(|p| p.into_os_string()));
+            }
+            if let Ok(joined) = std::env::join_paths(entries) {
+                std::env::set_var("PATH", joined);
+            }
         }
 
+        #[cfg(unix)]
         if let Ok(home) = std::env::var("HOME") {
-            let dir = std::path::PathBuf::from(&home).join(".local/share/seqforge");
+            let dir = PathBuf::from(&home).join(".local/share/seqforge");
             let _ = std::fs::create_dir_all(&dir);
             std::env::set_var("HISTFILE", dir.join("terminal_history"));
         }
@@ -66,11 +90,14 @@ pub struct TerminalPane {
 impl TerminalPane {
     /// Construct the embedded terminal. Assumes [`install_pty_env`] has
     /// already been called on the main thread before any thread was spawned.
+    ///
+    /// Shell resolution: non-empty `[terminal] shell` setting, else `$SHELL`
+    /// if set, else `/bin/sh` (Unix) or `powershell.exe` (Windows).
     pub fn new(ctx: egui::Context, configured_shell: &str) -> anyhow::Result<Self> {
         let shell = if !configured_shell.is_empty() {
             configured_shell.to_string()
         } else {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+            std::env::var("SHELL").unwrap_or_else(|_| default_shell())
         };
         let settings = BackendSettings {
             shell,
