@@ -129,6 +129,11 @@ pub enum AppCommand {
     /// [`ViewSelection`], so producers set the full intent atomically instead of
     /// choreographing a range-set plus an object-set that each clear the others.
     Select(ViewSelection),
+    /// Move the text caret / extend a range (arrow keys). Sets a `Text`
+    /// selection and scrolls only when `focus` has left the viewport — the
+    /// path designed for caret-follow. Canvas clicks use [`Self::Select`]
+    /// (never scrolls).
+    MoveCaret(Selection),
     /// Select a primer by id (Inspector row-click): sets `View.selected_primer`,
     /// and — when attached — selects + reveals its binding footprint.
     RevealPrimer {
@@ -397,7 +402,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         StageEdit(StagedEdit::Paste { .. }) => {
             !state.clipboard.is_empty() && state.workspace.active_view().is_some()
         }
-        Select(_) => true,
+        Select(_) | MoveCaret(_) => true,
         // New Feature (create form from the menu) needs a range selection;
         // an edit form is opened with a concrete feature so it's always valid.
         OpenFeatureForm { id, .. } => id.is_some() || has_range_selection(state),
@@ -761,6 +766,7 @@ pub fn apply<B: BioOps>(
 
         // ── Selection ───────────────────────────────────────────────
         Select(sel) => nav::apply_select(state, sel),
+        MoveCaret(sel) => nav::apply_move_caret(state, sel),
         RevealPrimer { id } => nav::apply_reveal_primer(state, id),
         PromotePrimerPair { id } => nav::apply_promote_primer_pair(state, id),
         RevealFeature { id } => nav::apply_reveal_feature(state, id),

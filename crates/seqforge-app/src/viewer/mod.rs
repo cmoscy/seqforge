@@ -421,7 +421,9 @@ fn handle_keyboard(
                 Selection::cursor(move_focus(base, delta, seq_len))
             };
             *pending = None;
-            cmds.push((AppCommand::Select(ViewSelection::Text(new_sel)), None));
+            // Caret-follow scrolls when focus leaves the viewport; canvas
+            // clicks use Select (never scrolls).
+            cmds.push((AppCommand::MoveCaret(new_sel), None));
         }
         return;
     }

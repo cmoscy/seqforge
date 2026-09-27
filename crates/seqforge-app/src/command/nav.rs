@@ -1,8 +1,8 @@
 //! Navigation, search, selection commands.
 
 use seqforge_core::{
-    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Strand, Target, ViewSelection,
-    ViewerRequest, ViewerResponse,
+    BioOps, DispatchError, EnzymeOp, FeatureId, PrimerId, Selection, Span, Strand, Target, View,
+    ViewSelection, ViewerRequest, ViewerResponse,
 };
 
 use super::{
@@ -184,50 +184,87 @@ pub(super) fn apply_submit_goto<B: BioOps>(
 /// cut-site). The mutual exclusion is structural in [`ViewSelection`], so this
 /// single handler replaces the former `SetSelection`/`SelectFeature`/
 /// `SelectPrimer` triple — the object-vs-range invariant can't be violated.
+///
+/// Never scrolls: a canvas click is already under the pointer. Arrow-key caret
+/// follow uses [`apply_move_caret`]; Inspector row-clicks use [`reveal_span`].
 pub(super) fn apply_select(
     state: &mut AppState,
     sel: ViewSelection,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let before = active_selection(state);
     if let Some(view) = state.workspace.active_view_mut() {
-        // Keep the moving end (focus) of a text range on screen. Fires only when
-        // the focus is outside the last-rendered visible range — a no-op for
-        // clicks (always in view); serves off-screen moves like arrow-key nav.
-        if let (Some(s), Some((start, end))) = (sel.text_range(), view.visible_range) {
-            if s.focus < start || s.focus >= end {
-                view.scroll_to = Some(s.focus);
-            }
-        }
         view.selection = sel;
     }
     emit_selection_diff(state, before);
     Ok(None)
 }
 
+/// Set a text selection and keep its moving end (`focus`) on screen — the
+/// arrow-key / shift-extend path. Scrolls only when `focus` is outside the
+/// last-rendered `visible_range` (a no-op while the caret is still in view).
+pub(super) fn apply_move_caret(
+    state: &mut AppState,
+    sel: Selection,
+) -> Result<Option<ViewerResponse>, DispatchError> {
+    let before = active_selection(state);
+    if let Some(view) = state.workspace.active_view_mut() {
+        if let Some((start, end)) = view.visible_range {
+            if sel.focus < start || sel.focus >= end {
+                view.scroll_to = Some(sel.focus);
+            }
+        }
+        view.selection = ViewSelection::Text(sel);
+    }
+    emit_selection_diff(state, before);
+    Ok(None)
+}
+
+/// Scroll `pos` into view only when `covered` misses the last-rendered
+/// viewport. `visible_range == None` (never painted — including unit tests)
+/// always scrolls. Any overlapping linear piece of a wrapping span counts as
+/// visible enough; `pos` is still the 5'/binding start when a scroll fires.
+fn reveal_span(view: &mut View, pos: usize, covered: Span, len: usize) {
+    let needs_scroll = match view.visible_range {
+        None => true,
+        Some((vs, ve)) => !covered
+            .linear_pieces(len)
+            .iter()
+            .any(|r| r.start < ve && vs < r.end),
+    };
+    if needs_scroll {
+        view.scroll_to = Some(pos);
+    }
+}
+
 /// Select a primer by id (Inspector row-click). Sets `selected_primer`, clears
 /// `selected_feature` (mutually exclusive panel selection) and any text
-/// `selection`, and — when the primer is attached — scrolls its footprint into
-/// view. The highlight itself lands on the **oligo object** via the PrimerTrack's
-/// `selected_primer` emphasis pass (Phase 1.5e), *not* a `view.selection` on the
-/// template (wrong strand for a reverse primer; a 5' tail has no template
-/// column). A detached/floating oligo is panel-only: selected by id, no map move.
+/// `selection`, and — when the primer is attached and off-screen — scrolls its
+/// footprint into view. The highlight itself lands on the **oligo object** via
+/// the PrimerTrack's `selected_primer` emphasis pass (Phase 1.5e), *not* a
+/// `view.selection` on the template (wrong strand for a reverse primer; a 5'
+/// tail has no template column). A detached/floating oligo is panel-only:
+/// selected by id, no map move.
 pub(super) fn apply_reveal_primer(
     state: &mut AppState,
     id: PrimerId,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let before = active_selection(state);
-    // Look up the authored footprint in the active buffer's annotations.
+    // Look up the authored footprint + molecule length in the active buffer.
     let binding = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| ann.primer(id).and_then(|p| p.binding))
+        .with_active_buffer(|_v, b, ann| {
+            ann.primer(id)
+                .and_then(|p| p.binding)
+                .map(|span| (span, b.text.len()))
+        })
         .ok()
         .flatten();
     if let Some(view) = state.workspace.active_view_mut() {
         // Object selection, not a range: the map shows only the oligo highlight
         // (the PrimerTrack draws it by id). `Primer` carries no template range.
         view.selection = ViewSelection::Primer(id);
-        if let Some(b) = &binding {
-            view.scroll_to = Some(b.start);
+        if let Some((span, len)) = binding {
+            reveal_span(view, span.start, span, len);
         }
     }
     emit_selection_diff(state, before);
@@ -336,7 +373,7 @@ pub(super) fn apply_reveal_feature(
             id,
             range: Selection::from_span(span, len),
         };
-        view.scroll_to = Some(span.start);
+        reveal_span(view, span.start, span, len);
     }
     emit_selection_diff(state, before);
     Ok(None)
@@ -353,12 +390,16 @@ pub(super) fn apply_reveal_cut_site(
     end: usize,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let before = active_selection(state);
+    let len = state
+        .workspace
+        .with_active_buffer(|_v, b, _ann| b.text.len())
+        .unwrap_or(end);
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = ViewSelection::CutSite {
             key,
             range: Selection::range(start, end),
         };
-        view.scroll_to = Some(start);
+        reveal_span(view, start, Span::from_range(start..end), len);
     }
     emit_selection_diff(state, before);
     Ok(None)
@@ -414,7 +455,7 @@ pub(super) fn apply_edit_feature_in_inspector(
             id,
             range: Selection::from_span(span, len),
         };
-        view.scroll_to = Some(span.start);
+        reveal_span(view, span.start, span, len);
     }
     emit_selection_diff(state, before);
     state.focus.set_scope(FocusScope::Inspector);
@@ -438,7 +479,7 @@ pub(super) fn apply_edit_primer_in_inspector(
     // Pull the primer's authored fields to seed the draft (id-addressed).
     let fields = state
         .workspace
-        .with_active_buffer(|_v, _b, ann| {
+        .with_active_buffer(|_v, b, ann| {
             ann.primer(id).map(|p| {
                 let flag = match p.strand {
                     Strand::Reverse => "-",
@@ -450,25 +491,25 @@ pub(super) fn apply_edit_primer_in_inspector(
                     p.sequence.clone(),
                     flag.to_string(),
                     p.binding,
+                    b.text.len(),
                 )
             })
         })
         .ok()
         .flatten();
-    let Some((name, sequence, strand, binding)) = fields else {
+    let Some((name, sequence, strand, binding, len)) = fields else {
         return Ok(None); // primer vanished — nothing to edit
     };
 
     let before = active_selection(state);
     super::layout::ensure_inspector_visible(state);
-    let scroll = binding.as_ref().map(|b| b.start);
     state
         .inspector
         .begin_primer_edit(id, name, sequence, strand, binding, arm_delete);
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = ViewSelection::Primer(id);
-        if let Some(s) = scroll {
-            view.scroll_to = Some(s);
+        if let Some(span) = binding {
+            reveal_span(view, span.start, span, len);
         }
     }
     emit_selection_diff(state, before);
@@ -958,5 +999,86 @@ mod tests {
         assert_eq!(v.selection.selected_primer(), None, "clears prior primer");
         assert_eq!(v.selection.text_range(), Some(Selection::range(4, 10)));
         assert_eq!(v.scroll_to, Some(4));
+    }
+
+    #[test]
+    fn select_feature_with_end_offscreen_does_not_scroll() {
+        // Canvas click path: a feature whose end is past the viewport must not
+        // chase `focus` (the bug that jumped after selecting an on-screen gene).
+        let (mut state, fid) = open_with_feature();
+        let v = state.workspace.active_view_mut().unwrap();
+        v.visible_range = Some((0, 4)); // feature is 2..8 — start in view, end out
+        v.scroll_to = None;
+
+        apply_select(
+            &mut state,
+            ViewSelection::Feature {
+                id: fid,
+                range: Selection::range(2, 8),
+            },
+        )
+        .unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selection.selected_feature(), Some(fid));
+        assert_eq!(v.scroll_to, None, "Select never scrolls");
+    }
+
+    #[test]
+    fn move_caret_scrolls_only_when_focus_leaves_viewport() {
+        let (mut state, _) = open_with_feature();
+        state.workspace.active_view_mut().unwrap().visible_range = Some((0, 6));
+
+        apply_move_caret(&mut state, Selection::cursor(3)).unwrap();
+        assert_eq!(
+            state.workspace.active_view().unwrap().scroll_to,
+            None,
+            "caret still in view"
+        );
+
+        apply_move_caret(&mut state, Selection::cursor(10)).unwrap();
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selection.text_range(), Some(Selection::cursor(10)));
+        assert_eq!(v.scroll_to, Some(10), "caret left the viewport");
+    }
+
+    #[test]
+    fn reveal_feature_skips_scroll_when_span_overlaps_viewport() {
+        let (mut state, fid) = open_with_feature();
+        // Feature 2..8 overlaps visible 0..4 — stay put.
+        state.workspace.active_view_mut().unwrap().visible_range = Some((0, 4));
+
+        apply_reveal_feature(&mut state, fid).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selection.selected_feature(), Some(fid));
+        assert_eq!(v.scroll_to, None, "already partly on screen");
+    }
+
+    #[test]
+    fn reveal_feature_scrolls_when_span_misses_viewport() {
+        let (mut state, fid) = open_with_feature();
+        // Feature 2..8 is entirely below visible 0..2.
+        state.workspace.active_view_mut().unwrap().visible_range = Some((0, 2));
+
+        apply_reveal_feature(&mut state, fid).unwrap();
+
+        assert_eq!(
+            state.workspace.active_view().unwrap().scroll_to,
+            Some(2),
+            "off-screen feature scrolls to its start"
+        );
+    }
+
+    #[test]
+    fn reveal_primer_skips_scroll_when_binding_overlaps_viewport() {
+        let (mut state, id) = open_with_primer(Some(2..8), "visp");
+        state.workspace.active_view_mut().unwrap().visible_range = Some((0, 4));
+
+        apply_reveal_primer(&mut state, id).unwrap();
+
+        let v = state.workspace.active_view().unwrap();
+        assert_eq!(v.selection.selected_primer(), Some(id));
+        assert_eq!(v.scroll_to, None, "binding already partly on screen");
     }
 }
