@@ -789,7 +789,7 @@ impl TrackStack {
             Box::new(TranslationTrack),   // 3 — codon band hugs the bases
             Box::new(PrimerReverseTrack), // 4
             Box::new(FeaturesTrack),      // 5
-            Box::new(RulerTrack),          // 6 — below annotations
+            Box::new(RulerTrack),         // 6 — below annotations
         ];
         // Paint cut-site staples last so they overlay strands / translation.
         let paint_order: Vec<usize> = (0..tracks.len())
