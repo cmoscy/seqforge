@@ -49,7 +49,13 @@ pub type PendingCommand = (
 );
 
 /// Every user-, agent-, or code-initiated action.
+///
+/// `Viewer(ViewerRequest)` is large; clippy's `large_enum_variant` fires on
+/// the Windows x86_64 layout (not on aarch64 macOS / Linux x86_64). Boxing
+/// just for the lint would churn every construction site — leave the payload
+/// inline until a real size problem shows up.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppCommand {
     // ── File / document ──────────────────────────────────────────────
     PromptOpenFile,

@@ -12,13 +12,13 @@ https://github.com/cmoscy/seqforge
 
 ## Install
 
-**Prerequisites:** Rust toolchain via [rustup](https://rustup.rs). The repo pins Rust **1.95.0** in [rust-toolchain.toml](rust-toolchain.toml); rustup installs it automatically on first `cargo` invocation.
+**Prerequisites:** Rust toolchain via [rustup](https://rustup.rs). The repo pins Rust **1.95.0** in [rust-toolchain.toml](rust-toolchain.toml); rustup installs it automatically on first `cargo` invocation. On Linux you also need the usual GUI build packages (see CI). On Windows, rustup's default MSVC toolchain needs the Visual C++ build tools.
 
 ```bash
 git clone https://github.com/cmoscy/seqforge.git
 cd seqforge
 cargo build --release
-./target/release/seqforge-app
+./target/release/seqforge-app   # Windows: target\release\seqforge-app.exe
 ```
 
 For a quick debug build (contributors):
@@ -40,7 +40,7 @@ To also use `seqforge` from any terminal window (not just the embedded one), ins
 ./target/release/seqforge-app --install-cli
 ```
 
-Both methods symlink the bundled binary into `/usr/local/bin` (if writable) or `~/.local/bin`. After updating the app, re-run either to refresh the symlink.
+Both methods put the bundled CLI on your user `PATH`. On macOS and Linux that is a symlink into `/usr/local/bin` (if writable) or `~/.local/bin`. On Windows it copies `seqforge.exe` into `%LOCALAPPDATA%\SeqForge\bin` and prepends that directory to the user `PATH`. After updating the app, re-run either to refresh.
 
 ---
 

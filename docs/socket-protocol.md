@@ -1,18 +1,23 @@
 # SeqForge socket protocol
 
-JSON-RPC 2.0 over a Unix domain socket. Used by the `seqforge` CLI and
-by external agents to drive a running SeqForge GUI process. Stage 2.5d.
+JSON-RPC 2.0 over a local socket. Used by the `seqforge` CLI and
+by external agents to drive a running SeqForge GUI process.
 
 ## Transport
 
 - **Protocol**: JSON-RPC 2.0, newline-delimited (one request per line,
   one response per line).
-- **Transport**: Unix domain socket. Path is published in the
-  `SEQFORGE_SOCKET` environment variable (set in the SeqForge embedded
-  terminal automatically; agents launched outside the GUI must read it
-  from a wrapper or be told).
-- **Path format**: `/tmp/seqforge-<pid>.sock`. One socket per GUI
-  process; the path is removed when the GUI exits.
+- **Transport**: a local socket. On macOS and Linux this is a Unix
+  domain socket; on Windows it is a named pipe. The endpoint is
+  published in the `SEQFORGE_SOCKET` environment variable (set in the
+  SeqForge embedded terminal automatically; agents launched outside
+  the GUI must read it from a wrapper or be told).
+- **Endpoint format**:
+  - Unix: `$XDG_RUNTIME_DIR/seqforge-<pid>.sock` when that directory
+    is set, otherwise `/tmp/seqforge-<pid>.sock`. The socket file is
+    created mode `0600` and removed when the GUI exits.
+  - Windows: `\\.\pipe\seqforge-<pid>` (access gated by the creating
+    user's named-pipe ACL).
 - **Concurrency**: each accepted connection runs in its own thread.
   Requests on a single connection are processed in order; the GUI's
   applier serializes everything to one mutation site so cross-connection
@@ -210,11 +215,11 @@ retry a non-idempotent request after a timeout.
 
 **The socket is a local control plane, not a network endpoint.**
 
-- The socket path is in `/tmp/seqforge-<pid>.sock`. On a multi-user
-  Unix host, anyone with read access to `/tmp` can see the path; access
-  is gated by filesystem permissions on the socket file itself, which
-  defaults to the owner's umask (typically `srwxr-xr-x`, so write
-  access is owner-only on a normal setup).
+- On Unix the endpoint is a filesystem socket under
+  `$XDG_RUNTIME_DIR` or `/tmp`, created mode `0600`. On a multi-user
+  host anyone who can see the path still cannot connect unless they
+  can write the socket file. On Windows the endpoint is a named pipe
+  whose default ACL is the creating user.
 - A connecting process is implicitly trusted: it can `open` arbitrary
   files (subject to GUI process's filesystem access), trigger
   arbitrary searches, and read sequence data. Any process running as

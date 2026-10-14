@@ -18,7 +18,6 @@ use crate::keymap;
 use crate::minimap::MiniMap;
 use crate::overlay::{FEATURE_KINDS, OverlayStack};
 use crate::persistence::{self, PersistedSession};
-#[cfg(unix)]
 use crate::socket::{self, SocketRequest};
 use crate::tabs::{Tab, TabViewer};
 use crate::terminal::TerminalPane;
@@ -85,15 +84,13 @@ pub struct AppState {
     pub pending_commands: Vec<PendingCommand>,
     /// Live terminal pane (egui_term + PTY). Initialised in SeqForgeApp::new.
     pub terminal: Option<TerminalPane>,
-    /// Receiver for requests arriving via the Unix domain socket.
-    /// Unix-only; agent IPC on Windows is out of scope for v0.1.
-    #[cfg(unix)]
+    /// Receiver for requests arriving via the local socket (Unix domain
+    /// socket on macOS/Linux; named pipe on Windows).
     pub socket_rx: Option<mpsc::Receiver<SocketRequest>>,
-    /// RAII guard that removes the socket file when `AppState` is
-    /// dropped. The listener thread also cleans up on accept error,
-    /// but it doesn't run on normal window-close exit — this guard
-    /// covers that path. Tier 1 #4.
-    #[cfg(unix)]
+    /// RAII guard that removes the Unix socket file when `AppState` is
+    /// dropped (no-op for Windows named pipes). The listener thread also
+    /// cleans up on accept error, but it doesn't run on normal
+    /// window-close exit — this guard covers that path. Tier 1 #4.
     pub socket_guard: Option<crate::socket::SocketGuard>,
     pub(crate) toasts: egui_notify::Toasts,
     /// All transient UI (Find/GoTo bars, file dialog, CLI status).
@@ -204,9 +201,7 @@ impl Default for AppState {
             recent_files: Vec::new(),
             pending_commands: Vec::new(),
             terminal: None,
-            #[cfg(unix)]
             socket_rx: None,
-            #[cfg(unix)]
             socket_guard: None,
             toasts: egui_notify::Toasts::default(),
             overlays: OverlayStack::default(),
@@ -351,17 +346,15 @@ impl SeqForgeApp {
             restore_session(&mut state, session, &seqforge_session::Bio);
         }
 
-        // ── PTY environment + socket listener (Unix only) ─────────────────────
+        // ── PTY environment + socket listener ─────────────────────────────────
         // Sequencing is load-bearing: in Rust 2024 `std::env::set_var` is
         // unsafe because env mutation while another thread exists is UB. So
         // we (1) decide the socket path, (2) install all env vars on the
         // main thread, (3) THEN spawn the listener thread. See
         // `terminal::install_pty_env`.
         //
-        // Windows: agent IPC is out of scope for v0.1. The terminal pane
-        // still installs PATH for the bundled CLI; the CLI's viewer-IPC
-        // half is also `#[cfg(unix)]` and surfaces an error if invoked.
-        #[cfg(unix)]
+        // Transport is a local socket on every OS (Unix domain socket on
+        // macOS/Linux; named pipe on Windows) — same JSON-RPC wire format.
         {
             let socket_path = socket::socket_path();
             crate::terminal::install_pty_env(Some(&socket_path));
@@ -376,8 +369,6 @@ impl SeqForgeApp {
                 }
             }
         }
-        #[cfg(not(unix))]
-        crate::terminal::install_pty_env(None);
 
         state.terminal =
             TerminalPane::new(cc.egui_ctx.clone(), &state.config.settings.terminal.shell)
@@ -1995,11 +1986,10 @@ impl eframe::App for SeqForgeApp {
             _ => {}
         }
 
-        // ── Drain socket requests (Unix only) ─────────────────────────────────
+        // ── Drain socket requests ─────────────────────────────────────────────
         // Socket-originated `Open` is converted to `AppCommand::OpenFile` so
         // recents and `seq_view` stay in sync — `Viewer(req)` is the
         // generic pass-through for everything else.
-        #[cfg(unix)]
         if let Some(rx) = &self.state.socket_rx {
             while let Ok((req, resp_tx)) = rx.try_recv() {
                 let cmd = match req {
