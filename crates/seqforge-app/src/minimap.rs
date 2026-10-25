@@ -68,6 +68,7 @@ fn build_circular_geom(
     settings: &MinimapSettings,
     theme: &crate::config::Theme,
     visibility: &FeatureVisibility,
+    use_file_colors: bool,
 ) -> MinimapGeom {
     let center = Pos2::new(panel_size / 2.0, panel_size / 2.0);
     let radius = panel_size * 0.38;
@@ -77,7 +78,7 @@ fn build_circular_geom(
         if !visibility.visible(FeatureKind::classify(&feat.raw_kind), feat.id) {
             continue;
         }
-        let color = theme.feature_color(FeatureKind::classify(&feat.raw_kind));
+        let color = theme.feature_color(feat, use_file_colors);
         // One arc per linear run (`Feature::pieces`) — the same origin-split the
         // main viewer derives from, so an origin-spanning feature draws as its two
         // arms meeting at the origin instead of a near-full ring (the old hull
@@ -129,6 +130,7 @@ fn build_linear_geom(
     settings: &MinimapSettings,
     theme: &crate::config::Theme,
     visibility: &FeatureVisibility,
+    use_file_colors: bool,
 ) -> MinimapGeom {
     // Only visible features participate — a hidden feature reserves no stack row
     // (matches the main viewer), so the packing below is over the visible set.
@@ -172,7 +174,7 @@ fn build_linear_geom(
                     settings.linear_feature_row_height,
                 ),
             ),
-            color: theme.feature_color(FeatureKind::classify(&feat.raw_kind)),
+            color: theme.feature_color(feat, use_file_colors),
             feat_id: feat.id,
             strand: feat.strand,
         });
@@ -375,6 +377,7 @@ impl MiniMap {
                                 &cfg.settings.minimap,
                                 &cfg.theme,
                                 &visibility,
+                                cfg.settings.features.use_file_colors,
                             )
                         } else {
                             build_linear_geom(
@@ -384,6 +387,7 @@ impl MiniMap {
                                 &cfg.settings.minimap,
                                 &cfg.theme,
                                 &visibility,
+                                cfg.settings.features.use_file_colors,
                             )
                         }
                     })

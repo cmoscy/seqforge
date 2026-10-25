@@ -144,6 +144,8 @@ impl InspectorState {
         workspace: &mut Workspace,
         seq_views: &crate::viewer::SeqViewCache,
         follow_selection: bool,
+        theme: &crate::config::Theme,
+        use_file_colors: bool,
     ) {
         let Some(view_id) = workspace.active_view else {
             self.clear();
@@ -160,6 +162,7 @@ impl InspectorState {
                     // a spliced `Join` (`Feature::selection_span`).
                     span: f.selection_span(buf.text.len()),
                     strand: f.strand,
+                    color: theme.feature_color(f, use_file_colors),
                 })
                 .collect();
             // Create-from-selection seed: a range selection + its template slice.

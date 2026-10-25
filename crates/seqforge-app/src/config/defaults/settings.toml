@@ -48,6 +48,16 @@ spine_feature_gap         = 3.0
 [inspector]
 follow_selection = true   # auto-switch inspector tab when selection changes
 
+[features]
+# true  = a colour stored on the feature itself (/ApEinfo_fwdcolor, or
+#         /ApEinfo_revcolor on a reverse-strand feature) wins over the theme
+#         palette. This is what SnapGene, Benchling and ApE all do, so files
+#         keep the colours their author picked.
+# false = ignore file colours; paint strictly from the theme. Use this when
+#         comparing constructs from mixed sources and you want the palette to
+#         mean the same thing in every tab.
+use_file_colors = true
+
 [terminal]
 # Empty = use $SHELL, else /bin/sh (Unix) or powershell.exe (Windows)
 shell = ""

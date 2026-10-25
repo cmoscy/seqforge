@@ -1835,6 +1835,8 @@ impl eframe::App for SeqForgeApp {
             workspace,
             seq_views,
             config.settings.inspector.follow_selection,
+            &config.theme,
+            config.settings.features.use_file_colors,
         );
 
         // ── Terminal: native bottom region (decision 19) ──────────────────────

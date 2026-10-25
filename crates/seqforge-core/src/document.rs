@@ -465,7 +465,23 @@ pub struct Feature {
     pub lineage: Option<Lineage>,
 }
 
+/// ApE's per-feature colour qualifiers — the de facto interchange convention
+/// (SnapGene and Benchling read and write them too). `revcolor` paints a
+/// reverse-strand feature, `fwdcolor` everything else.
+pub const FWD_COLOR_QUALIFIER: &str = "ApEinfo_fwdcolor";
+pub const REV_COLOR_QUALIFIER: &str = "ApEinfo_revcolor";
+
 impl Feature {
+    /// The colour authored on this feature, if any — strand-aware per ApE
+    /// (`revcolor` for a reverse-strand feature, falling back to `fwdcolor`).
+    pub fn stored_color(&self) -> Option<&str> {
+        let get = |k: &str| self.qualifiers.get(k).and_then(|v| v.as_deref());
+        match self.strand {
+            Strand::Reverse => get(REV_COLOR_QUALIFIER).or_else(|| get(FWD_COLOR_QUALIFIER)),
+            _ => get(FWD_COLOR_QUALIFIER),
+        }
+    }
+
     /// Linear runs this feature occupies on a molecule of `len` — the geometry
     /// primitive for render/highlight/copy. Delegates to [`Location::pieces`].
     pub fn pieces(&self, len: usize) -> Vec<Range<usize>> {

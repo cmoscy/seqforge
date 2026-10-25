@@ -944,6 +944,7 @@ impl SequenceView {
             min_above_sequence: cfg.settings.editor.min_above_sequence,
             line_width,
             label_overflow,
+            use_file_colors: cfg.settings.features.use_file_colors,
             font_id: font_id.clone(),
             small_font: small_font.clone(),
             ruler_font: ruler_font.clone(),

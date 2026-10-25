@@ -10,7 +10,7 @@
 //! the Translation track; `cds_glyphs` is reused unchanged.
 
 use egui::{Color32, Painter, Pos2, Rect, Stroke};
-use seqforge_core::{Feature, FeatureKind, Strand};
+use seqforge_core::{Feature, Strand};
 
 use crate::viewer::track::{
     BlockCtx, BlockGeom, Hit, Track, aa_codon_hits, clip_range_rect, paint_aa_lane,
@@ -166,9 +166,7 @@ impl Track for FeaturesTrack {
             // Resolve the selected *id* to this frame's position for the
             // highlight — position never leaves the frame.
             let is_selected = ctx.selected_feature == Some(feat.id);
-            let swatch = ctx
-                .theme
-                .feature_color(FeatureKind::classify(&feat.raw_kind));
+            let swatch = ctx.theme.feature_color(feat, style.use_file_colors);
 
             // A plain single-segment, non-fuzzy feature keeps exactly today's
             // one-rectangle look. A `Join` (spliced / origin-spanning) or a fuzzy

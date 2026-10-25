@@ -626,6 +626,9 @@ pub(crate) struct Style {
     pub min_above_sequence: f32,
     pub line_width: usize,
     pub label_overflow: LabelOverflow,
+    /// Whether a colour stored on the feature itself outranks the theme palette
+    /// (see `FeatureSettings::use_file_colors`).
+    pub use_file_colors: bool,
     // fonts
     pub font_id: FontId,
     pub small_font: FontId,
@@ -1260,6 +1263,7 @@ mod tests {
             min_above_sequence: 32.0,
             line_width: 20,
             label_overflow: LabelOverflow::Truncate,
+            use_file_colors: true,
             font_id: FontId::monospace(12.0),
             small_font: FontId::proportional(11.0),
             ruler_font: FontId::proportional(9.0),

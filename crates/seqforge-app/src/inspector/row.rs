@@ -16,6 +16,8 @@ pub(super) enum Tone {
     Normal,
     Warn,
     Dim,
+    /// A literal colour — a feature's resolved display colour.
+    Swatch(egui::Color32),
 }
 
 pub(super) struct DetailLine {
@@ -32,8 +34,9 @@ pub(super) struct Row {
     pub(super) selected: bool,
     /// Strand arrow glyph (fwd/rev), if the noun is stranded.
     pub(super) glyph: Option<&'static str>,
-    /// Primer state indicator (painted dot), if any. The tone maps 1:1 to state
-    /// (Normal = Confirmed, Warn = Drifted, Dim = Detached).
+    /// Painted dot, if any. Primers: the tone maps 1:1 to state (Normal =
+    /// Confirmed, Warn = Drifted, Dim = Detached). Features: a `Swatch` of the
+    /// feature's display colour.
     pub(super) dot: Option<Tone>,
     pub(super) name: String,
     /// Render the name subdued (unnamed feature / detached oligo).
@@ -199,6 +202,7 @@ fn tone_color(ui: &egui::Ui, theme: &Theme, tone: &Tone) -> egui::Color32 {
         Tone::Normal => ui.visuals().text_color(),
         Tone::Warn => theme.ui.warn.0,
         Tone::Dim => ui.visuals().weak_text_color(),
+        Tone::Swatch(c) => *c,
     }
 }
 

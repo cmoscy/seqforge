@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use egui::Color32;
-use seqforge_core::FeatureKind;
+use seqforge_core::{Feature, FeatureKind};
 use serde::{Deserialize, Deserializer};
 
 use super::defaults::DEFAULT_DARK;
@@ -50,9 +50,45 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Resolve a feature kind to a colour, preferring a theme override
+    /// Resolve the colour of one feature.
+    ///
+    /// Precedence, highest first:
+    ///   1. the colour stored *on the feature* (`/ApEinfo_fwdcolor`, or
+    ///      `/ApEinfo_revcolor` on a reverse-strand feature) — skipped when
+    ///      `use_file_colors` is off,
+    ///   2. a theme key matching the verbatim GenBank type (`misc_difference`,
+    ///      `enhancer`, …), which is how a palette addresses types finer than
+    ///      the eight [`FeatureKind`] buckets,
+    ///   3. a theme key for the bucket,
+    ///   4. the palette baked into the code.
+    ///
+    /// SnapGene, Benchling and ApE all treat the per-feature colour as
+    /// authoritative and the type default as merely what a *new* feature is
+    /// born with; (1) is what puts SeqForge on that footing. A file colour we
+    /// cannot parse falls through to (2) rather than erroring — a malformed
+    /// qualifier should not blank out a feature.
+    pub fn feature_color(&self, feat: &Feature, use_file_colors: bool) -> Color32 {
+        if use_file_colors {
+            if let Some(c) = feat.stored_color().and_then(parse_color) {
+                return c;
+            }
+        }
+        self.type_color(&feat.raw_kind)
+    }
+
+    /// The colour for a verbatim GenBank type — steps 2–4 of
+    /// [`Self::feature_color`], i.e. what a feature with no colour of its own
+    /// gets.
+    pub fn type_color(&self, raw_kind: &str) -> Color32 {
+        if let Some(c) = self.features.get(&raw_kind.to_ascii_lowercase()) {
+            return c.0;
+        }
+        self.kind_color(FeatureKind::classify(raw_kind))
+    }
+
+    /// Resolve a feature *kind* to a colour, preferring a theme override
     /// and falling back to the legacy palette baked into the code.
-    pub fn feature_color(&self, kind: FeatureKind) -> Color32 {
+    pub fn kind_color(&self, kind: FeatureKind) -> Color32 {
         let key = match kind {
             FeatureKind::Gene => "gene",
             FeatureKind::Cds => "cds",
@@ -378,9 +414,65 @@ impl<'de> Deserialize<'de> for HexColor {
     }
 }
 
+/// Parse a colour written either as hex or as a CSS/X11 name.
+///
+/// Theme files are hex-only (see [`HexColor`]), but feature qualifiers are
+/// not ours to dictate: ApE writes `/ApEinfo_fwdcolor="green"` as readily as
+/// `"#00ff00"`, so a reader that only understood hex would silently ignore a
+/// large share of real-world files.
+pub fn parse_color(s: &str) -> Option<Color32> {
+    let s = s.trim();
+    if let Some(c) = parse_hex(s) {
+        return Some(c);
+    }
+    // The X11/CSS basic set, which covers what ApE and SnapGene emit by name.
+    let named: &[(&str, (u8, u8, u8))] = &[
+        ("black", (0, 0, 0)),
+        ("white", (255, 255, 255)),
+        ("red", (255, 0, 0)),
+        ("green", (0, 128, 0)),
+        ("lime", (0, 255, 0)),
+        ("blue", (0, 0, 255)),
+        ("yellow", (255, 255, 0)),
+        ("cyan", (0, 255, 255)),
+        ("aqua", (0, 255, 255)),
+        ("magenta", (255, 0, 255)),
+        ("fuchsia", (255, 0, 255)),
+        ("silver", (192, 192, 192)),
+        ("gray", (128, 128, 128)),
+        ("grey", (128, 128, 128)),
+        ("maroon", (128, 0, 0)),
+        ("olive", (128, 128, 0)),
+        ("purple", (128, 0, 128)),
+        ("teal", (0, 128, 128)),
+        ("navy", (0, 0, 128)),
+        ("orange", (255, 165, 0)),
+        ("pink", (255, 192, 203)),
+        ("brown", (165, 42, 42)),
+        ("gold", (255, 215, 0)),
+        ("violet", (238, 130, 238)),
+        ("turquoise", (64, 224, 208)),
+        ("salmon", (250, 128, 114)),
+        ("khaki", (240, 230, 140)),
+        ("plum", (221, 160, 221)),
+        ("orchid", (218, 112, 214)),
+        ("tan", (210, 180, 140)),
+    ];
+    let lower = s.to_ascii_lowercase();
+    named
+        .iter()
+        .find(|(n, _)| *n == lower)
+        .map(|(_, (r, g, b))| Color32::from_rgb(*r, *g, *b))
+}
+
 fn parse_hex(s: &str) -> Option<Color32> {
     let s = s.strip_prefix('#').unwrap_or(s);
     match s.len() {
+        // `#RGB` shorthand: each nibble doubled, per CSS.
+        3 => {
+            let n = |i: usize| u8::from_str_radix(&s[i..i + 1], 16).ok().map(|v| v * 17);
+            Some(Color32::from_rgb(n(0)?, n(1)?, n(2)?))
+        }
         6 => {
             let r = u8::from_str_radix(&s[0..2], 16).ok()?;
             let g = u8::from_str_radix(&s[2..4], 16).ok()?;
@@ -401,6 +493,30 @@ fn parse_hex(s: &str) -> Option<Color32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seqforge_core::{Feature, FeatureId, Location, Strand};
+
+    /// The embedded themes must define the same keys in the same tables — a
+    /// key under the wrong table is silently ignored (most tables are not
+    /// `deny_unknown_fields`), which is exactly how a misplaced block hides.
+    #[test]
+    fn embedded_themes_share_one_layout() {
+        let tables = |body: &str| -> Vec<(String, Vec<String>)> {
+            let v: toml::Table = toml::from_str(body).unwrap();
+            v.iter()
+                .map(|(t, inner)| {
+                    let mut keys: Vec<String> = inner.as_table().unwrap().keys().cloned().collect();
+                    keys.sort();
+                    (t.clone(), keys)
+                })
+                .collect()
+        };
+        assert_eq!(
+            tables(crate::config::defaults::DEFAULT_DARK),
+            tables(crate::config::defaults::DEFAULT_LIGHT)
+        );
+        let light: Theme = toml::from_str(crate::config::defaults::DEFAULT_LIGHT).unwrap();
+        assert!(light.features.contains_key("misc_difference"));
+    }
 
     #[test]
     fn chrome_maps_onto_egui_visuals() {
@@ -431,5 +547,93 @@ mod tests {
     fn default_dark_theme_parses() {
         let t = Theme::default();
         assert!(t.features.contains_key("gene"));
+    }
+
+    fn feat(raw_kind: &str, strand: Strand, quals: &[(&str, &str)]) -> Feature {
+        Feature {
+            id: FeatureId(1),
+            location: Location::simple(0..10),
+            raw_kind: raw_kind.into(),
+            label: "f".into(),
+            strand,
+            qualifiers: quals
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), Some((*v).to_string())))
+                .collect(),
+            lineage: None,
+        }
+    }
+
+    #[test]
+    fn file_color_outranks_theme() {
+        let t = Theme::default();
+        let f = feat("CDS", Strand::Forward, &[("ApEinfo_fwdcolor", "#a6d9a6")]);
+        assert_eq!(
+            t.feature_color(&f, true),
+            Color32::from_rgb(0xa6, 0xd9, 0xa6)
+        );
+    }
+
+    #[test]
+    fn use_file_colors_off_ignores_the_qualifier() {
+        let t = Theme::default();
+        let f = feat("CDS", Strand::Forward, &[("ApEinfo_fwdcolor", "#a6d9a6")]);
+        assert_eq!(t.feature_color(&f, false), t.kind_color(FeatureKind::Cds));
+    }
+
+    /// ApE paints a reverse-strand feature from `revcolor`.
+    #[test]
+    fn reverse_strand_prefers_revcolor() {
+        let t = Theme::default();
+        let quals = [
+            ("ApEinfo_fwdcolor", "#ff0000"),
+            ("ApEinfo_revcolor", "#0000ff"),
+        ];
+        let fwd = feat("CDS", Strand::Forward, &quals);
+        let rev = feat("CDS", Strand::Reverse, &quals);
+        assert_eq!(t.feature_color(&fwd, true), Color32::from_rgb(255, 0, 0));
+        assert_eq!(t.feature_color(&rev, true), Color32::from_rgb(0, 0, 255));
+    }
+
+    /// A theme key naming the verbatim GenBank type beats the coarse bucket —
+    /// this is what lets `misc_difference` differ from `misc_feature`.
+    #[test]
+    fn raw_kind_key_outranks_bucket_key() {
+        let mut t = Theme::default();
+        t.features.insert(
+            "misc_difference".into(),
+            HexColor(Color32::from_rgb(1, 2, 3)),
+        );
+        let f = feat("misc_difference", Strand::Forward, &[]);
+        assert_eq!(t.feature_color(&f, true), Color32::from_rgb(1, 2, 3));
+        // ...and a sibling type still falls back to the bucket.
+        let other = feat("misc_feature", Strand::Forward, &[]);
+        assert_eq!(
+            t.feature_color(&other, true),
+            t.kind_color(FeatureKind::Misc)
+        );
+    }
+
+    /// A malformed qualifier must not blank the feature out.
+    #[test]
+    fn unparseable_file_color_falls_back_to_palette() {
+        let t = Theme::default();
+        let f = feat("CDS", Strand::Forward, &[("ApEinfo_fwdcolor", "banana")]);
+        assert_eq!(t.feature_color(&f, true), t.kind_color(FeatureKind::Cds));
+    }
+
+    #[test]
+    fn parse_color_accepts_hex_forms_and_css_names() {
+        assert_eq!(parse_color("#f00"), Some(Color32::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#ff0000"), Some(Color32::from_rgb(255, 0, 0)));
+        assert_eq!(
+            parse_color("#ff000080"),
+            Some(Color32::from_rgba_unmultiplied(255, 0, 0, 0x80))
+        );
+        // ApE writes names as readily as hex.
+        assert_eq!(parse_color("green"), Some(Color32::from_rgb(0, 128, 0)));
+        assert_eq!(parse_color("  CYAN "), Some(Color32::from_rgb(0, 255, 255)));
+        assert_eq!(parse_color("not-a-color"), None);
+        assert_eq!(parse_color(""), None);
     }
 }

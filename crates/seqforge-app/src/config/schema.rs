@@ -20,6 +20,7 @@ pub struct Settings {
     pub minimap: MinimapSettings,
     pub layout: LayoutSettings,
     pub inspector: InspectorSettings,
+    pub features: FeatureSettings,
     pub terminal: TerminalSettings,
 }
 
@@ -32,6 +33,7 @@ impl Default for Settings {
             minimap: MinimapSettings::default(),
             layout: LayoutSettings::default(),
             inspector: InspectorSettings::default(),
+            features: FeatureSettings::default(),
             terminal: TerminalSettings::default(),
         }
     }
@@ -164,6 +166,28 @@ impl Default for InspectorSettings {
     fn default() -> Self {
         Self {
             follow_selection: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FeatureSettings {
+    /// When `true` (default), a colour stored on the feature itself
+    /// (`/ApEinfo_fwdcolor` / `/ApEinfo_revcolor`) outranks the theme palette —
+    /// the convention SnapGene, Benchling and ApE all follow, so files keep the
+    /// colours their author chose.
+    ///
+    /// `false` → ignore file colours and paint strictly from the theme, which is
+    /// what you want when comparing constructs from mixed sources and the
+    /// palette should mean the same thing in every tab.
+    pub use_file_colors: bool,
+}
+
+impl Default for FeatureSettings {
+    fn default() -> Self {
+        Self {
+            use_file_colors: true,
         }
     }
 }

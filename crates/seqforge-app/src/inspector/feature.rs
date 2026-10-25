@@ -8,7 +8,7 @@ use seqforge_core::{FeatureId, FeatureKind, Span, Strand, Target, ViewerRequest}
 
 use super::InspectorState;
 use super::row::{
-    EditOutcome, Row, detail_frame, row_shell, strand_flag, strand_glyph, visibility_button,
+    EditOutcome, Row, Tone, detail_frame, row_shell, strand_flag, strand_glyph, visibility_button,
 };
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Theme;
@@ -24,6 +24,8 @@ pub(super) struct FeatureRow {
     /// bounding span for a spliced `Join` — see `Feature::selection_span`).
     pub(super) span: Span,
     pub(super) strand: Strand,
+    /// What the canvas paints: file colour (when honoured) → type → palette.
+    pub(super) color: egui::Color32,
 }
 
 /// Live draft for the Inspector's inline feature editor (Phase 1.5a / decision 15).
@@ -100,7 +102,7 @@ fn feature_display_row(f: &FeatureRow, selected: bool) -> Row {
     Row {
         selected,
         glyph: Some(strand_glyph(f.strand)),
-        dot: None,
+        dot: Some(Tone::Swatch(f.color)),
         name: if unnamed {
             "(unnamed)".to_string()
         } else {
@@ -346,6 +348,7 @@ mod tests {
             kind: "CDS".into(),
             span: Span::from_range(10..40),
             strand: Strand::Reverse,
+            color: egui::Color32::RED,
         }
     }
 

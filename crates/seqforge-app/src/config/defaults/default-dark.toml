@@ -36,6 +36,25 @@ source     = "#95A5A6"
 misc       = "#BDC3C7"
 other      = "#BDC3C7"
 
+# Keys are matched against the verbatim GenBank feature type first (so
+# `misc_difference` can differ from `misc_feature`), then against the coarse
+# kind bucket above. Add any GenBank type name here.
+misc_difference = "#E8B33A"
+misc_binding    = "#8FA6B8"
+primer_bind     = "#C78FD6"
+enhancer        = "#5DADE2"
+polya_signal    = "#D98880"
+protein_bind    = "#7FB3A3"
+sig_peptide     = "#A3B86C"
+mat_peptide     = "#C9A227"
+repeat_region   = "#99857A"
+intron          = "#6C7A89"
+exon            = "#4FA3D1"
+trna            = "#D4A5C8"
+rrna            = "#C8A5D4"
+ncrna           = "#A5C8D4"
+stem_loop       = "#8E9BA8"
+
 [strand]
 forward = "#FFBE006E"
 reverse = "#00BEFF6E"
