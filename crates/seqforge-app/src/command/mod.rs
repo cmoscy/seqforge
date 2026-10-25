@@ -184,6 +184,8 @@ pub enum AppCommand {
         strand: String,
         start: usize,
         end: usize,
+        /// `#rrggbb`, or `None` to leave the colour to the type.
+        color: Option<String>,
     },
     /// Route a feature into the Inspector's inline editor (decision 15,
     /// tab-exclusive editing): dock/focus the pane, select the feature, enter
@@ -808,7 +810,8 @@ pub fn apply<B: BioOps>(
             strand,
             start,
             end,
-        } => edit::apply_submit_feature_form(state, id, label, kind, strand, start, end),
+            color,
+        } => edit::apply_submit_feature_form(state, id, label, kind, strand, start, end, color),
         OpenRenameFeature { id, label } => nav::apply_open_rename_feature(state, id, label),
         SubmitRenameFeature { id, label } => edit::apply_submit_rename_feature(state, id, label),
         SetTranslationDisplay(display) => {

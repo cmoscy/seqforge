@@ -25,6 +25,7 @@ use seqforge_core::{
 use crate::clipboard::filter_bases as iupac_filter;
 use crate::command::{AppCommand, PendingCommand, StagedEdit};
 use crate::config::Config;
+use crate::config::theme::{FEATURE_PRESETS, color_to_hex};
 
 use primer_anneal::{PrimerAnnealCache, build_primer_anneal_cache};
 use track::{
@@ -1345,6 +1346,7 @@ impl SequenceView {
                                     kind: "CDS".to_string(),
                                     label: "ORF".to_string(),
                                     strand: strand_flag(orf.strand).to_string(),
+                                    color: None,
                                     target: Target::active(),
                                 }),
                                 None,
@@ -1505,6 +1507,55 @@ impl SequenceView {
                     ));
                     ui.close_menu();
                 }
+                ui.menu_button("Color", |ui| {
+                    let set_color = |color: String| {
+                        AppCommand::Viewer(ViewerRequest::UpdateFeature {
+                            id: fc.id,
+                            kind: None,
+                            label: None,
+                            strand: None,
+                            start: None,
+                            end: None,
+                            color: Some(color),
+                            target: Target::active(),
+                        })
+                    };
+                    // Quick picks; "Custom…" opens the Inspector's full picker.
+                    egui::Grid::new("feature_color_presets")
+                        .spacing([4.0, 4.0])
+                        .show(ui, |ui| {
+                            for (i, (name, c)) in FEATURE_PRESETS.iter().enumerate() {
+                                let swatch = egui::Button::new("")
+                                    .fill(*c)
+                                    .min_size(egui::vec2(20.0, 20.0));
+                                if ui.add(swatch).on_hover_text(*name).clicked() {
+                                    cmds.push((set_color(color_to_hex(*c)), None));
+                                    ui.close_menu();
+                                }
+                                if i % 6 == 5 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    ui.separator();
+                    if ui.button("Custom…").clicked() {
+                        cmds.push((
+                            AppCommand::EditFeatureInInspector {
+                                id: fc.id,
+                                arm_delete: false,
+                            },
+                            None,
+                        ));
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(fc.has_color, egui::Button::new("Use type colour"))
+                        .clicked()
+                    {
+                        cmds.push((set_color(String::new()), None));
+                        ui.close_menu();
+                    }
+                });
                 if ui.button("Delete…").clicked() {
                     // Route to the Inspector editor with the two-step delete
                     // armed — one confirmation path for all feature deletion.

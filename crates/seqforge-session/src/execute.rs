@@ -196,6 +196,7 @@ pub fn execute(
             kind,
             label,
             strand,
+            color,
             target,
         } => from_edit(edit::apply_add_feature(
             ws,
@@ -205,6 +206,7 @@ pub fn execute(
             kind,
             label,
             strand,
+            color,
         )),
         ViewerRequest::RemoveFeature { id, target } => {
             from_edit(edit::apply_remove_feature(ws, target.view, id))
@@ -219,6 +221,7 @@ pub fn execute(
             strand,
             start,
             end,
+            color,
             target,
         } => from_edit(edit::apply_update_feature(
             ws,
@@ -229,6 +232,7 @@ pub fn execute(
             strand,
             start,
             end,
+            color,
         )),
         ViewerRequest::AddPrimer {
             name,

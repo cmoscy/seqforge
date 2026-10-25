@@ -163,6 +163,8 @@ impl InspectorState {
                     span: f.selection_span(buf.text.len()),
                     strand: f.strand,
                     color: theme.feature_color(f, use_file_colors),
+                    type_color: theme.type_color(&f.raw_kind),
+                    stored_color: f.stored_color().and_then(crate::config::theme::parse_color),
                 })
                 .collect();
             // Create-from-selection seed: a range selection + its template slice.
@@ -332,6 +334,7 @@ impl InspectorState {
         strand: String,
         start: usize,
         end: usize,
+        (stored_color, type_color): (Option<egui::Color32>, egui::Color32),
         arm_delete: bool,
     ) {
         self.tab = InspectorTab::Features;
@@ -342,6 +345,9 @@ impl InspectorState {
             strand,
             start,
             end,
+            color: stored_color,
+            original_color: stored_color,
+            type_color,
             needs_focus: true,
             confirm_delete: arm_delete,
         });

@@ -416,6 +416,7 @@ pub(super) fn apply_edit_feature_in_inspector(
     arm_delete: bool,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     // Pull the feature's fields to seed the draft (id-addressed; decision 12).
+    let cfg = state.config.clone();
     let fields = state
         .workspace
         .with_active_buffer(|_v, b, ann| {
@@ -433,12 +434,16 @@ pub(super) fn apply_edit_feature_in_inspector(
                     flag.to_string(),
                     f.selection_span(b.text.len()),
                     b.text.len(),
+                    (
+                        f.stored_color().and_then(crate::config::theme::parse_color),
+                        cfg.theme.type_color(&f.raw_kind),
+                    ),
                 )
             })
         })
         .ok()
         .flatten();
-    let Some((label, kind, strand, span, len)) = fields else {
+    let Some((label, kind, strand, span, len, colors)) = fields else {
         return Ok(None); // feature vanished — nothing to edit
     };
     // The inline editor is a linear start/end form; a wrapping feature shows its
@@ -449,7 +454,7 @@ pub(super) fn apply_edit_feature_in_inspector(
     super::layout::ensure_inspector_visible(state);
     state
         .inspector
-        .begin_feature_edit(id, label, kind, strand, start, end, arm_delete);
+        .begin_feature_edit(id, label, kind, strand, start, end, colors, arm_delete);
     if let Some(view) = state.workspace.active_view_mut() {
         view.selection = ViewSelection::Feature {
             id,

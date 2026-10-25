@@ -471,6 +471,30 @@ pub struct Feature {
 pub const FWD_COLOR_QUALIFIER: &str = "ApEinfo_fwdcolor";
 pub const REV_COLOR_QUALIFIER: &str = "ApEinfo_revcolor";
 
+/// Validate a user-supplied feature colour for storage.
+///
+/// `Ok(None)` means "clear" (empty or `none`). Accepts `#RGB`, `#RRGGBB`,
+/// `#RRGGBBAA` (normalized to lowercase with a leading `#`) or a bare
+/// alphabetic name (`green`), which ApE writes as readily as hex. Whether a
+/// name is *known* is the renderer's call; an unknown one falls back to the
+/// palette there rather than erroring.
+pub fn normalize_feature_color(s: &str) -> Result<Option<String>, String> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(Some(format!("#{}", hex.to_ascii_lowercase())));
+    }
+    if !s.starts_with('#') && s.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return Ok(Some(s.to_ascii_lowercase()));
+    }
+    Err(format!(
+        "invalid colour {s:?}: expected #RGB, #RRGGBB, #RRGGBBAA or a colour name"
+    ))
+}
+
 impl Feature {
     /// The colour authored on this feature, if any — strand-aware per ApE
     /// (`revcolor` for a reverse-strand feature, falling back to `fwdcolor`).
@@ -479,6 +503,22 @@ impl Feature {
         match self.strand {
             Strand::Reverse => get(REV_COLOR_QUALIFIER).or_else(|| get(FWD_COLOR_QUALIFIER)),
             _ => get(FWD_COLOR_QUALIFIER),
+        }
+    }
+
+    /// Set (or with `None`, clear) the stored colour. Writes both qualifiers
+    /// so the feature keeps its colour if its strand is later flipped.
+    pub fn set_stored_color(&mut self, color: Option<String>) {
+        match color {
+            Some(c) => {
+                self.qualifiers
+                    .insert(FWD_COLOR_QUALIFIER.into(), Some(c.clone()));
+                self.qualifiers.insert(REV_COLOR_QUALIFIER.into(), Some(c));
+            }
+            None => {
+                self.qualifiers.remove(FWD_COLOR_QUALIFIER);
+                self.qualifiers.remove(REV_COLOR_QUALIFIER);
+            }
         }
     }
 

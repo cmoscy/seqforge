@@ -27,6 +27,7 @@ pub(super) fn apply_submit_feature_form(
     strand: String,
     start: usize,
     end: usize,
+    color: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     match id {
         None => {
@@ -38,6 +39,7 @@ pub(super) fn apply_submit_feature_form(
                 kind,
                 label.clone(),
                 strand,
+                color,
             )?;
             super::nav::apply_dismiss_overlay(state)?;
             let shown = if label.is_empty() { "feature" } else { &label };
@@ -53,6 +55,7 @@ pub(super) fn apply_submit_feature_form(
                 Some(strand),
                 Some(start),
                 Some(end),
+                color,
             )?;
             super::nav::apply_dismiss_overlay(state)?;
         }
@@ -659,6 +662,7 @@ mod tests {
             "CDS".into(),
             label.into(),
             "+".into(),
+            None,
         )
         .unwrap()
         {
@@ -694,9 +698,25 @@ mod tests {
         s.overlays
             .push_unique(Overlay::FeatureForm(FeatureForm::create(0, 3)));
         // id = None → create path.
-        apply_submit_feature_form(&mut s, None, "gene1".into(), "CDS".into(), "+".into(), 0, 3)
-            .unwrap();
+        apply_submit_feature_form(
+            &mut s,
+            None,
+            "gene1".into(),
+            "CDS".into(),
+            "+".into(),
+            0,
+            3,
+            Some("#a6d9a6".into()),
+        )
+        .unwrap();
         assert_eq!(feature_count(&mut s), 1);
+        let colour = s
+            .workspace
+            .with_active_buffer(|_, _, ann| {
+                ann.iter().next().unwrap().stored_color().map(str::to_owned)
+            })
+            .unwrap();
+        assert_eq!(colour.as_deref(), Some("#a6d9a6"), "modal colour is stored");
         // The modal was dismissed on submit.
         assert!(s.overlays.is_empty());
     }
@@ -724,6 +744,7 @@ mod tests {
             "-".into(),
             4,
             9,
+            None,
         )
         .unwrap();
         let (label, range) = s
@@ -898,6 +919,7 @@ mod tests {
             "misc_feature".into(),
             "scratch".into(),
             "+".into(),
+            None,
         )
         .unwrap()
         {
@@ -914,6 +936,7 @@ mod tests {
             Some("-".into()),
             Some(55),
             Some(85),
+            None,
         )
         .unwrap();
         ops += 1;
@@ -962,6 +985,7 @@ mod tests {
             "CDS".into(),
             "g".into(),
             "+".into(),
+            None,
         )
         .unwrap();
         let v1 = s
@@ -982,6 +1006,7 @@ mod tests {
             "CDS".into(),
             "g".into(),
             "+".into(),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { .. }));
@@ -1003,6 +1028,7 @@ mod tests {
             None,
             Some(4),
             Some(9),
+            None,
         )
         .unwrap();
         let (range, kind, label) = s
@@ -1038,6 +1064,7 @@ mod tests {
             None,
             Some(2),
             Some(99),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, DispatchError::OutOfRange { .. }));
@@ -1069,6 +1096,7 @@ mod tests {
             None,
             Some(5),
             None,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, DispatchError::InvalidInput(_)));
@@ -1078,6 +1106,7 @@ mod tests {
             None,
             id,
             Some("gene".into()),
+            None,
             None,
             None,
             None,
@@ -1094,6 +1123,7 @@ mod tests {
             None,
             Some(2),
             Some(6),
+            None,
         )
         .unwrap();
         let span = s
@@ -1124,6 +1154,7 @@ mod tests {
             None,
             Some(4),
             Some(9),
+            None,
         )
         .unwrap();
 
@@ -1153,6 +1184,7 @@ mod tests {
             None,
             Some(4),
             Some(9),
+            None,
         )
         .unwrap();
 

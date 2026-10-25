@@ -1163,6 +1163,9 @@ pub(crate) struct FeatureContext {
     pub is_cds: bool,
     /// Reading frame from `/codon_start` (1, 2, or 3; defaults to 1).
     pub codon_start: usize,
+    /// Whether the feature carries its own colour (`/ApEinfo_*color`) — gates
+    /// the menu's "Use type colour" reset.
+    pub has_color: bool,
 }
 
 impl FeatureContext {
@@ -1183,6 +1186,7 @@ impl FeatureContext {
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .filter(|n| (1..=3).contains(n))
                 .unwrap_or(1),
+            has_color: f.stored_color().is_some(),
         }
     }
 }

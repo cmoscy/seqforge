@@ -159,6 +159,9 @@ pub struct FeatureForm {
     pub kind: String,
     /// `"+"`, `"-"`, or `"."` (unstranded).
     pub strand: String,
+    /// Own colour; `None` leaves it to the type colour (create) or untouched
+    /// (edit).
+    pub color: Option<egui::Color32>,
     pub needs_focus: bool,
 }
 
@@ -172,6 +175,7 @@ impl FeatureForm {
             label: String::new(),
             kind: "misc_feature".to_string(),
             strand: "+".to_string(),
+            color: None,
             needs_focus: true,
         }
     }
@@ -192,6 +196,7 @@ impl FeatureForm {
             label,
             kind,
             strand,
+            color: None,
             needs_focus: true,
         }
     }

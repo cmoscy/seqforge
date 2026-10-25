@@ -414,6 +414,35 @@ impl<'de> Deserialize<'de> for HexColor {
     }
 }
 
+/// Quick-pick swatches for per-feature colours (context menu, Inspector).
+/// Mid-lightness pastels in the ApE/SnapGene idiom, so labels stay readable
+/// via [`pick_contrast`] on both the dark and light canvases.
+pub const FEATURE_PRESETS: &[(&str, Color32)] = &[
+    ("Peach", Color32::from_rgb(0xf8, 0xd3, 0xa9)),
+    ("Orange", Color32::from_rgb(0xfa, 0xac, 0x61)),
+    ("Amber", Color32::from_rgb(0xff, 0xd4, 0x00)),
+    ("Salmon", Color32::from_rgb(0xf7, 0x97, 0x7a)),
+    ("Pink", Color32::from_rgb(0xff, 0x9c, 0xcd)),
+    ("Lavender", Color32::from_rgb(0xc7, 0xb0, 0xe3)),
+    ("Blue", Color32::from_rgb(0x84, 0xb0, 0xdc)),
+    ("Sky", Color32::from_rgb(0xa6, 0xc8, 0xe8)),
+    ("Teal", Color32::from_rgb(0x75, 0xc6, 0xa9)),
+    ("Green", Color32::from_rgb(0xa6, 0xd9, 0xa6)),
+    ("Taupe", Color32::from_rgb(0xb4, 0xab, 0xac)),
+    ("Grey", Color32::from_rgb(0xd6, 0xd6, 0xd6)),
+];
+
+/// Format a colour for storage in `/ApEinfo_*color`: `#rrggbb`, or
+/// `#rrggbbaa` when not fully opaque.
+pub fn color_to_hex(c: Color32) -> String {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
+}
+
 /// Parse a colour written either as hex or as a CSS/X11 name.
 ///
 /// Theme files are hex-only (see [`HexColor`]), but feature qualifiers are

@@ -29,6 +29,7 @@ pub use commands::{
 pub use document::{
     CutSite, Document, Feature, FeatureId, FeatureKind, Lineage, LineageOp, Location,
     MethylContext, MethylState, Primer, PrimerId, SearchHit, Strand, Topology,
+    normalize_feature_color,
 };
 pub use fragment::{End, Fragment, OverhangSide, Product};
 pub use history::{EditKind, History, HistoryEntry};

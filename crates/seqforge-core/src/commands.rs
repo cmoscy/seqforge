@@ -376,6 +376,11 @@ pub enum ViewerRequest {
         #[arg(long, default_value = "+")]
         #[serde(default = "default_strand")]
         strand: String,
+        /// Display colour, stored as `/ApEinfo_fwdcolor` + `/ApEinfo_revcolor`:
+        /// `#RRGGBB`, `#RGB`, `#RRGGBBAA` or a name (`green`).
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
         #[command(flatten)]
         #[serde(flatten)]
         target: Target,
@@ -521,6 +526,11 @@ pub enum ViewerRequest {
         #[arg(long)]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         end: Option<usize>,
+        /// New display colour (`#RRGGBB`, `#RGB`, `#RRGGBBAA` or a name);
+        /// `""` or `none` clears it back to the theme palette.
+        #[arg(long)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
         #[command(flatten)]
         #[serde(flatten)]
         target: Target,
@@ -1189,6 +1199,10 @@ pub struct FeatureInfo {
     /// 1-based and render both arms on wrap.
     pub span: Span,
     pub strand: Strand,
+    /// The colour stored on the feature (`/ApEinfo_*color`), if any — absent
+    /// means it renders in the theme's per-type colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Derived attachment state of a primer against the current template — the
@@ -1531,6 +1545,7 @@ pub fn dispatch<B: BioOps + ?Sized>(
                     // span for a spliced `Join` (`selection_span`).
                     span: f.selection_span(buffer.text.len()),
                     strand: f.strand,
+                    color: f.stored_color().map(str::to_owned),
                 })
                 .collect();
             Ok(ViewerResponse::Features {
@@ -2072,6 +2087,7 @@ mod tests {
             label: "ori".into(),
             span: Span::new(16, 8), // wraps on L=20
             strand: Strand::Forward,
+            color: None,
         };
         let json = serde_json::to_string(&fi).unwrap();
         assert!(

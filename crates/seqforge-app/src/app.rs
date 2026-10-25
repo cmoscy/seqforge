@@ -456,6 +456,29 @@ impl SeqForgeApp {
                                         .range(form.start + 1..=usize::MAX),
                                 );
                                 ui.end_row();
+
+                                ui.label("Color");
+                                ui.horizontal(|ui| {
+                                    let fallback = self.state.config.theme.type_color(&form.kind);
+                                    let mut c = form.color.unwrap_or(fallback);
+                                    if egui::color_picker::color_edit_button_srgba(
+                                        ui,
+                                        &mut c,
+                                        egui::color_picker::Alpha::Opaque,
+                                    )
+                                    .changed()
+                                    {
+                                        form.color = Some(c);
+                                    }
+                                    if form.color.is_some() {
+                                        if ui.small_button("Use type colour").clicked() {
+                                            form.color = None;
+                                        }
+                                    } else {
+                                        ui.weak("type colour");
+                                    }
+                                });
+                                ui.end_row();
                             });
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
@@ -467,6 +490,7 @@ impl SeqForgeApp {
                                     strand: form.strand.clone(),
                                     start: form.start,
                                     end: form.end,
+                                    color: form.color.map(crate::config::theme::color_to_hex),
                                 });
                             }
                             if ui.button("Cancel").clicked() {

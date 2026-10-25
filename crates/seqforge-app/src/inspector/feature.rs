@@ -12,6 +12,7 @@ use super::row::{
 };
 use crate::command::{AppCommand, PendingCommand};
 use crate::config::Theme;
+use crate::config::theme::{FEATURE_PRESETS, color_to_hex};
 use crate::overlay::FEATURE_KINDS;
 
 /// Owned per-frame projection of a feature (avoids holding an annotations borrow).
@@ -26,6 +27,10 @@ pub(super) struct FeatureRow {
     pub(super) strand: Strand,
     /// What the canvas paints: file colour (when honoured) → type → palette.
     pub(super) color: egui::Color32,
+    /// The type/theme colour alone — what "Use type colour" falls back to.
+    pub(super) type_color: egui::Color32,
+    /// The feature's own colour, if it carries one (`/ApEinfo_*color`).
+    pub(super) stored_color: Option<egui::Color32>,
 }
 
 /// Live draft for the Inspector's inline feature editor (Phase 1.5a / decision 15).
@@ -41,6 +46,12 @@ pub(super) struct FeatureDraft {
     pub(super) strand: String,
     pub(super) start: usize,
     pub(super) end: usize,
+    /// Own colour (`None` = follow the type colour). Only sent on commit when
+    /// it differs from `original_color`, so an untouched named colour
+    /// (`"green"`) is never rewritten as hex.
+    pub(super) color: Option<egui::Color32>,
+    pub(super) original_color: Option<egui::Color32>,
+    pub(super) type_color: egui::Color32,
     /// Grab keyboard focus for the label field on the first edit frame.
     pub(super) needs_focus: bool,
     /// Delete is armed (two-step confirm): the Delete button became
@@ -61,6 +72,9 @@ impl FeatureDraft {
             // both endpoints are given).
             start: f.span.start,
             end: f.span.start + f.span.len,
+            color: f.stored_color,
+            original_color: f.stored_color,
+            type_color: f.type_color,
             needs_focus: true,
             confirm_delete: false,
         }
@@ -90,6 +104,9 @@ impl FeatureDraft {
             strand: Some(self.strand.clone()),
             start: Some(self.start),
             end: Some(self.end),
+            // `""` clears; `None` leaves the stored colour alone.
+            color: (self.color != self.original_color)
+                .then(|| self.color.map(color_to_hex).unwrap_or_default()),
             target: Target::active(),
         }
     }
@@ -190,6 +207,10 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft, theme: &Theme) -> Opt
                 ui.label("End");
                 ui.add(egui::DragValue::new(&mut d.end).range(d.start + 1..=usize::MAX));
                 ui.end_row();
+
+                ui.label("Color");
+                color_field(ui, d);
+                ui.end_row();
             });
         ui.add_space(4.0);
         if d.confirm_delete {
@@ -250,6 +271,44 @@ fn feature_editor(ui: &mut egui::Ui, d: &mut FeatureDraft, theme: &Theme) -> Opt
         outcome = Some(EditOutcome::Cancel);
     }
     outcome
+}
+
+/// The editor's colour row: the current colour as a picker button (editing
+/// the type colour adopts it as the feature's own), the preset swatches, and
+/// a reset back to the type colour.
+fn color_field(ui: &mut egui::Ui, d: &mut FeatureDraft) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            let mut c = d.color.unwrap_or(d.type_color);
+            if egui::color_picker::color_edit_button_srgba(
+                ui,
+                &mut c,
+                egui::color_picker::Alpha::Opaque,
+            )
+            .changed()
+            {
+                d.color = Some(c);
+            }
+            if d.color.is_some() {
+                if ui.small_button("Use type colour").clicked() {
+                    d.color = None;
+                }
+            } else {
+                ui.weak("type colour");
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+            for (name, c) in FEATURE_PRESETS {
+                let swatch = egui::Button::new("")
+                    .fill(*c)
+                    .min_size(egui::vec2(14.0, 14.0));
+                if ui.add(swatch).on_hover_text(*name).clicked() {
+                    d.color = Some(*c);
+                }
+            }
+        });
+    });
 }
 
 impl InspectorState {
@@ -349,6 +408,8 @@ mod tests {
             span: Span::from_range(10..40),
             strand: Strand::Reverse,
             color: egui::Color32::RED,
+            type_color: egui::Color32::GREEN,
+            stored_color: Some(egui::Color32::RED),
         }
     }
 
@@ -376,8 +437,10 @@ mod tests {
                 strand,
                 start,
                 end,
+                color,
                 target,
             } => {
+                assert_eq!(color, None, "untouched colour is not re-sent");
                 assert_eq!(id, FeatureId(7));
                 assert_eq!(kind.as_deref(), Some("CDS"));
                 assert_eq!(label.as_deref(), Some("lacZ"));
@@ -398,5 +461,18 @@ mod tests {
         assert!(!d.is_valid(), "start == end must be rejected before commit");
         d.end = d.start.saturating_sub(1);
         assert!(!d.is_valid(), "end < start must be rejected");
+    }
+
+    #[test]
+    fn colour_change_and_reset_map_to_the_color_field() {
+        let colour_of = |d: &FeatureDraft| match d.to_request() {
+            ViewerRequest::UpdateFeature { color, .. } => color,
+            other => panic!("expected UpdateFeature, got {other:?}"),
+        };
+        let mut d = FeatureDraft::from_row(&row());
+        d.color = Some(egui::Color32::from_rgb(0x84, 0xb0, 0xdc));
+        assert_eq!(colour_of(&d).as_deref(), Some("#84b0dc"));
+        d.color = None;
+        assert_eq!(colour_of(&d).as_deref(), Some(""), "reset clears");
     }
 }

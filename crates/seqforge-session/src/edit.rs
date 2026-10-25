@@ -18,6 +18,7 @@ use crate::workspace::Workspace;
 use seqforge_core::{
     DispatchError, EditKind, Feature, FeatureId, Location, Orient, PartialPolicy, Primer, PrimerId,
     Selection, SeqSlice, Span, Strand, ViewId, ViewSelection, ViewerResponse,
+    normalize_feature_color,
 };
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -379,6 +380,15 @@ fn parse_strand(s: &str) -> Strand {
     }
 }
 
+/// Validate an optional `--color` argument up front, before any edit is
+/// opened: `None` → untouched, `Some(None)` → clear, `Some(Some(c))` → set.
+fn parse_color_arg(color: Option<String>) -> Result<Option<Option<String>>, DispatchError> {
+    color
+        .map(|c| normalize_feature_color(&c).map_err(DispatchError::InvalidInput))
+        .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn apply_add_feature(
     ws: &mut Workspace,
     view: Option<ViewId>,
@@ -387,8 +397,10 @@ pub fn apply_add_feature(
     kind: String,
     label: String,
     strand: String,
+    color: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(ws, view)?;
+    let color = parse_color_arg(color)?.flatten();
     let (id, len) = ws.edit_annotations(vid, |ann, buf| {
         if start >= end || end > buf.text.len() {
             return Err(DispatchError::OutOfRange {
@@ -396,7 +408,7 @@ pub fn apply_add_feature(
                 seq_len: buf.text.len(),
             });
         }
-        let id = ann.add(Feature {
+        let mut feat = Feature {
             id: Default::default(), // reassigned by `add`
             location: Location::simple(start..end),
             raw_kind: kind,
@@ -404,7 +416,11 @@ pub fn apply_add_feature(
             strand: parse_strand(&strand),
             qualifiers: Default::default(),
             lineage: None,
-        });
+        };
+        if color.is_some() {
+            feat.set_stored_color(color);
+        }
+        let id = ann.add(feat);
         Ok((id, buf.text.len()))
     })?;
     Ok(Some(ViewerResponse::FeatureAdded { id, len }))
@@ -460,8 +476,11 @@ pub fn apply_update_feature(
     strand: Option<String>,
     start: Option<usize>,
     end: Option<usize>,
+    color: Option<String>,
 ) -> Result<Option<ViewerResponse>, DispatchError> {
     let vid = resolve_target(ws, view)?;
+    // Outer `None` = leave alone; `Some(None)` = clear back to the palette.
+    let color = parse_color_arg(color)?;
     let len = ws.edit_annotations(vid, |ann, buf| {
         let total = buf.text.len();
         let cur = ann
@@ -511,6 +530,9 @@ pub fn apply_update_feature(
         }
         if let Some(s) = strand {
             f.strand = parse_strand(&s);
+        }
+        if let Some(c) = color {
+            f.set_stored_color(c);
         }
         Ok(total)
     })?;
@@ -852,7 +874,17 @@ mod tests {
     #[test]
     fn a_feature_survives_add_rename_remove_headlessly() {
         let mut ws = ws_with(b"ATGCATGCATGC");
-        apply_add_feature(&mut ws, None, 0, 6, "CDS".into(), "orf".into(), "+".into()).unwrap();
+        apply_add_feature(
+            &mut ws,
+            None,
+            0,
+            6,
+            "CDS".into(),
+            "orf".into(),
+            "+".into(),
+            None,
+        )
+        .unwrap();
 
         let id = ws
             .with_active_buffer(|_, _, ann| ann.iter().next().map(|f| f.id))
@@ -868,6 +900,59 @@ mod tests {
         apply_remove_feature(&mut ws, None, id).unwrap();
         let n = ws.with_active_buffer(|_, _, ann| ann.len()).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn feature_colour_sets_clears_validates_and_undoes() {
+        let mut ws = ws_with(b"ATGCATGCATGC");
+        let colour = |ws: &mut Workspace| {
+            ws.with_active_buffer(|_, _, ann| {
+                let f = ann.iter().next().unwrap();
+                (
+                    f.stored_color().map(str::to_owned),
+                    f.qualifiers.get("ApEinfo_revcolor").cloned().flatten(),
+                )
+            })
+            .unwrap()
+        };
+        let update = |ws: &mut Workspace, id, c: &str| {
+            apply_update_feature(ws, None, id, None, None, None, None, None, Some(c.into()))
+        };
+
+        // Add with a colour: normalized, and written to both ApE qualifiers.
+        apply_add_feature(
+            &mut ws,
+            None,
+            0,
+            6,
+            "CDS".into(),
+            "vh".into(),
+            "+".into(),
+            Some("A6D9A6".into()),
+        )
+        .unwrap();
+        let id = ws
+            .with_active_buffer(|_, _, ann| ann.iter().next().unwrap().id)
+            .unwrap();
+        assert_eq!(
+            colour(&mut ws),
+            (Some("#a6d9a6".into()), Some("#a6d9a6".into()))
+        );
+
+        // Recolour, then undo restores the previous colour.
+        update(&mut ws, id, "green").unwrap();
+        assert_eq!(colour(&mut ws).0.as_deref(), Some("green"));
+        apply_undo(&mut ws, None).unwrap();
+        assert_eq!(colour(&mut ws).0.as_deref(), Some("#a6d9a6"));
+
+        // Junk is rejected before any edit opens; the colour is untouched.
+        assert!(update(&mut ws, id, "#12345").is_err());
+        assert!(update(&mut ws, id, "rgb(1,2,3)").is_err());
+        assert_eq!(colour(&mut ws).0.as_deref(), Some("#a6d9a6"));
+
+        // `""` clears both qualifiers back to the type colour.
+        update(&mut ws, id, "").unwrap();
+        assert_eq!(colour(&mut ws), (None, None));
     }
 
     #[test]
