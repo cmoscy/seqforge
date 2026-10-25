@@ -124,13 +124,16 @@ pub fn start_socket_listener(
     path: PathBuf,
     ctx: egui::Context,
 ) -> anyhow::Result<mpsc::Receiver<SocketRequest>> {
-    let name = path
-        .as_os_str()
-        .to_fs_name::<GenericFilePath>()
-        .map_err(|e| anyhow::anyhow!("invalid socket name {}: {e}", path.display()))?;
+    let to_name = || {
+        path.as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|e| anyhow::anyhow!("invalid socket name {}: {e}", path.display()))
+    };
+    let bind_err =
+        |e: std::io::Error| anyhow::anyhow!("could not bind socket at {}: {e}", path.display());
 
     #[cfg(unix)]
-    let opts = {
+    let listener = {
         // Hardening: mode 0600 so only the owner can connect. The default
         // umask usually achieves this on macOS / Linux but not always
         // (e.g. umask 022 yields 0644). Without this, any local user on a
@@ -138,14 +141,34 @@ pub fn start_socket_listener(
         // our GUI. Named pipes on Windows already default to the creating
         // user's ACL — no equivalent step.
         use interprocess::os::unix::local_socket::ListenerOptionsExt;
-        ListenerOptions::new().name(name).mode(0o600)
+
+        match ListenerOptions::new()
+            .name(to_name()?)
+            .mode(0o600)
+            .create_sync()
+        {
+            Ok(listener) => listener,
+            // interprocess implements `.mode()` as an fchmod() on the *unbound*
+            // socket, which Darwin rejects with EINVAL; the crate surfaces that
+            // as `Unsupported` (its docs claim only Linux / FreeBSD 14.3+ /
+            // OpenBSD). Binding with a mode is therefore not portable, and
+            // treating it as fatal left macOS with no listener at all — every
+            // CLI verb that needs a session failed with "no SeqForge instance
+            // running". Retrying without the mode is safe because
+            // `socket_dir()` hands us a 0700 parent: the directory, not the
+            // socket file, is the access boundary.
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => ListenerOptions::new()
+                .name(to_name()?)
+                .create_sync()
+                .map_err(bind_err)?,
+            Err(e) => return Err(bind_err(e)),
+        }
     };
     #[cfg(not(unix))]
-    let opts = ListenerOptions::new().name(name);
-
-    let listener = opts
+    let listener = ListenerOptions::new()
+        .name(to_name()?)
         .create_sync()
-        .map_err(|e| anyhow::anyhow!("could not bind socket at {}: {e}", path.display()))?;
+        .map_err(bind_err)?;
 
     let (tx, rx) = mpsc::channel::<SocketRequest>();
 
@@ -157,13 +180,55 @@ pub fn start_socket_listener(
     Ok(rx)
 }
 
+/// The directory holding this user's sockets, created mode 0700 if absent.
+///
+/// The *directory* is the access boundary, not the socket file — see
+/// [`start_socket_listener`], where constraining the socket's own mode turns
+/// out not to be portable. `$XDG_RUNTIME_DIR` is already specified to be a
+/// 0700 per-user directory, so on Linux we simply use it; elsewhere we build
+/// the equivalent under the temp dir, keyed by uid so two users on one host
+/// never collide.
+#[cfg(unix)]
+fn socket_dir() -> std::io::Result<PathBuf> {
+    use std::io;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
+
+    let uid = unsafe { libc::getuid() };
+    let dir = std::env::temp_dir().join(format!("seqforge-{uid}"));
+
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => return Ok(dir),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+
+    // Pre-existing: trust it only if we own it, then re-tighten the mode in
+    // case it was left open by an older build or a different umask.
+    let md = std::fs::metadata(&dir)?;
+    if !md.is_dir() || md.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is not a directory owned by uid {uid}", dir.display()),
+        ));
+    }
+    if md.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// Pick a local-socket endpoint for this GUI process.
 ///
-/// **Unix** preference order:
-///   1. `$XDG_RUNTIME_DIR/seqforge-<pid>.sock` — per-user, mode-0700
-///      directory, the standard Linux runtime spot.
-///   2. `/tmp/seqforge-<pid>.sock` — fallback for macOS (no
-///      XDG_RUNTIME_DIR by default) and other systems.
+/// **Unix:** `<socket_dir()>/seqforge-<pid>.sock` — i.e. `$XDG_RUNTIME_DIR`
+/// when set (the standard Linux runtime spot), otherwise a 0700 per-uid
+/// directory under the temp dir. See [`socket_dir`] for why the directory
+/// rather than the socket file carries the permissions.
 ///
 /// **Windows:** `\\.\pipe\seqforge-<pid>` — a per-user named pipe (the
 /// creating user's ACL is the access boundary).
@@ -180,14 +245,15 @@ pub fn socket_path() -> PathBuf {
     #[cfg(unix)]
     {
         let name = format!("seqforge-{pid}.sock");
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            if !dir.is_empty() {
-                let mut p = PathBuf::from(dir);
-                p.push(&name);
-                return p;
+        // A directory we could not secure is worse than a flat /tmp path that
+        // at least lets the session work, so fall back rather than refuse.
+        match socket_dir() {
+            Ok(dir) => dir.join(name),
+            Err(e) => {
+                eprintln!("[seqforge] private socket dir unavailable ({e}); using /tmp");
+                PathBuf::from("/tmp").join(name)
             }
         }
-        PathBuf::from("/tmp").join(name)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -427,5 +493,65 @@ mod tests {
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":1}}"#;
         let resp = super::handle_rpc_line(line, &tx, &egui::Context::default());
         assert_eq!(resp.error.as_ref().unwrap().code, -32000);
+    }
+
+    /// The real bind path must work on this platform.
+    ///
+    /// Regression: `start_socket_listener` hardened the socket with
+    /// `.mode(0o600)`, which interprocess implements as fchmod() on an
+    /// unbound socket — EINVAL on Darwin, reported as `Unsupported`. The GUI
+    /// logged "socket init failed" and ran with no listener, so every CLI
+    /// verb needing a session failed. Nothing caught it because the other
+    /// tests here build their listeners directly, without `.mode()`.
+    #[test]
+    fn start_socket_listener_binds_on_this_platform() {
+        let path = test_endpoint("bind-smoke");
+        let _ = std::fs::remove_file(&path);
+
+        let rx = super::start_socket_listener(path.clone(), egui::Context::default())
+            .expect("listener must bind on this platform");
+        fake_app(rx);
+
+        let name = path
+            .as_os_str()
+            .to_fs_name::<GenericFilePath>()
+            .expect("client name");
+        let mut client = Stream::connect(name).expect("a bound listener must accept connections");
+
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"goto","params":{"position":7}}"#;
+        client.write_all(format!("{req}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        BufReader::new(&client).read_line(&mut line).unwrap();
+        assert!(line.contains("\"id\":1"), "unexpected reply: {line}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The socket's parent directory must not be world/group accessible —
+    /// it, not the socket file, is what keeps other local users out.
+    #[cfg(unix)]
+    #[test]
+    fn socket_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Ignore an inherited XDG_RUNTIME_DIR: that path is the OS's to own,
+        // and this test is about the directory we create ourselves.
+        let dir = {
+            let saved = std::env::var_os("XDG_RUNTIME_DIR");
+            unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+            let d = super::socket_dir();
+            if let Some(v) = saved {
+                unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) };
+            }
+            d.expect("a private socket dir must be obtainable")
+        };
+
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "{} is {mode:o}, must be 0700",
+            dir.display()
+        );
     }
 }

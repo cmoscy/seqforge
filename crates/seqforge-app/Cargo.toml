@@ -27,6 +27,9 @@ directories = "5"
 arboard = { version = "3", default-features = false }
 interprocess = "2.4.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2" # getuid(), for the per-user socket directory
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 

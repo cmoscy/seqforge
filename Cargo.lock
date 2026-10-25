@@ -3674,6 +3674,7 @@ dependencies = [
  "egui_term",
  "indexmap",
  "interprocess",
+ "libc",
  "objc2-app-kit 0.3.2",
  "seqforge-bio",
  "seqforge-core",
