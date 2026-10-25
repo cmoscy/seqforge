@@ -20,6 +20,7 @@ pub mod keybindings;
 pub mod paths;
 pub mod schema;
 pub mod theme;
+pub mod write;
 
 pub use keybindings::KeyBindings;
 pub use schema::{LabelOverflow, MinimapSettings, Settings};
@@ -106,12 +107,7 @@ fn read_theme(name: &str, warnings: &mut Vec<String>) -> Theme {
         }
     }
     // Embedded built-ins.
-    let embedded = match name {
-        "default-light" => Some(defaults::DEFAULT_LIGHT),
-        "default-dark" => Some(defaults::DEFAULT_DARK),
-        _ => None,
-    };
-    if let Some(body) = embedded {
+    if let Some(body) = write::embedded_theme(name) {
         match toml::from_str::<Theme>(body) {
             Ok(t) => return t,
             Err(e) => warnings.push(format!("embedded theme {name:?}: {e}")),

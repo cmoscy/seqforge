@@ -345,6 +345,10 @@ pub enum AppCommand {
     OpenThemeFile,
     /// Open the config directory in the platform file manager.
     OpenConfigDir,
+    /// Open the Settings → Feature Colors… palette editor.
+    OpenFeatureColors,
+    /// Point `settings.toml` at another theme and reload.
+    SetActiveTheme(String),
 
     // ── In-canvas staging (menu → arm a previewed edit) ──────────────
     /// Arm a staged, destructive edit on the active view's canvas instead of
@@ -456,7 +460,7 @@ pub fn is_enabled(cmd: &AppCommand, state: &AppState) -> bool {
         PromptOpenFile | OpenFile(_) | ClearRecent | DismissOverlay | DismissCliStatus
         | FocusPane(_) | FocusPaneByIndex(_) | ResetLayout | ToggleInspector | ToggleFiles
         | ToggleMinimap | InstallCli | ReloadConfig | OpenSettingsFile | OpenKeybindingsFile
-        | OpenThemeFile | OpenConfigDir => true,
+        | OpenThemeFile | OpenConfigDir | OpenFeatureColors | SetActiveTheme(_) => true,
     }
 }
 
@@ -888,26 +892,21 @@ pub fn apply<B: BioOps>(
         OpenSaveAs { view } => file::apply_open_save_as(state, view),
 
         // ── Config ──────────────────────────────────────────────────
-        ReloadConfig => {
-            let epoch = state.config.epoch;
-            let old_shell = state.config.settings.terminal.shell.clone();
-            let (new_cfg, warnings) = crate::config::Config::reload(epoch);
-            let new_shell = new_cfg.settings.terminal.shell.clone();
-            state.config = new_cfg;
-            if warnings.is_empty() {
-                state.toasts.success("Reloaded config");
-            } else {
-                for w in warnings {
-                    state.toasts.warning(w);
-                }
-            }
-            if new_shell != old_shell {
-                state
-                    .toasts
-                    .info("Terminal shell change applies after restart");
+        ReloadConfig => reload_config(state),
+        OpenFeatureColors => {
+            if state.feature_colors.is_none() {
+                state.feature_colors =
+                    Some(crate::feature_colors::FeatureColorsEditor::open(state));
             }
             Ok(None)
         }
+        SetActiveTheme(name) => match crate::config::write::write_active_theme(&name) {
+            Ok(_) => reload_config(state),
+            Err(e) => {
+                state.toasts.error(format!("Switch theme: {e}"));
+                Ok(None)
+            }
+        },
         OpenSettingsFile => open_config_file(
             state,
             crate::config::paths::settings_path(),
@@ -920,10 +919,8 @@ pub fn apply<B: BioOps>(
         ),
         OpenThemeFile => {
             let name = state.config.settings.theme.clone();
-            let template = match name.as_str() {
-                "default-light" => crate::config::defaults::DEFAULT_LIGHT,
-                _ => crate::config::defaults::DEFAULT_DARK,
-            };
+            let template = crate::config::write::embedded_theme(&name)
+                .unwrap_or(crate::config::defaults::DEFAULT_DARK);
             open_config_file(state, crate::config::paths::theme_path(&name), template)
         }
         OpenConfigDir => {
@@ -954,6 +951,28 @@ pub fn apply<B: BioOps>(
             other => execute_and_present(state, bio, other),
         },
     }
+}
+
+/// Re-read settings / theme / keybindings from disk, toasting any warnings.
+fn reload_config(state: &mut AppState) -> Result<Option<ViewerResponse>, DispatchError> {
+    let epoch = state.config.epoch;
+    let old_shell = state.config.settings.terminal.shell.clone();
+    let (new_cfg, warnings) = crate::config::Config::reload(epoch);
+    let new_shell = new_cfg.settings.terminal.shell.clone();
+    state.config = new_cfg;
+    if warnings.is_empty() {
+        state.toasts.success("Reloaded config");
+    } else {
+        for w in warnings {
+            state.toasts.warning(w);
+        }
+    }
+    if new_shell != old_shell {
+        state
+            .toasts
+            .info("Terminal shell change applies after restart");
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

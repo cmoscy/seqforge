@@ -7,6 +7,7 @@ mod clipboard;
 mod command;
 mod config;
 mod event;
+mod feature_colors;
 mod focus;
 mod fragments;
 mod inspector;

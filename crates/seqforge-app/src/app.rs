@@ -138,6 +138,8 @@ pub struct AppState {
     /// file source to a bin, save/load a recipe). Routes the dialog's pick in the
     /// shared handler; cleared on pick or cancel.
     pub(crate) pending_recipe_dialog: Option<crate::command::assembly::RecipeDialog>,
+    /// Settings → Feature Colors… window, while open.
+    pub(crate) feature_colors: Option<crate::feature_colors::FeatureColorsEditor>,
     /// Per-recipe combo checkbox selection for the workbench Run subset.
     /// Absent = default (all join-compatible combos). Cleared on recipe edit/load.
     pub(crate) recipe_combo_selection:
@@ -216,6 +218,7 @@ impl Default for AppState {
             clipboard: crate::clipboard::ClipboardState::default(),
             pending_save_as: None,
             pending_recipe_dialog: None,
+            feature_colors: None,
             recipe_combo_selection: std::collections::HashMap::new(),
             recipe_fidelity: std::collections::HashMap::new(),
             quit_requested: false,
@@ -1652,6 +1655,10 @@ impl eframe::App for SeqForgeApp {
                         menu_cmds.push(AppCommand::OpenKeybindingsFile);
                         ui.close_menu();
                     }
+                    if ui.button("Feature Colors…").clicked() {
+                        menu_cmds.push(AppCommand::OpenFeatureColors);
+                        ui.close_menu();
+                    }
                     if ui.button("Open Theme File…").clicked() {
                         menu_cmds.push(AppCommand::OpenThemeFile);
                         ui.close_menu();
@@ -1829,6 +1836,9 @@ impl eframe::App for SeqForgeApp {
 
         // ── Feature modals (Phase 14) ─────────────────────────────────────────
         self.show_feature_modals(ctx);
+        for c in crate::feature_colors::show(ctx, &mut self.state) {
+            enqueue(&mut self.state, c);
+        }
 
         // ── Dock area ─────────────────────────────────────────────────────────
         let AppState {

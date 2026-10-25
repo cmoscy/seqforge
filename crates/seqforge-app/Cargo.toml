@@ -21,6 +21,7 @@ egui_term = "0.1.0"
 clap.workspace = true
 egui-notify = "0.19"
 toml = "0.8"
+toml_edit = "0.22" # comment-preserving theme/settings writes
 indexmap = { version = "2", features = ["serde"] }
 directories = "5"
 # Direct OS clipboard (text mirror). Do not rely on egui-winit's transitive copy.
