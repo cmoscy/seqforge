@@ -210,7 +210,7 @@ impl Track for FeaturesTrack {
                 painter.rect_stroke(
                     bounds,
                     2.0,
-                    Stroke::new(1.5, Color32::WHITE),
+                    Stroke::new(1.5, ctx.theme.ui.selected_outline.0),
                     egui::StrokeKind::Inside,
                 );
             }

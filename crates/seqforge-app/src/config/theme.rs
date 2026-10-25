@@ -39,6 +39,8 @@ pub struct Theme {
     pub translation: TranslationColors,
     #[serde(default)]
     pub diff: DiffColors,
+    #[serde(default)]
+    pub chrome: ChromeColors,
 }
 
 impl Default for Theme {
@@ -184,6 +186,8 @@ pub struct UiColors {
     pub error: HexColor,
     /// Grey for methylated / blocked enzyme state text.
     pub methyl_blocked: HexColor,
+    /// Outline around the selected feature / primer (canvas and minimap).
+    pub selected_outline: HexColor,
 }
 
 impl Default for UiColors {
@@ -202,6 +206,7 @@ impl Default for UiColors {
             warn: HexColor(Color32::from_rgb(0xE0, 0xA0, 0x30)),
             error: HexColor(Color32::from_rgb(0xE0, 0x60, 0x60)),
             methyl_blocked: HexColor(Color32::GRAY),
+            selected_outline: HexColor(Color32::WHITE),
         }
     }
 }
@@ -221,6 +226,70 @@ impl Default for StrandColors {
             reverse: HexColor(Color32::from_rgba_unmultiplied(0, 190, 255, 110)),
             unknown: HexColor(Color32::from_rgba_unmultiplied(200, 200, 200, 90)),
         }
+    }
+}
+
+/// The app chrome — panels, windows, widget text and separators — as opposed
+/// to the sequence canvas. Mapped onto egui's [`egui::Visuals`] by
+/// [`Theme::visuals`]: `dark` picks egui's stock dark or light base, and each
+/// colour set here overrides it. Unset colours keep the stock value.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChromeColors {
+    pub dark: bool,
+    /// Side/top/bottom panel background.
+    pub panel: Option<HexColor>,
+    /// Floating window and menu background.
+    pub window: Option<HexColor>,
+    /// Deepest background: text fields, scroll troughs.
+    pub extreme: Option<HexColor>,
+    /// Non-interactive text (labels, weak text derives from it).
+    pub text: Option<HexColor>,
+    /// Separators and window outlines.
+    pub stroke: Option<HexColor>,
+}
+
+impl Default for ChromeColors {
+    fn default() -> Self {
+        Self {
+            dark: true,
+            panel: None,
+            window: None,
+            extreme: None,
+            text: None,
+            stroke: None,
+        }
+    }
+}
+
+impl Theme {
+    /// The egui visuals for this theme's chrome.
+    pub fn visuals(&self) -> egui::Visuals {
+        let c = &self.chrome;
+        let mut v = if c.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        if let Some(HexColor(x)) = c.panel {
+            v.panel_fill = x;
+            v.widgets.noninteractive.bg_fill = x;
+            v.widgets.noninteractive.weak_bg_fill = x;
+        }
+        if let Some(HexColor(x)) = c.window {
+            v.window_fill = x;
+        }
+        if let Some(HexColor(x)) = c.extreme {
+            v.extreme_bg_color = x;
+        }
+        if let Some(HexColor(x)) = c.text {
+            v.widgets.noninteractive.fg_stroke.color = x;
+        }
+        if let Some(HexColor(x)) = c.stroke {
+            v.widgets.noninteractive.bg_stroke.color = x;
+            v.window_stroke.color = x;
+        }
+        v
     }
 }
 
@@ -332,6 +401,32 @@ fn parse_hex(s: &str) -> Option<Color32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_maps_onto_egui_visuals() {
+        let dark = Theme::default();
+        let light: Theme = toml::from_str(crate::config::defaults::DEFAULT_LIGHT).unwrap();
+        // The dark theme spells out egui's stock values, so it changes nothing.
+        let (v, stock) = (dark.visuals(), egui::Visuals::dark());
+        assert!(v.dark_mode);
+        assert_eq!(v.panel_fill, stock.panel_fill);
+        assert_eq!(v.extreme_bg_color, stock.extreme_bg_color);
+        assert_eq!(
+            v.widgets.noninteractive.fg_stroke.color,
+            stock.widgets.noninteractive.fg_stroke.color
+        );
+        let v = light.visuals();
+        assert!(!v.dark_mode);
+        assert_eq!(v.panel_fill, Color32::from_gray(248));
+        assert_eq!(
+            v.widgets.noninteractive.fg_stroke.color,
+            Color32::from_gray(80)
+        );
+        // A theme with no [chrome] table keeps today's dark chrome.
+        let bare: Theme = toml::from_str("[bases]\nA = \"#FFFFFF\"\n").unwrap();
+        assert!(bare.visuals().dark_mode);
+    }
+
     #[test]
     fn default_dark_theme_parses() {
         let t = Theme::default();

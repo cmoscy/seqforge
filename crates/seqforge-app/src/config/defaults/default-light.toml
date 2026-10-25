@@ -19,6 +19,7 @@ danger_hover   = "#E06060"     # danger button hover
 warn           = "#E0A030"     # warning indicators
 error          = "#E06060"     # error text
 methyl_blocked = "#808080"     # methylated/blocked enzyme text
+selected_outline = "#141414"   # outline on the selected feature / primer
 
 [diff]
 add_bg   = "#28784B46"
@@ -49,3 +50,13 @@ cursor    = "#000000"
 stop     = "#D24646"
 start    = "#46AF5A"
 orf_wash = "#5AAF6A1A"
+
+# App chrome (panels, windows, widget text). `dark` picks egui's stock dark or
+# light base; each colour overrides it.
+[chrome]
+dark    = false
+panel   = "#F8F8F8"
+window  = "#F8F8F8"
+extreme = "#FFFFFF"   # text fields, scroll troughs
+text    = "#505050"   # labels / non-interactive text
+stroke  = "#BEBEBE"   # separators, window outlines

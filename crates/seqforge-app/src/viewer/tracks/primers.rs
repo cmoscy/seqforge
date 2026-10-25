@@ -166,7 +166,7 @@ fn paint_band(
         // carry identity; the primer's own bases fill the interior. A selected
         // oligo gets a brighter, heavier outline.
         let body_stroke = if is_selected {
-            Stroke::new(2.0, Color32::WHITE)
+            Stroke::new(2.0, ctx.theme.ui.selected_outline.0)
         } else {
             Stroke::new(1.5, body_color)
         };

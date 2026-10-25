@@ -530,7 +530,10 @@ fn paint_circular(
         if let Some(arc) = geom.arcs.iter().find(|a| a.feat_id == sel_idx) {
             let pts: Vec<Pos2> = arc.points.iter().map(|p| rect.min + p.to_vec2()).collect();
             painter.add(Shape::line(pts.clone(), Stroke::new(feat_w, arc.color)));
-            painter.add(Shape::line(pts, Stroke::new(sel_feat_w, Color32::WHITE)));
+            painter.add(Shape::line(
+                pts,
+                Stroke::new(sel_feat_w, theme.ui.selected_outline.0),
+            ));
             if let Some(shape) = arc_arrowhead(arc, arc.strand, offset, arc.color) {
                 painter.add(shape);
             }
@@ -651,7 +654,7 @@ fn paint_linear(
             painter.rect_stroke(
                 r,
                 1.0,
-                Stroke::new(sel_feat_w, Color32::WHITE),
+                Stroke::new(sel_feat_w, theme.ui.selected_outline.0),
                 egui::StrokeKind::Inside,
             );
         }

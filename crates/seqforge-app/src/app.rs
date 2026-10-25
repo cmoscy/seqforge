@@ -311,6 +311,8 @@ fn focus_files_on_click(ui: &egui::Ui, focus: &FocusState, pending: &mut Vec<Pen
 
 pub struct SeqForgeApp {
     state: AppState,
+    /// Config epoch whose chrome visuals are installed in the egui context.
+    visuals_epoch: Option<u64>,
 }
 
 impl SeqForgeApp {
@@ -375,7 +377,10 @@ impl SeqForgeApp {
                 .map_err(|e| eprintln!("[seqforge] terminal init failed: {e}"))
                 .ok();
 
-        Self { state }
+        Self {
+            state,
+            visuals_epoch: None,
+        }
     }
 
     /// Render the Phase 14 feature/translation modal windows (centered egui
@@ -1004,6 +1009,23 @@ impl eframe::App for SeqForgeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── Chrome follows the theme ──────────────────────────────────────────
+        // Installed at startup and again whenever the config epoch moves (Reload
+        // Config, a theme switch, a Feature Colors preview). Pinning egui's theme
+        // also stops it following the OS appearance, which would otherwise pair
+        // light chrome with a dark canvas (or vice versa).
+        if self.visuals_epoch != Some(self.state.config.epoch) {
+            let theme = &self.state.config.theme;
+            let mode = if theme.chrome.dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            };
+            ctx.set_theme(mode);
+            ctx.set_visuals_of(mode, theme.visuals());
+            self.visuals_epoch = Some(self.state.config.epoch);
+        }
+
         // ── Drain events ──────────────────────────────────────────────────────
         // Pull anything emitted by the *previous* frame's `apply()` into the
         // event log so this frame's status bar / panels see fresh data.
